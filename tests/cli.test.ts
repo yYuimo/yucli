@@ -3,14 +3,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { completion, readJson, startServer } from "./helpers.js";
 
-const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { bin: { yucli: string } };
+const sourceCli = fileURLToPath(new URL("../src/bootstrap/cli.ts", import.meta.url));
+const builtCli = fileURLToPath(new URL(`../${packageJson.bin.yucli}`, import.meta.url));
 const tsxPath = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
 const apiKey = "cli-test-secret";
 
-describe("CLI 子进程接线与退出码", () => {
+describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) => {
   let cwd: string;
   let hits: number;
   let captured: unknown;
@@ -39,7 +42,8 @@ describe("CLI 子进程接线与退出码", () => {
 
   async function run(args: string[], overrides: NodeJS.ProcessEnv = {}) {
     // 子进程不继承本机真实模型凭证，始终只使用临时目录与本地服务。
-    const child = spawn(process.execPath, ["--import", tsxPath, cliPath, ...args], {
+    const entry = mode === "source" ? ["--import", tsxPath, sourceCli] : [builtCli];
+    const child = spawn(process.execPath, [...entry, ...args], {
       cwd,
       env: { PATH: process.env.PATH, OPENCODE_GO_API_KEY: apiKey, OPENCODE_GO_BASE_URL: server.baseUrl, ...overrides },
       stdio: ["ignore", "pipe", "pipe"],

@@ -1,6 +1,6 @@
 # 阶段 01：OpenCode Go 单次模型问答
 
-状态：`done`
+状态：`verified`
 
 评审记录：2026-10-17，用户确认本版阶段设计无问题。
 
@@ -324,7 +324,19 @@ OpenCode Go 的 `reasoning_content` 即使存在，也不作为第一阶段的�
 - 只记录请求是否成功、模型标识和输出是否非空，不记录 API 密钥或完整敏感响应。
 - 如果服务端返回“模型需要显式开通/地区选择”等业务错误，保留安全的状态码和错误摘要，并把它作为配置或服务资格问题处理。
 
-## 实际结果
+## 四层结构重新实现（2026-10-17）
+
+按用户重写后的设计重新实现，保持已有 CLI 行为与提供方协议。首版运行记录保留在下方；本次结果独立记录，避免沿用旧测试和真实联调结论。
+
+- [x] 将 Message/LlmRequest/LlmResponse/LlmUsage 放入 `contracts/message.ts`，LlmClient 与稳定错误放入 `contracts/llm-client.ts`。
+- [x] 将应用服务、外部适配和组合根分别迁移到 `core`、`adapters`、`bootstrap`，清除旧结构。
+- [x] HTTP 适配器独立声明自身构造配置，不依赖配置加载器的返回类型。
+- [x] 更新源码与构建产物入口，并清理旧构建产物。
+- [x] 验证四层 import 依赖规则，保留既有协议与错误路径覆盖。
+- [x] 在指定工具链下重新运行类型检查、Lint、测试、构建、CLI 与真实模型联调。
+- [x] 记录结果并提交到阶段分支；停留在阶段分支等待集成授权。
+
+## 实际结果：首版实现记录
 
 2026-10-17，阶段 01 开发与验收完成，由助手实现并运行验证；不等于学习者已独立实现或掌握。
 
@@ -363,3 +375,39 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm <命�
 本阶段验收无遗留阻塞问题。真实验证仅覆盖当前账号、当前端点和该模型的一次成功问答，不代表其他模型或平台均已验证。
 
 下一步先按调用链讲解当前实现，再设计阶段 02 的只读文件工具和最小 Agent Loop。加入持续对话时需重新设计服务路由 ID 与本地会话 ID 的生命周期；不直接沿用逐请求 UUID。
+
+## 本次四层重新实现结果
+
+按用户重写后的四层设计完成开发自验，状态为 `verified`，待项目规划 Agent 审查与用户授权集成。下列结果为本次实际执行，首版记录不作为本次验证依据。
+
+### 实现变更
+
+- `contracts/message.ts` 统一定义 Message、LlmRequest、LlmResponse 和 LlmUsage；`contracts/llm-client.ts` 定义接口和稳定错误。
+- `core/runPrompt.ts` 仅依赖 contracts；模型、配置、输出与退出码行为保持既定契约。
+- 配置和 HTTP 实现位于 adapters；OpenCodeGoClient 独立声明构造参数，解除对配置加载器 RuntimeConfig 类型的依赖。
+- `bootstrap/cli.ts` 负责组合根和 CLI 生命周期；移除旧的 cli/app/llm/config/types/errors 布局，不保留转发入口。
+- `dev` 指向 `src/bootstrap/cli.ts`，`start` 与 `bin.yucli` 指向 `dist/bootstrap/cli.js`。
+- 构建前清理 dist，避免旧入口和旧目录产物残留；测试先构建，再验证实际包入口。
+- 新增架构测试解析源码 import 依赖；contracts/core 禁止依赖外部包，四层禁止反向依赖。原有配置、协议和错误路径测试迁移到新结构，CLI 测试同时覆盖源码与产物。
+- 没有新增依赖，也没有扩展到阶段 02。
+
+### 本次验证
+
+使用 Node 24.14.0、pnpm 10.33.2，命令仍通过上文的 `npm exec` 固定工具链运行。
+
+| 命令或检查 | 本次结果 |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | 通过，锁文件未变 |
+| `pnpm typecheck` | 通过，覆盖源码和测试 |
+| `pnpm lint` | 通过 |
+| `pnpm test` | 4 个测试文件、62 项测试通过，包含 20 项源码/产物 CLI 测试与架构依赖检查 |
+| `pnpm build` | 由 `pnpm test` 实际执行并通过；旧的 `dist/cli.js` 和旧目录产物已清理 |
+| `pnpm start --help`、`pnpm dev --help` | 两个入口均正常退出，帮助内容一致 |
+| 新构建入口真实模型请求 | `deepseek-v4-flash`，退出码 0、stdout 非空、stderr 为空，约 4.18 秒；未记录密钥或完整回答 |
+| 文档与 Git 检查 | 文档链接、围栏、diff 空白、提交文件范围及忽略规则已检查 |
+
+### 审查边界与下一步
+
+本阶段实现范围无阻塞、无待开发项；真实验证仅覆盖当前账号、端点和模型。未进行独立项目规划 Agent 审查，也未合并、推送或创建标签。代码、测试与项目文档提交在 `phase/01-single-model`，集成到 main 由用户批准。
+
+后续先审查四层依赖和端到端行为，再按新目录讲解实现；阶段 02 仍需先设计只读文件工具与 Agent Loop。

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command, CommanderError } from "commander";
-import { runPrompt } from "./app/runPrompt.js";
-import { loadConfig } from "./config/loadConfig.js";
-import { AbortError, ConfigError, RequestError, ResponseError } from "./errors.js";
-import { OpenCodeGoClient } from "./llm/OpenCodeGoClient.js";
+import { runPrompt } from "../core/runPrompt.js";
+import { loadConfig } from "../adapters/config/loadConfig.js";
+import { AbortError, ConfigError, RequestError, ResponseError } from "../contracts/llm-client.js";
+import { OpenCodeGoClient } from "../adapters/opencode-go/OpenCodeGoClient.js";
 
 async function main(): Promise<void> {
   const program = new Command()

@@ -1,4 +1,5 @@
-import type { LlmClient, LlmResponse } from "../llm/types.js";
+import type { LlmClient } from "../contracts/llm-client.js";
+import type { LlmResponse } from "../contracts/message.js";
 
 export function runPrompt(
   client: LlmClient,

@@ -9,15 +9,16 @@
   },
   "packageManager": "pnpm@10.33.2",
   "bin": {
-    "yucli": "dist/cli.js"
+    "yucli": "dist/bootstrap/cli.js"
   },
   "scripts": {
-    "dev": "tsx src/cli.ts",
-    "start": "node dist/cli.js",
+    "dev": "tsx src/bootstrap/cli.ts",
+    "start": "node dist/bootstrap/cli.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "test": "vitest run",
-    "build": "tsc -p tsconfig.build.json"
+    "test": "pnpm build && vitest run",
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true });\"",
+    "build": "pnpm clean && tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "commander": "^15.0.0",

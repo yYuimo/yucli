@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
-import { ConfigError } from "../errors.js";
+import { ConfigError } from "../../contracts/llm-client.js";
 
 export interface RuntimeConfig {
   apiKey: string;

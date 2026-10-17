@@ -2,8 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../src/config/loadConfig.js";
-import { ConfigError } from "../src/errors.js";
+import { loadConfig } from "../src/adapters/config/loadConfig.js";
+import { ConfigError } from "../src/contracts/llm-client.js";
 
 describe("配置加载", () => {
   let cwd: string;

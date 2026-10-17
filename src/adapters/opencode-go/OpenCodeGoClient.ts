@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
-import type { RuntimeConfig } from "../config/loadConfig.js";
-import { AbortError, RequestError, ResponseError } from "../errors.js";
-import type { LlmClient, LlmRequest, LlmResponse, LlmUsage } from "./types.js";
+import { AbortError, RequestError, ResponseError } from "../../contracts/llm-client.js";
+import type { LlmClient } from "../../contracts/llm-client.js";
+import type { LlmRequest, LlmResponse, LlmUsage } from "../../contracts/message.js";
+
+export interface OpenCodeGoClientOptions {
+  apiKey: string;
+  baseUrl: string;
+  timeoutMs: number;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -66,7 +72,7 @@ async function readErrorSummary(response: Response, apiKey: string): Promise<str
 }
 
 export class OpenCodeGoClient implements LlmClient {
-  constructor(private readonly config: Pick<RuntimeConfig, "apiKey" | "baseUrl" | "timeoutMs">) {}
+  constructor(private readonly config: OpenCodeGoClientOptions) {}
 
   async complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse> {
     const controller = new AbortController();

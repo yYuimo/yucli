@@ -6,13 +6,14 @@
 
 - [初始架构与开发路线](architecture.md)
 - [阶段驱动开发规范](development-workflow.md)
+- [阶段 01：单次模型问答与四层实现结果](specs/phase-01-single-model.md)
 - [接口与契约规范](contracts/README.md)
   - [LlmClient 契约](contracts/llm-client.md)
   - [CLI 行为契约](contracts/cli.md)
 - [架构决策记录规范](decisions/README.md)
   - [ADR-001：OpenCode Go 与原生 fetch](decisions/ADR-001-opencode-go-native-fetch.md)
-- [Agent 开发报告模板](templates/development-report.md)
   - [ADR-002：OpenCode Go 会话路由头](decisions/ADR-002-opencode-session-routing.md)
+- [Agent 开发报告模板](templates/development-report.md)
 
 ## 目录约定
 

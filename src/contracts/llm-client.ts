@@ -1,3 +1,9 @@
+import type { LlmRequest, LlmResponse } from "./message.js";
+
+export interface LlmClient {
+  complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse>;
+}
+
 export class ConfigError extends Error {
   override name = "ConfigError";
 }

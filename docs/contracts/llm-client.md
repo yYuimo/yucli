@@ -43,6 +43,8 @@ export interface LlmClient {
 
 阶段 01 不在公共接口中暴露工具调用、流式 chunk、提供方专属字段或原始 HTTP 响应。
 
+代码位置：数据结构在 `src/contracts/message.ts`，`LlmClient` 与稳定错误在 `src/contracts/llm-client.ts`。`core/runPrompt.ts` 只依赖这两个契约模块；`adapters/opencode-go/OpenCodeGoClient.ts` 实现接口，并自行声明构造参数类型，不依赖配置加载器。
+
 ## 调用约定
 
 - `messages` 保持调用方给出的顺序。

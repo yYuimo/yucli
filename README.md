@@ -21,7 +21,7 @@ pnpm dev --prompt "你好"
 
 ```bash
 pnpm build
-node dist/cli.js --prompt "你好"
+node dist/bootstrap/cli.js --prompt "你好"
 ```
 
 进程环境变量优先于当前工作目录 `.env`，不向父目录查找配置。端点、模型与请求超时的默认值见 [.env.example](.env.example)。成功回答写入 stdout；错误写入 stderr，退出码为参数错误 2、配置错误 3、模型错误 4、未预期错误 1。阶段 01 暂不支持持续对话或工具调用。
@@ -41,7 +41,11 @@ pnpm test
 pnpm build
 ```
 
-测试只访问本地 mock HTTP 服务，不读取真实 `.env` 或调用付费模型。真实模型联调单独手动执行，结果见 [阶段 01](docs/specs/phase-01-single-model.md)。
+`pnpm test` 会先清理并构建产物，再检查四层依赖方向、HTTP 协议和源码/产物两条 CLI 路径。测试只访问本地 mock HTTP 服务，不读取真实 `.env` 或调用付费模型。真实模型联调单独手动执行，结果见 [阶段 01](docs/specs/phase-01-single-model.md)。
+
+## 代码结构
+
+单个 npm 包内分为四层：`contracts` 定义消息、接口和错误，`core` 实现应用流程，`adapters` 对接配置与 HTTP，`bootstrap` 负责 CLI 组装。`core` 只依赖 `contracts`；依赖方向由测试检查，具体边界见 [架构文档](docs/architecture.md)。
 
 ## 设计原则
 

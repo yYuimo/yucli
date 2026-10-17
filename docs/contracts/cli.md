@@ -8,6 +8,8 @@
 
 阶段 01 是一次性命令：每次进程只处理一个 prompt。请求成功或失败后，进程都会结束；持续输入和多轮对话属于后续阶段。
 
+组合根为 `src/bootstrap/cli.ts`，构建入口为 `dist/bootstrap/cli.js`。`package.json` 中 `dev`、`start` 和 `bin.yucli` 与这两个入口一致；`bootstrap` 负责创建具体 adapter 并传入 core。
+
 ```text
 yucli --prompt <text>
 yucli --help

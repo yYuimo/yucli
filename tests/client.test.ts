@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OpenCodeGoClient } from "../src/llm/OpenCodeGoClient.js";
-import { runPrompt } from "../src/app/runPrompt.js";
-import { AbortError, RequestError, ResponseError } from "../src/errors.js";
+import { OpenCodeGoClient } from "../src/adapters/opencode-go/OpenCodeGoClient.js";
+import { runPrompt } from "../src/core/runPrompt.js";
+import { AbortError, RequestError, ResponseError } from "../src/contracts/llm-client.js";
 import { completion, readJson, startServer } from "./helpers.js";
 
 const apiKey = "test-secret-key-123456";

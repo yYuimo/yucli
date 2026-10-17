@@ -1,4 +1,9 @@
-import type { Message } from "../types/message.js";
+export type MessageRole = "system" | "user" | "assistant";
+
+export interface Message {
+  role: MessageRole;
+  content: string;
+}
 
 export interface LlmRequest {
   model: string;
@@ -13,8 +18,4 @@ export interface LlmUsage {
 export interface LlmResponse {
   message: { role: "assistant"; content: string };
   usage?: LlmUsage;
-}
-
-export interface LlmClient {
-  complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse>;
 }
