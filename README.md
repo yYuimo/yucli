@@ -47,6 +47,17 @@ pnpm build
 
 单个 npm 包内分为四层：`contracts` 定义消息、接口和错误，`core` 实现应用流程，`adapters` 对接配置与 HTTP，`bootstrap` 负责 CLI 组装。`core` 只依赖 `contracts`；依赖方向由测试检查，具体边界见 [架构文档](docs/architecture.md)。
 
+阶段 01 源码已补充面向 TypeScript 学习者的中文注释，建议按以下顺序阅读：
+
+1. [消息类型](src/contracts/message.ts)：先认识模型调用的输入和输出。
+2. [客户端接口与错误](src/contracts/llm-client.ts)：理解 Promise 返回值和错误分类。
+3. [单次提问流程](src/core/runPrompt.ts)：看用户输入怎样成为消息。
+4. [CLI 入口](src/bootstrap/cli.ts)：追踪参数解析、对象创建、调用和输出。
+5. [配置加载](src/adapters/config/loadConfig.ts)：理解可选值、默认值和运行时校验。
+6. [HTTP 客户端](src/adapters/opencode-go/OpenCodeGoClient.ts)：最后阅读网络、响应类型守卫、超时、取消和资源清理。
+
+后续代码的注释标准见 [协作规范](AGENTS.md#面向学习者的代码注释)。
+
 ## 设计原则
 
 - 先做可以追踪输入、输出和状态变化的小功能，再增加抽象。

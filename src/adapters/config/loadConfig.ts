@@ -1,7 +1,9 @@
 import { resolve } from "node:path";
+// as 在 import 中是重命名：避免 config 函数名与本项目配置对象混淆。
 import { config as loadDotenv } from "dotenv";
 import { ConfigError } from "../../contracts/llm-client.js";
 
+/** adapters 层读取并校验后的配置，由 bootstrap 传给模型客户端。 */
 export interface RuntimeConfig {
   apiKey: string;
   baseUrl: string;
@@ -10,32 +12,43 @@ export interface RuntimeConfig {
 }
 
 interface ConfigOptions {
+  // 测试可传临时目录和独立环境变量；CLI 不传时使用当前进程的值。
   cwd?: string;
   env?: NodeJS.ProcessEnv;
 }
 
-// 只读取启动目录的 .env，已有环境变量（包括空字符串）优先。
+/** 同步加载配置；配置不合法时抛 ConfigError，调用方还没有发起网络请求。 */
 export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
+  // = {} 允许调用 loadConfig()；?? 只在左侧为 null/undefined 时取右侧。
+  // ... 浅拷贝环境变量，让 dotenv 写入副本，不修改全局 process.env。
   const env = { ...(options.env ?? process.env) };
   const result = loadDotenv({
+    // 只读启动目录的 .env，不向父目录搜索；进程环境变量包括空值都优先。
     path: resolve(options.cwd ?? process.cwd(), ".env"),
     processEnv: env,
     override: false,
     quiet: true,
   });
+  // 没有 .env（ENOENT）可以继续使用环境变量；其他文件读取错误必须报告。
+  // as 是类型断言，只帮助编译器访问 code，不会转换异常或执行格式校验。
   if (result.error && (result.error as NodeJS.ErrnoException).code !== "ENOENT") {
     throw new ConfigError("无法读取当前工作目录的 .env。");
   }
 
+  // ?. 可选链：变量不存在时返回 undefined，不调用 trim；存在时去掉两端空白。
+  // !apiKey 同时拒绝 undefined 和空字符串，因此必填项不能使用空白值。
   const apiKey = env.OPENCODE_GO_API_KEY?.trim();
   if (!apiKey) throw new ConfigError("缺少 OPENCODE_GO_API_KEY。");
+  // 正则中的 [^...] 表示排除集合：拒绝空格、换行、非 ASCII 等头部非法内容。
   if (/[^\x21-\x7e]/u.test(apiKey)) {
     throw new ConfigError("OPENCODE_GO_API_KEY 必须是可用于 HTTP 请求头的可见 ASCII 字符。");
   }
 
+  // || 与 ?? 不同：空字符串也会采用默认值。可选配置允许以空白表示默认。
   const baseUrl = env.OPENCODE_GO_BASE_URL?.trim() || "https://opencode.ai/zen/go/v1";
   let url: URL;
   try {
+    // new URL 做语法解析，后续 if 再检查本项目允许的协议和 URL 组成。
     url = new URL(baseUrl);
   } catch {
     throw new ConfigError("OPENCODE_GO_BASE_URL 必须是有效的 HTTP(S) URL。");
@@ -47,6 +60,8 @@ export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
     throw new ConfigError("OPENCODE_GO_BASE_URL 只支持无凭证、查询参数和片段的 HTTP(S) URL。");
   }
 
+  // 环境变量始终是字符串，转成数字前后都要检查，避免接受小数、NaN 或科学记数法。
+  // 上限来自 Node 定时器范围，超出范围会影响超时行为。
   const timeoutText = env.YUCLI_REQUEST_TIMEOUT_MS?.trim() || "120000";
   const timeoutMs = Number(timeoutText);
   if (!/^\d+$/u.test(timeoutText) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) {
@@ -54,7 +69,9 @@ export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
   }
 
   return {
+    // 对象属性简写 apiKey 等价于 apiKey: apiKey。
     apiKey,
+    // 去掉末尾一个或多个 /，客户端再统一追加 /chat/completions。
     baseUrl: url.href.replace(/\/+$/u, ""),
     model: env.OPENCODE_GO_MODEL?.trim() || "deepseek-v4-flash",
     timeoutMs,
