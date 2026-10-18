@@ -2,8 +2,16 @@ import type { LlmClient } from "../contracts/llm-client.js";
 import type { LlmResponse } from "../contracts/message.js";
 
 /**
- * core 层的一次提问流程，由 bootstrap 注入客户端和配置中的模型名。
- * 这里只构造领域消息，不读取环境变量，也不处理 HTTP、打印或退出进程。
+ * 把用户的一句话包装成模型请求，调用一次客户端，并把回答交回 CLI。
+ * CLI 在参数和配置检查通过后调用它；这是 core 层的单次问答入口。
+ * 本阶段请求只有一条 user 消息，不保留历史，也不在这里输出回答。
+ *
+ * @param client 由 CLI 创建并注入的客户端；本函数只要求它具有 complete 能力。
+ * @param model 本次使用的模型标识，来自配置。
+ * @param prompt 用户输入原文，CLI 已确认它不是空白文本。
+ * @param signal 可选取消信号，原样传给客户端。
+ * @returns 客户端的 Promise；成功后得到 assistant 文本及可选 token 用量。
+ * 客户端失败时，返回的 Promise 保留其拒绝原因，交给 CLI 捕获。
  */
 export function runPrompt(
   client: LlmClient,

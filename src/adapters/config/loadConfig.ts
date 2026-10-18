@@ -17,7 +17,18 @@ interface ConfigOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-/** 同步加载配置；配置不合法时抛 ConfigError，调用方还没有发起网络请求。 */
+/**
+ * 读取一次命令所需的模型配置，补齐默认值，并在请求前拒绝非法配置。
+ * CLI 在参数检查通过后调用它，用返回结果创建客户端和选择模型。
+ * 执行顺序：复制环境变量 → 读取当前目录 .env → 校验密钥、端点和超时 → 返回配置。
+ * 进程环境变量优先于 .env；缺少 .env 本身不是错误。
+ *
+ * @param options 可覆盖读取目录 cwd 和环境变量 env，供测试隔离配置来源；
+ * 不传时使用当前工作目录和 process.env。
+ * @returns 可直接供 CLI 使用的 apiKey、baseUrl、model、timeoutMs。
+ * @throws ConfigError 文件读取失败（除文件不存在外），或配置值不合法时抛出。
+ * 只读取文件和环境变量，不修改全局 process.env，不发网络请求。
+ */
 export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
   // = {} 允许调用 loadConfig()；?? 只在左侧为 null/undefined 时取右侧。
   // ... 浅拷贝环境变量，让 dotenv 写入副本，不修改全局 process.env。

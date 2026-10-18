@@ -7,7 +7,16 @@ import { loadConfig } from "../adapters/config/loadConfig.js";
 import { AbortError, ConfigError, RequestError, ResponseError } from "../contracts/llm-client.js";
 import { OpenCodeGoClient } from "../adapters/opencode-go/OpenCodeGoClient.js";
 
-/** 一次 CLI 命令的完整生命周期；模型业务通过 runPrompt 执行。 */
+/**
+ * 执行一次终端问答：读取 --prompt、加载配置、创建客户端、调用模型并输出结果。
+ * 文件末尾的 await main() 是唯一启动调用；命令行输入来自 process.argv，无函数参数。
+ * --help/--version 输出后结束，参数不合法时不加载配置，也不请求模型。
+ *
+ * @returns Promise<void>，表示本次 CLI 工作结束；回答直接写到 stdout，不作为返回值。
+ * 预期失败在本函数内捕获：错误写入 stderr，并设置退出码
+ * 2（参数）、3（配置）、4（模型）；未分类错误设置为 1。正常情况退出码为 0。
+ * 本函数会间接读取 .env 并发起模型请求，但不会保存消息历史或直接强制退出进程。
+ */
 async function main(): Promise<void> {
   // 链式调用：Commander 的配置方法返回命令对象，可以继续调用下一个方法。
   const program = new Command()

@@ -16,6 +16,12 @@ export interface OpenCodeGoClientOptions {
 }
 
 /**
+ * 判断一份尚未验证的数据能否作为普通对象继续检查属性。
+ * parseResponse 在读取 JSON 的 choices、message、usage 前调用它，避免访问 null 等值。
+ *
+ * @param value 任意待检查值，可以是服务端返回的任意 JSON 数据。
+ * @returns 非 null、非数组对象时为 true，其余为 false；不修改数据、不检查业务字段。
+ *
  * unknown 表示“尚不知道是什么”，访问属性前必须检查。
  * value is Record<string, unknown> 是类型谓词：函数返回 true 后，
  * TS 才允许将 value 当作字符串键的对象使用；属性值仍是 unknown。
@@ -25,7 +31,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** 对外部 JSON 做运行时校验，挑出契约字段，丢弃 reasoning 等提供方字段。 */
+/**
+ * 把服务端 JSON 转换为 yucli 的 LlmResponse，确保上层拿到可用的模型回答。
+ * complete 在 HTTP 成功且 JSON 语法解析成功后调用它。
+ * 先检查 choices[0].message 是非空 assistant 文本，再校验并映射可选的 token 用量。
+ *
+ * @param value JSON.parse 得到的未验证数据；标为 unknown 强制逐项检查。
+ * @returns 新的领域响应对象，保留回答原文，只提取约定字段，不返回 reasoning 或原始 JSON。
+ * @throws ResponseError 必需字段缺失、类型错误、回答空白或用量非法时抛出。
+ * 本函数不修改输入、不发请求、不输出日志。
+ */
 function parseResponse(value: unknown): LlmResponse {
   // 三元表达式“条件 ? 真时的值 : 假时的值”；先检查对象和数组，才尝试取第一项。
   // as unknown 不验证元素内容，只阻止后续代码未经检查就访问它的属性。
@@ -58,8 +73,15 @@ function parseResponse(value: unknown): LlmResponse {
 }
 
 /**
- * 失败响应只保留有界诊断：按字节读取 → 脱敏 → 去控制字符 → 再限制字节数。
+ * 从失败的 HTTP 响应中提取可展示的短摘要，帮助用户诊断服务端拒绝请求的原因。
+ * complete 收到非 2xx 响应后调用它，并将结果放入 RequestError。
+ * 按字节读取最多 512 字节，替换已知密钥和认证头文本、去除控制字符，再限制输出长度。
  * byte 与字符数量不同，例如 UTF-8 的一个汉字通常占 3 字节。
+ *
+ * @param response 待读取的失败响应；它的 body 会被消费，不能再完整读取第二遍。
+ * @param apiKey 本次认证密钥，仅用来匹配并遮盖错误体中可能回显的内容。
+ * @returns Promise<string>，成功得到最多 512 字节的摘要；没有 body 时为空字符串。
+ * 读取失败会使 Promise 拒绝，由 complete 转成请求错误；finally 会取消剩余读取并释放锁。
  */
 async function readErrorSummary(response: Response, apiKey: string): Promise<string> {
   if (!response.body) return "";
@@ -102,10 +124,31 @@ async function readErrorSummary(response: Response, apiKey: string): Promise<str
 
 /** implements 在编译期检查接口；实际网络行为由下面的方法实现。 */
 export class OpenCodeGoClient implements LlmClient {
+  /**
+   * 保存连接参数，创建一个供 runPrompt 使用的 OpenCode Go 客户端。
+   * CLI 在 loadConfig 校验成功后调用 new OpenCodeGoClient(config)。
+   *
+   * @param config 密钥、API 基地址和单次请求超时；由调用方提供已校验的值。
+   * 构造完成得到客户端实例，此时尚不发请求、不启动定时器，也不创建持久会话。
+   */
   // 参数属性：把传入的 config 保存为私有字段 this.config；readonly 禁止重绑该字段，
   // 不意味着 config 内部属性被深度冻结。每次请求的可变状态放在 complete 内。
   constructor(private readonly config: OpenCodeGoClientOptions) {}
 
+  /**
+   * 将一次模型请求发给 OpenCode Go，读取并校验响应，返回统一的回答对象。
+   * core/runPrompt 通过 LlmClient 接口调用它；HTTP 细节都在本方法内处理。
+   * 执行顺序：建立超时/取消控制 → POST 消息 → 检查状态 → 读取并解析响应 → 清理资源。
+   *
+   * @param request 模型标识和有序消息；序列化时添加 stream:false，不修改调用方对象。
+   * @param signal 可选的调用方取消信号，与内部超时合并；已取消时不成功返回回答。
+   * @returns Promise<LlmResponse>，成功得到非空 assistant 文本与可选 token 用量。
+   * @throws RequestError 网络失败、超时或 HTTP 非 2xx；通过拒绝 Promise 传递。
+   * @throws ResponseError 响应不是有效 JSON 或不符合回答结构。
+   * @throws AbortError 调用方取消请求；与超时按先触发者确定原因。
+   * 每次调用产生独立路由 UUID 和控制器，超时覆盖响应体读取；
+   * 成功或失败均清理定时器及监听器，不在此处打印或保存回答。
+   */
   async complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse> {
     // 外部 signal 与超时共用一个内部控制器，底层 fetch 只接收这个内部 signal。
     // AbortController 是发出取消的对象，signal 是观察取消状态的对象。
@@ -113,11 +156,17 @@ export class OpenCodeGoClient implements LlmClient {
     let abortKind: "timeout" | "caller" | undefined;
     // 箭头函数形成闭包，访问本次 complete 的 controller 和 abortKind。
     // 若已取消就直接返回，保留首次触发原因，避免超时/调用方相互覆盖。
+    /**
+     * 停止本次 HTTP 操作并记住原因，供下方 catch 将底层异常转成正确的业务错误。
+     * 超时回调和 onAbort 调用它；kind 是 timeout 或 caller。
+     * 不返回结果；第一次调用会取消内部 signal，后续调用直接跳过。
+     */
     const abort = (kind: "timeout" | "caller") => {
       if (controller.signal.aborted) return;
       abortKind = kind;
       controller.abort();
     };
+    /** 将外部取消事件转成 abort("caller")；也用于处理传入时就已取消的 signal。 */
     const onAbort = () => abort("caller");
     // 传的是函数引用，不是 onAbort() 的调用结果；事件发生时才执行回调。
     // ?. 表示未传 signal 就跳过监听，once 表示监听最多触发一次。
