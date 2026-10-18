@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+
 // as 在 import 中是重命名：避免 config 函数名与本项目配置对象混淆。
 import { config as loadDotenv } from "dotenv";
 import { ConfigError } from "../../contracts/llm-client.js";
@@ -40,6 +41,7 @@ export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
     override: false,
     quiet: true,
   });
+
   // 没有 .env（ENOENT）可以继续使用环境变量；其他文件读取错误必须报告。
   // as 是类型断言，只帮助编译器访问 code，不会转换异常或执行格式校验。
   if (result.error && (result.error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -50,6 +52,7 @@ export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
   // !apiKey 同时拒绝 undefined 和空字符串，因此必填项不能使用空白值。
   const apiKey = env.OPENCODE_GO_API_KEY?.trim();
   if (!apiKey) throw new ConfigError("缺少 OPENCODE_GO_API_KEY。");
+
   // 正则中的 [^...] 表示排除集合：拒绝空格、换行、非 ASCII 等头部非法内容。
   if (/[^\x21-\x7e]/u.test(apiKey)) {
     throw new ConfigError("OPENCODE_GO_API_KEY 必须是可用于 HTTP 请求头的可见 ASCII 字符。");
@@ -75,13 +78,20 @@ export function loadConfig(options: ConfigOptions = {}): RuntimeConfig {
   // 上限来自 Node 定时器范围，超出范围会影响超时行为。
   const timeoutText = env.YUCLI_REQUEST_TIMEOUT_MS?.trim() || "120000";
   const timeoutMs = Number(timeoutText);
-  if (!/^\d+$/u.test(timeoutText) || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2_147_483_647) {
+
+  if (
+    !/^\d+$/u.test(timeoutText) ||
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > 2_147_483_647
+  ) {
     throw new ConfigError("YUCLI_REQUEST_TIMEOUT_MS 必须是 1 至 2147483647 的整数毫秒数。");
   }
 
   return {
     // 对象属性简写 apiKey 等价于 apiKey: apiKey。
     apiKey,
+
     // 去掉末尾一个或多个 /，客户端再统一追加 /chat/completions。
     baseUrl: url.href.replace(/\/+$/u, ""),
     model: env.OPENCODE_GO_MODEL?.trim() || "deepseek-v4-flash",

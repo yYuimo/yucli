@@ -25,8 +25,10 @@ async function main(): Promise<void> {
     .description("单次模型问答；当前阶段不支持交互 REPL。配置来自当前目录 .env 或进程环境变量。")
     .requiredOption("--prompt <text>", "发送一次问题并输出模型回答")
     .allowExcessArguments(false)
+
     // Commander 默认可能直接结束进程；改为抛 CommanderError，由下方统一处理。
     .exitOverride()
+
     // 禁止 Commander 自动重复打印错误，下方 catch 负责输出错误和用法。
     .configureOutput({ outputError: () => undefined });
   program.addHelpText("before", `${program.name()} ${program.version()}`);
@@ -34,18 +36,23 @@ async function main(): Promise<void> {
   try {
     // parse 会先检查参数；--help/--version 也在这里处理，不要求模型配置存在。
     program.parse(process.argv);
+
     // <{ prompt: string }> 是泛型参数，只声明 opts() 的结果形状；
     // 必填参数的运行时检查由 Commander 执行。{ prompt } 从对象中取出同名字段。
     const { prompt } = program.opts<{ prompt: string }>();
+
     if (!prompt.trim()) {
       // trim 只用于判断是否空白；实际发送时仍使用用户原文 prompt。
       process.stderr.write("参数错误：--prompt 不能是空白文本。\n");
       process.exitCode = 2;
       return;
     }
+
     const config = loadConfig();
+
     // 先创建客户端，再传入 core。await 等待 Promise 完成，失败会进入本层 catch。
     const result = await runPrompt(new OpenCodeGoClient(config), config.model, prompt);
+
     process.stdout.write(`${result.message.content}\n`);
   } catch (error) {
     // catch 的 error 是 unknown；instanceof 在运行时判断并收窄它的 TS 类型。
@@ -58,7 +65,11 @@ async function main(): Promise<void> {
     } else if (error instanceof ConfigError) {
       process.stderr.write(`配置错误：${error.message}\n`);
       process.exitCode = 3;
-    } else if (error instanceof RequestError || error instanceof ResponseError || error instanceof AbortError) {
+    } else if (
+      error instanceof RequestError ||
+      error instanceof ResponseError ||
+      error instanceof AbortError
+    ) {
       process.stderr.write(`${error.message}\n`);
       process.exitCode = 4;
     } else {
@@ -67,6 +78,7 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     }
   }
+
   // 设置 exitCode 让 Node 在没有待处理任务时自然退出，不用 process.exit 强制截断输出。
 }
 
