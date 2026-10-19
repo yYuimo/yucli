@@ -16,7 +16,7 @@
 | EOF | 结束 REPL | 0 |
 | 等待输入时 Ctrl+C | 结束 REPL | 130 |
 
-`--prompt <text>` 保留单次模式，不进入 REPL；请求错误、超时、协议错误和主动取消返回阶段 01/02 的模型错误退出码 `4`。
+`--prompt <text>` 保留单次模式，阶段 03 使用 `stream()` 而不是非流式 `complete()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径。请求错误、超时、协议错误和主动取消返回阶段 01/02 的模型错误退出码 `4`。
 
 ## 历史所有权
 
@@ -50,6 +50,6 @@ interface StreamTurnResult {
 
 - 正在流式请求/工具执行时 Ctrl+C：取消当前 turn，清理资源，丢弃未完成消息，回到 REPL 提示符。
 - 等待输入时 Ctrl+C：退出进程，返回 130。
-- `/clear` 只能清空已完成历史，不中断正在执行的 turn；用户需要 Ctrl+C 取消。
+- turn 执行中不处理新的输入；需要中断当前 turn 时使用 Ctrl+C。`/clear` 只在提示符可用时清空全部已完成内存历史。
 
 关联文档：[阶段 03 规格](../specs/phase-03-repl-streaming.md)、[CLI 契约](cli.md)。

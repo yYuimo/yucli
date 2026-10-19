@@ -101,7 +101,7 @@ export type LlmStreamEvent =
       name?: string;
       argumentsDelta?: string;
     }
-  | { type: "message_end"; finishReason?: string; usage?: LlmUsage }
+  | { type: "message_end"; finishReason?: string }
   | { type: "usage"; usage: LlmUsage };
 ```
 

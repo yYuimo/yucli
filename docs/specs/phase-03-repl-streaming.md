@@ -38,7 +38,7 @@ yucli> /exit
 - OpenCode Go `stream: true` 请求和 OpenAI 兼容 SSE 解析。
 - provider-neutral 的流式事件模型：文本 delta、工具调用 delta、message end、usage。
 - 按工具调用 index/ID 保存独立拼装状态，支持交错调用和参数跨 chunk 拼接。
-- 流结束后的工具调用完整校验，沿用阶段 02 的全有或全无、每批最多 4 个、每次命令最多 8 次模型调用。
+- 流结束后的工具调用完整校验，沿用阶段 02 的全有或全无、每批最多 4 个、每个 turn 最多 8 次模型调用。
 - 流式文本的朴素 stdout 渲染，以及最终消息历史的提交边界。
 - REPL 中当前轮次的取消、超时、连接中断和恢复输入提示。
 - 本地 mock SSE 测试、CLI 子进程测试和一次真实多轮流式工具联调。
@@ -85,7 +85,7 @@ yucli> /exit
 **那么**：
 
 - 每个工具调用按 index/ID 单独拼装，不能使用一个全局参数字符串。
-- 在合法 message end 之前不执行工具；`[DONE]` 只确认传输结束，不能替代 message end。
+- 在合法 message end 之前不执行工具；`[DONE]` 只确认可选的传输结束，不能替代 message end。
 - 所有调用的 ID、名称、参数 JSON 和 `read_file` 参数结构都通过校验后，才按顺序执行整批工具。
 - 工具结果加入历史后发起下一次流式模型请求。
 - 最终文本继续按 delta 输出，并在完成后提交最终 assistant 消息。
@@ -128,7 +128,7 @@ bootstrap/cli
 | 当前 turn 的临时 assistant/tool 拼装 | `runTurnStream` 和 assembler | 当前模型响应，成功结束后提交 |
 | 文本 delta 渲染 | bootstrap 的简单输出函数 | 当前流；不反向修改历史 |
 | SSE reader、decoder、定时器 | OpenCode adapter | 单次 `stream()` 调用，finally 清理 |
-| 工具调用预算 | AgentLoop/runTurn | 当前进程命令，沿用阶段 02 上限 |
+| 工具调用预算 | AgentLoop/runTurn | 当前 turn，沿用阶段 02 上限 |
 
 REPL 拥有跨轮历史；core 每次接收历史快照和一个 prompt，不把历史放进全局变量。推荐最多保留最近 `20` 个已完成 user turn；超出时丢弃最旧的完整 turn，不截断一个 assistant/tool 组。这个朴素上限只防止无限增长，不做 token 预算或语义压缩。
 
@@ -159,14 +159,13 @@ type LlmStreamEvent =
   | {
       type: "message_end";
       finishReason?: string;
-      usage?: LlmUsage;
     }
   | { type: "usage"; usage: LlmUsage };
 ```
 
-推荐让网络、SSE、协议和取消失败通过 async generator 抛出稳定错误，而不是伪装成正常事件。`message_end` 是逻辑消息收尾；`[DONE]` 是传输层结束标记，adapter 不能只收到 `[DONE]` 就假定消息合法。
+推荐让网络、SSE、协议和取消失败通过 async generator 抛出稳定错误，而不是伪装成正常事件。`message_end` 是逻辑消息收尾并决定业务成功；`[DONE]` 是可选的传输层结束标记，adapter 不能只收到 `[DONE]` 就假定消息合法。
 
-阶段 03 扩展状态为 `draft`，`complete()` 和阶段 01/02 的无工具请求保持兼容。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
+阶段 03 扩展状态为 `draft`，`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
 
 ### 流式工具调用状态
 
@@ -182,9 +181,12 @@ interface StreamTurnResult {
   finalText: string;
   modelCalls: number;
   toolResults: readonly ToolResult[];
+  appendedMessages: readonly Message[];
   stopKind: "final_text";
 }
 ```
+
+`StreamTurnResult` 的规范定义见 [REPL 契约](../contracts/repl.md)；`appendedMessages` 是 REPL 提交历史所需的完整 user/assistant/tool 消息组。
 
 assembler 使用 `Map<number, ToolCallAssembly>` 保存每个 index 的独立状态：
 
@@ -215,7 +217,7 @@ EOF             结束进程，退出码 0
 
 ### 2. SSE 和工具拼装的收尾
 
-推荐由 adapter 负责字节到 `LlmStreamEvent` 的 SSE 转换，由 core assembler 负责按 index 拼装。`finish_reason: "length"`、缺少 message end、`[DONE]` 前连接中断、非法 JSON、缺 ID/名称/参数和批次超限都直接失败，不执行工具。流式文本可以已经显示，但不进入历史。
+推荐由 adapter 负责字节到 `LlmStreamEvent` 的 SSE 转换，由 core assembler 负责按 index 拼装。`finish_reason: "length"`、缺少 message end、`[DONE]` 前连接中断、非法 JSON、缺 ID/名称/参数和批次超限都直接失败，不执行工具。message end 到达且没有工具调用时，最终文本仍必须是非空白；空文本加无工具调用是 `ResponseError`。message end 成功后即使服务随后没有发送 `[DONE]`，也按成功处理。流式文本可以已经显示，但不进入历史。
 
 ### 3. REPL 历史和上下文上限
 
@@ -269,13 +271,17 @@ pnpm dev --prompt "请读取 README.md 并总结"
 
 - 文本 delta 顺序、跨 HTTP chunk 的 SSE 事件和跨 chunk 的半截 UTF-8。
 - `\n\n`/CRLF 事件边界、注释心跳、多行 data、JSON 错误和 `[DONE]`。
+- usage 始终作为独立 `usage` 事件；`message_end` 只携带 `finishReason`，重复等值 usage 不重复发出。
 - 缺少 message end、`finish_reason: "length"`、连接中断和响应体读取超时。
+- message end 到达后流直接关闭也算成功；只有 `[DONE]` 而没有 message end 算协议错误。
+- message end 无工具调用时，空白最终文本触发 `ResponseError`。
 - 两个或多个工具调用按 index 交错，参数独立拼装，不发生单变量串线。
 - 半截参数、缺 ID/名称、重复 ID、批次超过 4 个和任一非法调用时整批不执行。
 - 流式工具成功后下一轮历史包含完整 assistant/tool 消息，最终文本按 delta 输出。
 - active-stream Ctrl+C 取消当前轮并回到 REPL；idle-input Ctrl+C 退出 130；单次模式取消退出 4。
 - `/clear`、`/help`、`/exit`、`/quit`、EOF、空行和 20 turn 历史裁剪。
 - 阶段 01/02 的 `--prompt`、无工具 complete、退出码和 `tools` 省略行为不回归。
+- 阶段 01/02 的 `complete()` wire 测试继续断言 `stream:false`；阶段 03 的 `--prompt`/REPL 另断言 `stream:true`。
 - CLI 子进程 stdout 只含文本和提示，stderr 只含安全状态，不包含密钥、原始 SSE 或参数 JSON。
 
 真实联调不把模型回答文本写进断言，只记录请求次数、事件类型、工具 ID 配对、finish reason、退出状态和是否出现错误。
