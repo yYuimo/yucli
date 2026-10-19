@@ -1,10 +1,12 @@
 # 阶段 03：持续对话与流式输出
 
-状态：`proposed`
+状态：`designed`
+
+设计评审：2026-10-19，用户确认七项推荐选择；允许进入实现准备，尚未开始代码开发。
 
 阶段 03 建立在阶段 02 的单次工具循环之上，把一次命令扩展为同一进程内的 REPL，并把 OpenCode Go 的非流式请求扩展为 SSE 流式请求。历史只存在内存；会话持久化、恢复和上下文压缩留到阶段 04 及以后。
 
-本文件已经为实现前的高影响选择给出推荐方案。实现开始前应将阶段状态改为 `designed`，同步接受相关契约和 ADR；本阶段只写设计，不修改实现代码。
+本文件已根据评审确认七项高影响选择，并同步接受相关契约和 ADR；本阶段只写设计，不修改实现代码。
 
 ## 目标场景
 
@@ -165,7 +167,7 @@ type LlmStreamEvent =
 
 推荐让网络、SSE、协议和取消失败通过 async generator 抛出稳定错误，而不是伪装成正常事件。`message_end` 是逻辑消息收尾并决定业务成功；`[DONE]` 是可选的传输层结束标记，adapter 不能只收到 `[DONE]` 就假定消息合法。
 
-阶段 03 扩展状态为 `draft`，`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
+阶段 03 扩展状态为 `accepted`，`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
 
 ### 流式工具调用状态
 
@@ -242,7 +244,7 @@ EOF             结束进程，退出码 0
 ## 任务清单
 
 - [ ] 将阶段状态改为 `designed`，确认上述七项决策。
-- [ ] 新增流式事件和 `LlmClient.stream()` 契约，标记阶段 03 扩展为 draft。
+- [ ] 按已接受的流式事件和 `LlmClient.stream()` 契约实现代码。
 - [ ] 新增 SSE 解析契约，定义 UTF-8、事件边界、心跳、JSON 和 `[DONE]` 行为。
 - [ ] 实现 OpenCode Go `stream: true` 请求、SSE parser 和资源清理。
 - [ ] 实现按 index/ID 的工具调用 assembler，支持交错 delta 和全批校验。

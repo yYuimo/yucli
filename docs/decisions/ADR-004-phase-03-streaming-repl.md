@@ -1,6 +1,6 @@
 # ADR-004：阶段 03 使用流式事件和内存 REPL
 
-状态：`proposed`
+状态：`accepted`
 
 ## 背景与问题
 

@@ -4,7 +4,7 @@
 
 阶段 02 扩展状态：`accepted`
 
-阶段 03 流式扩展状态：`draft`
+阶段 03 流式扩展状态：`accepted`
 
 适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返；阶段 03 SSE 流式文本和工具调用。
 
@@ -289,7 +289,7 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 
 源码入口：[runPrompt.ts](../../src/core/runPrompt.ts)、[OpenCodeGoClient.ts](../../src/adapters/opencode-go/OpenCodeGoClient.ts)、[cli.ts](../../src/bootstrap/cli.ts)。
 
-## 阶段 03 SSE 流式映射（draft）
+## 阶段 03 SSE 流式映射（已接受设计，尚未实现）
 
 阶段 03 在相同 URL、认证头和 `x-opencode-session` 规则上发送 `stream: true`。响应体按 SSE 事件读取；adapter 不把原始 chunk 暴露给 core，而是产生 [流式契约](streaming.md) 中的 `text_delta`、`tool_call_delta`、`message_end` 和 `usage` 事件。
 

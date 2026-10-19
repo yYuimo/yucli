@@ -1,6 +1,6 @@
 # ADR-005：暂不抽取 OpenAI 兼容客户端基类
 
-状态：`proposed`
+状态：`accepted`
 
 ## 背景与问题
 
