@@ -104,6 +104,8 @@ src/
 
 ## 核心数据约定
 
+core 与模型 adapter 的内部约定见 [LlmClient 契约](contracts/llm-client.md)；adapter 怎样将它转换成 HTTP headers/body，以及如何把服务响应转换回来，见 [OpenCode Go HTTP 接口契约](contracts/opencode-go-http.md)。后者提供从 prompt 到终端回答的完整示例。
+
 阶段 1 至少需要这些数据：
 
 ```text

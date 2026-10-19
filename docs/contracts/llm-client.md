@@ -52,9 +52,11 @@ export interface LlmClient {
 - 客户端不得修改调用方传入的请求对象或消息数组。
 - `complete()` 成功时必须返回一个 role 为 `assistant`、content 非空白的文本，保留原始空格和换行。可选 token 用量存在时必须为非负整数。
 - `complete()` 失败时抛出 yucli 定义的稳定错误类型，不把 HTTP 库原始异常直接暴露给应用层。
-- `signal` 存在时，客户端把它传给底层 `fetch`；取消后不得继续把结果当作成功响应返回。
+- `signal` 存在时，客户端将其取消事件转发给内部控制器，与超时合并后把内部 signal 传给 `fetch`；取消后不得继续把结果当作成功响应返回。
 
 ## OpenCode Go 适配
+
+本节为适配摘要。HTTP 地址、headers/body、完整请求响应示例、字段映射和错误处理流程统一见 [OpenCode Go HTTP 接口契约](opencode-go-http.md)。本文继续定义 core 与 adapter 之间的内部接口，两份契约须同步维护。
 
 阶段 01 的实现为 `OpenCodeGoClient`，使用以下配置：
 

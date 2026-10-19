@@ -9,6 +9,7 @@
 - [阶段 01：单次模型问答与四层实现结果](specs/phase-01-single-model.md)
 - [接口与契约规范](contracts/README.md)
   - [LlmClient 契约](contracts/llm-client.md)
+  - [OpenCode Go HTTP 接口契约](contracts/opencode-go-http.md)
   - [CLI 行为契约](contracts/cli.md)
 - [架构决策记录规范](decisions/README.md)
   - [ADR-001：OpenCode Go 与原生 fetch](decisions/ADR-001-opencode-go-native-fetch.md)
