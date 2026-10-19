@@ -1,6 +1,6 @@
 /**
  * adapters 层：把 yucli 的模型契约转换为 OpenCode Go HTTP 协议。
- * 调用顺序：complete → fetch → 读取响应 → parseResponse → 返回领域响应。
+ * 非流式 complete 返回领域响应；流式 stream 逐步交付 SSE 映射后的业务事件。
  * 本模块负责网络资源和协议校验；不打印终端文本、不保存会话。
  */
 import { SseParser } from "./SseParser.js";
@@ -13,7 +13,7 @@ import type { LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, Message } from 
 
 /**
  * 创建 OpenCodeGoClient 时必须提供的连接配置，由 bootstrap 注入，客户端保存后逐次使用。
- * 只包含 HTTP 连接所需的字段；model/messages 属于每次 complete 的 LlmRequest。
+ * 只包含 HTTP 连接所需的字段；model/messages 属于每次 complete/stream 的 LlmRequest。
  * RuntimeConfig 包含这些同名兼容字段，因此可以直接传入，不需要继承本接口。
  * 此接口不调用 dotenv 或做运行时校验，调用方应传入 loadConfig 校验后的值。
  */
@@ -24,7 +24,7 @@ export interface OpenCodeGoClientOptions {
   /** 提供方 API 基地址，允许带 /v1 等路径；每次请求再拼接 /chat/completions。 */
   baseUrl: string;
 
-  /** 本次请求的超时毫秒数；每次 complete 各自创建和清理定时器。 */
+  /** 本次请求的超时毫秒数；每次 complete/stream 各自创建和清理定时器。 */
   timeoutMs: number;
 }
 
@@ -138,14 +138,14 @@ function parseResponse(value: unknown): LlmResponse {
 
 /**
  * 从失败的 HTTP 响应中提取可展示的短摘要，帮助用户诊断服务端拒绝请求的原因。
- * complete 收到非 2xx 响应后调用它，并将结果放入 RequestError。
+ * complete/stream 收到非 2xx 响应后调用它，并将结果放入 RequestError。
  * 按字节读取最多 512 字节，替换已知密钥和认证头文本、去除控制字符，再限制输出长度。
  * byte 与字符数量不同，例如 UTF-8 的一个汉字通常占 3 字节。
  *
  * @param response 待读取的失败响应；它的 body 会被消费，不能再完整读取第二遍。
  * @param apiKey 本次认证密钥，仅用来匹配并遮盖错误体中可能回显的内容。
  * @returns Promise<string>，成功得到最多 512 字节的摘要；没有 body 时为空字符串。
- * 读取失败会使 Promise 拒绝，由 complete 转成请求错误；finally 会取消剩余读取并释放锁。
+ * 读取失败会使 Promise 拒绝，由调用方法转成请求错误；finally 会取消剩余读取并释放锁。
  */
 async function readErrorSummary(response: Response, apiKey: string): Promise<string> {
   if (!response.body) return "";
@@ -194,7 +194,7 @@ async function readErrorSummary(response: Response, apiKey: string): Promise<str
 
 /**
  * 把一条内部消息转换成 OpenCode Go 接收的 OpenAI 兼容消息对象。
- * complete 构造请求体时按历史顺序 map 调用，确保工具 ID 能从模型调用对应到工具结果。
+ * complete/stream 构造请求体时按历史顺序 map 调用，确保工具 ID 能从模型调用对应到工具结果。
  *
  * @param message 内部 user/system/assistant/tool 消息，由 core 构造并按契约提供。
  * @returns 新的可序列化对象：toolCallId 改为 tool_call_id，toolCalls 改为 tool_calls，
@@ -234,7 +234,7 @@ export class OpenCodeGoClient implements LlmClient {
    * 构造完成得到客户端实例，此时尚不发请求、不启动定时器，也不创建持久会话。
    */
   // 参数属性：把传入的 config 保存为私有字段 this.config；readonly 禁止重绑该字段，
-  // 不意味着 config 内部属性被深度冻结。每次请求的可变状态放在 complete 内。
+  // 不意味着 config 内部属性被深度冻结。每次请求的可变状态放在 complete/stream 内。
   constructor(private readonly config: OpenCodeGoClientOptions) {}
 
   /**

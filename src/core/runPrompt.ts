@@ -3,7 +3,7 @@ import type { LlmResponse } from "../contracts/message.js";
 
 /**
  * 把用户的一句话包装成模型请求，调用一次客户端，并把模型响应交回调用方。
- * 保留阶段 01 的单次调用入口，供测试或无需工具的调用方使用；阶段 02 CLI 使用 agentLoop。
+ * 保留阶段 01 的单次调用入口，供测试或无需工具的调用方使用；阶段 03 CLI 使用 runTurnStream。
  * 本阶段请求只有一条 user 消息，不保留历史，也不在这里输出回答。
  *
  * @param client 由调用方注入的客户端；本函数只要求它具有 complete 能力。

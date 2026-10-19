@@ -87,7 +87,7 @@ message end 后必须同时满足：
 
 任何一项失败，整批不执行；不得先执行已经看似完整的调用。工具调用没有 message end、只有 `[DONE]` 或连接中断时，同样不执行。
 
-服务端提供 usage 时，adapter 一律发出独立的 `usage` 事件；`message_end` 只携带 `finishReason`，不携带 usage。重复的等值 usage 不重复发出。
+服务端提供 usage 时，adapter 一律发出独立的 `usage` 事件；`message_end` 只携带 `finishReason`，不携带 usage。重复的等值 usage 不重复发出。SSE 中间帧的 `usage:null` 表示尚未提供统计，不发事件；对象值才按 LlmUsage 校验和转换（不改变非流式 complete 的 usage 校验）。
 
 ## 取消、超时和部分输出
 

@@ -8,11 +8,11 @@ import { executeToolBatch, validateToolBatch } from "./toolRegistry.js";
 
 /**
  * 完成用户一次提问中的工具循环：模型要文件时先执行工具，再把结果交回模型，直到得到最终文本。
- * bootstrap/cli 在加载配置并注册 read_file 后调用；本函数拥有本次命令的历史、次数和工具结果。
+ * 保留给非流式调用方和阶段 02 测试；阶段 03 CLI 使用 runTurnStream。本函数拥有本次调用的历史、次数和工具结果。
  * 每轮先检查模型响应和整批工具结构，再判断额度，最后才顺序执行工具并追加消息。
  * 有工具调用时即使同时带文本，也要等工具往返完成，不能提前把该段文本当最终回答。
  *
- * @param client CLI 注入的模型客户端；本层只调用接口，不处理 HTTP 或提供方 JSON。
+ * @param client 调用方注入的模型客户端；本层只调用接口，不处理 HTTP 或提供方 JSON。
  * @param registry CLI 注入的注册表，提供工具定义和按名称执行的能力。
  * @param model 本次命令使用的模型标识，传给每一轮请求。
  * @param prompt 已由 CLI 检查非空白的用户原文，作为第一条 user 消息。
@@ -25,6 +25,7 @@ import { executeToolBatch, validateToolBatch } from "./toolRegistry.js";
  * 历史只存在本次调用中；网络/文件副作用由注入的实现执行，本函数不读写磁盘或打印。
  */
 export async function agentLoop(
+  // Pick 只要求兼容路径用到的 complete 方法，不强迫旧调用方补实现 stream。
   client: Pick<LlmClient, "complete">,
   registry: ToolRegistry,
   model: string,

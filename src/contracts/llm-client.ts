@@ -4,8 +4,8 @@ import type { LlmRequest, LlmResponse, LlmStreamEvent } from "./message.js";
 
 /**
  * 应用调用模型所依赖的能力接口，把 core 与具体提供方隔开。
- * OpenCodeGoClient 提供真实实现；CLI 创建实现并注入 AgentLoop，测试可注入有相同方法的对象。
- * 它只约定 complete 的输入、异步输出和失败行为，不保存模型配置或消息历史。
+ * OpenCodeGoClient 提供真实实现；CLI 创建实现并注入流式 turn，测试可注入有相同方法的对象。
+ * 它约定 complete/stream 的输入、异步输出和失败行为，不保存模型配置或消息历史。
  * 类比 Java 接口，但 TS 采用结构类型：对象只要具备兼容方法，不显式 implements 也能匹配。
  * 编译后接口不存在，不能 new LlmClient 或用 instanceof LlmClient；执行的是具体对象的方法。
  */

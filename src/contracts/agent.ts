@@ -28,7 +28,7 @@ export interface AgentLoopOptions {
  * 不返回“带失败状态的部分结果”。普通文件错误可在模型解释后仍得到成功结果。
  */
 export interface AgentLoopResult {
-  /** 最终 assistant 原文，保留空格/换行；CLI 只打印它，不打印中间结果或 reasoning。 */
+  /** 最终 assistant 原文，保留空格/换行；保留为成功结果；阶段 03 CLI 已在流中逐片显示，不再重复打印它。 */
   finalText: string;
 
   /** 实际已完成的模型请求次数，包含发起工具调用的轮次和最后生成答案的轮次。 */

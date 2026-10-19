@@ -65,7 +65,8 @@ export function parseStreamChunk(data: string): LlmStreamEvent[] {
   }
   if (typeof reason === "string") events.push({ type: "message_end", finishReason: reason });
 
-  if (isRecord(value) && value.usage !== undefined) {
+  // SSE 的中间帧可用 null 表示统计尚未可用；它不是一份空用量对象。
+  if (isRecord(value) && value.usage !== undefined && value.usage !== null) {
     if (!isRecord(value.usage)) throw new ResponseError("流式 usage 必须是对象。");
     const usage: LlmUsage = {};
     for (const [source, target] of [

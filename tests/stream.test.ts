@@ -46,7 +46,7 @@ afterEach(async () => { await server.close(); });
 describe("真实 adapter SSE 解析与资源", () => {
   it("stream:true、空 tools 省略，每次 session 独立；complete:false 由旧测试保留", async () => {
     expect(await collect()).toEqual([{ type: "text_delta", text: "你好！" }, { type: "message_end", finishReason: "stop" }]);
-    await collect();
+    for await (const event of client().stream({ ...request, tools: [] })) void event;
     expect(requests.map((r) => r.body)).toEqual([1, 2].map(() => ({ ...request, stream: true })));
     expect(requests[0]?.session).not.toBe(requests[1]?.session);
     expect(requests[0]?.session).toMatch(/^[a-f0-9-]{36}$/u);
@@ -65,6 +65,25 @@ describe("真实 adapter SSE 解析与资源", () => {
   it("支持心跳、多行 data、未知字段与 reasoning 忽略", async () => {
     respond = (res) => writeSse(res, [': heartbeat\n\nevent: message\ndata: {"choices":\ndata: [{"delta":{"content":"ok","reasoning_content":"secret"},"finish_reason":"stop"}]}\n\n']);
     expect(await collect()).toEqual([{ type: "text_delta", text: "ok" }, { type: "message_end", finishReason: "stop" }]);
+  });
+
+  it("中间帧 usage:null 表示尚未提供统计，不产出 usage 事件", async () => {
+    respond = (res) => writeSse(res, [sseFrame({ ...streamChunk({ content: "ok" }, "stop"), usage: null })]);
+    expect(await collect()).toEqual([{ type: "text_delta", text: "ok" }, { type: "message_end", finishReason: "stop" }]);
+  });
+
+  it("服务端尚未结束 body 时即交付首个 delta，不缓冲整个响应", async () => {
+    let end!: () => void;
+    respond = (res) => {
+      res.writeHead(200);
+      res.write(sseFrame(streamChunk({ content: "first" })));
+      end = () => res.end(sseFrame(streamChunk({}, "stop")));
+    };
+    const generator = client().stream(request);
+    expect((await generator.next()).value).toEqual({ type: "text_delta", text: "first" });
+    end();
+    expect((await generator.next()).value).toEqual({ type: "message_end", finishReason: "stop" });
+    expect((await generator.next()).done).toBe(true);
   });
 
   it("usage 独立发出，message_end 不带 usage，等值重复只发一次", async () => {
