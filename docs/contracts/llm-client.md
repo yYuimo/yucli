@@ -4,7 +4,9 @@
 
 阶段 02 扩展状态：`accepted`
 
-适用阶段：阶段 01 单次模型问答；阶段 02 增加工具调用和 AgentLoop。
+阶段 03 流式扩展状态：`draft`
+
+适用阶段：阶段 01 单次模型问答；阶段 02 工具调用和 AgentLoop；阶段 03 REPL 与流式输出。
 
 ## 目的
 
@@ -81,10 +83,29 @@ export interface LlmResponse {
 
 export interface LlmClient {
   complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse>;
+
+  /**
+   * 以 provider-neutral 事件流返回一次模型响应；阶段 03 新增，保留 complete 的既有语义。
+   * OpenCodeGoClient 负责 SSE 和外部字段转换，core 负责消费 delta、拼装工具并决定下一轮。
+   * 网络、协议、超时和取消通过 async generator 抛出，不伪装成正常事件。
+   */
+  stream(request: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmStreamEvent>;
 }
+
+export type LlmStreamEvent =
+  | { type: "text_delta"; text: string }
+  | {
+      type: "tool_call_delta";
+      index: number;
+      id?: string;
+      name?: string;
+      argumentsDelta?: string;
+    }
+  | { type: "message_end"; finishReason?: string; usage?: LlmUsage }
+  | { type: "usage"; usage: LlmUsage };
 ```
 
-阶段 01 的无工具调用方式保持兼容；阶段 02 已增加工具定义、工具消息、工具调用和 `finishReason`，仍不暴露流式 chunk、提供方专属字段或原始 HTTP 响应。
+阶段 01 的无工具调用方式保持兼容；阶段 02 已增加工具定义、工具消息、工具调用和 `finishReason`；阶段 03 的 `stream()` 只暴露 provider-neutral 事件，不暴露原始 SSE chunk。
 
 代码位置：数据结构在 `src/contracts/message.ts`，`LlmClient` 与稳定错误在 `src/contracts/llm-client.ts`。`core/runPrompt.ts` 保留直接调用方式；阶段 02 的 `core/agentLoop.ts` 另依赖工具/循环契约；`adapters/opencode-go/OpenCodeGoClient.ts` 实现接口，并自行声明构造参数类型，不依赖配置加载器。
 
@@ -98,6 +119,7 @@ export interface LlmClient {
 - `tools` 为空或未提供时，adapter 不得在 JSON 请求体中输出 `tools` 字段。
 - `complete()` 失败时抛出 yucli 定义的稳定错误类型，不把 HTTP 库原始异常直接暴露给应用层。
 - `signal` 存在时，客户端将其取消事件转发给内部控制器，与超时合并后把内部 signal 传给 `fetch`；取消后不得继续把结果当作成功响应返回。
+- `stream()` 的每个调用使用独立请求和资源；generator 成功结束、异常、取消或被提前关闭时都必须清理 reader、定时器和监听器。
 
 ## OpenCode Go 适配
 
@@ -197,8 +219,8 @@ export class AgentLoopError extends Error {
 
 ## 兼容性边界
 
-这个契约只依赖 OpenAI Chat Completions 的最小公共字段。阶段 02 的工具调用扩展必须与 [工具执行契约](tool-execution.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md) 同步；若后续加入流式、提供方扩展或更多工具，应新增字段和测试，并在阶段文档或 ADR 中记录兼容性影响，不能静默改变 `complete()` 的语义。
+这个契约只依赖 OpenAI Chat Completions 的最小公共字段。阶段 02 的工具调用扩展和阶段 03 的流式事件必须分别与 [工具执行契约](tool-execution.md)、[流式契约](streaming.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md) 同步；若后续加入 reasoning、重连、提供方扩展或更多工具，应新增事件和测试，并在阶段文档或 ADR 中记录兼容性影响，不能静默改变 `complete()` 的语义。
 
-关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。
+关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)、[阶段 03 规格](../specs/phase-03-repl-streaming.md)。
 
 实现分工：adapter 校验 HTTP 外层、tool_calls 的字段与 ID、finish_reason 类型及截断；core 在执行任何工具前检查整批数量、ID 和参数结构。参数 JSON 或 `{path:string}` 不合法抛 AgentLoopError(protocol_error)，不会先执行同批的合法调用。契约验证记录见[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。

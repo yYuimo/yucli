@@ -4,6 +4,8 @@
 
 当前阶段支持单次命令中的只读文件工具循环：模型可调用 `read_file` 读取工作区文本，再据此回答。使用 OpenCode Go，默认模型为 `deepseek-v4-flash`。
 
+阶段 03 的 REPL 与流式输出仍处于规划阶段，设计见[阶段 03 规格](docs/specs/phase-03-repl-streaming.md)。
+
 ## 运行
 
 工具链：Node.js 24.14.0、pnpm 10.33.2，可通过 `.nvmrc` 或 `mise.toml` 选择。

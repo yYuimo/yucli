@@ -8,6 +8,8 @@
 - [OpenCode Go HTTP 接口契约](opencode-go-http.md)：adapter 如何构造网络请求、读取响应并转换成内部结果。
 - [CLI 行为契约](cli.md)：参数、配置、输出和退出码。
 - [工具执行契约](tool-execution.md)：工具定义、调用 ID、`read_file` 边界和 AgentLoop 消息顺序。
+- [流式模型与 SSE 契约](streaming.md)：SSE 字节边界、内部流式事件和工具调用拼装。
+- [REPL 与内存会话契约](repl.md)：内置命令、历史所有权、输出和取消语义。
 
 ## 适合建立契约的内容
 

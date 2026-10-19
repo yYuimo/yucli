@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 02 已集成到 `main`，后续阶段为演进路线。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已形成待评审的 REPL 与流式设计，尚未实现。
 
 ## 目标场景
 
@@ -95,7 +95,7 @@ src/
 
 文件工具先检查词法路径和真实路径的包含关系，再 stat、打开句柄并有界读取；fatal UTF-8 解码保留原文，空文件允许。真实路径按路径段比较，末端打开使用 O_NOFOLLOW，并再次检查句柄类型与大小；这些检查不能代替操作系统沙箱，也不保证面对工作区父目录并发替换时的原子隔离。
 
-阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。`session` 在阶段 4 按需加入；没有拆分多包 workspace，也没有新增生产假模型客户端。
+阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。阶段 03 计划在 `core` 增加流式 turn/assembler，在 adapter 增加 SSE 解析，在 bootstrap 增加 REPL 和朴素 stdout 渲染；历史只存内存，最多保留 20 个完整 user turn。`session` 在阶段 4 按需加入；没有拆分多包 workspace，也没有新增生产假模型客户端。
 
 ### 依赖检查
 
@@ -158,6 +158,9 @@ AgentLoopResult { finalText, modelCalls, toolResults, stopKind: final_text }
 
 - 同一进程中的后续问题携带前文。
 - 文本分片按顺序显示，取消和超时有明确结束状态。
+- `LlmClient` 保留 `complete()`，新增 provider-neutral 的 `stream()` async generator。
+- SSE 工具调用按 index/ID 拼装，完整校验后沿用阶段 02 的顺序执行和 4/8 上限。
+- 阶段 03 暂不抽取 OpenAI 兼容基类，REPL 历史和 turn 提交边界由契约明确。
 
 ### 阶段 4：会话保存与恢复
 

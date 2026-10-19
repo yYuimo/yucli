@@ -4,7 +4,9 @@
 
 阶段 02 扩展状态：`accepted`
 
-适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返。
+阶段 03 流式扩展状态：`draft`
+
+适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返；阶段 03 SSE 流式文本和工具调用。
 
 本文约定 yucli 怎样调用 OpenCode Go、怎样把其响应转换为内部结果。内容依据当前实现、已有本地 HTTP 测试和阶段 01/02 真实联调记录，不代表 OpenCode Go 的完整官方 API 规范。本文中的请求、响应数据均为说明用示例，不包含真实凭证或真实回答。
 
@@ -283,9 +285,26 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 
 测试覆盖范围以各测试实际断言为准，不能将本文所有说明都理解为已有独立测试。阶段 02 新增循环、文件工具与 HTTP 往返测试；最近一次真实验证结果见下文。
 
-阶段 02 的工具往返需要在真实服务中验证：一次命令的多次 HTTP 请求各自使用新的 `x-opencode-session` 是否仍能完成工具调用和最终回答；结果回写 [ADR-002](../decisions/ADR-002-opencode-session-routing.md) 与 [阶段 02 ADR](../decisions/ADR-003-phase-02-minimal-agent-loop.md)。后续加入流式响应或不同模型协议时，必须同步修改本文、[LlmClient 契约](llm-client.md)、adapter 和相应测试；提供方路由 ID 的生命周期变化也需要更新 ADR。
+阶段 02 的工具往返需要在真实服务中验证：一次命令的多次 HTTP 请求各自使用新的 `x-opencode-session` 是否仍能完成工具调用和最终回答；结果回写 [ADR-002](../decisions/ADR-002-opencode-session-routing.md) 与 [阶段 02 ADR](../decisions/ADR-003-phase-02-minimal-agent-loop.md)。阶段 03 的 SSE 扩展见本文末尾和[流式模型与 SSE 契约](streaming.md)。后续加入重连或不同模型协议时，必须同步修改本文、[LlmClient 契约](llm-client.md)、adapter 和相应测试；提供方路由 ID 的生命周期变化也需要更新 ADR。
 
 源码入口：[runPrompt.ts](../../src/core/runPrompt.ts)、[OpenCodeGoClient.ts](../../src/adapters/opencode-go/OpenCodeGoClient.ts)、[cli.ts](../../src/bootstrap/cli.ts)。
+
+## 阶段 03 SSE 流式映射（draft）
+
+阶段 03 在相同 URL、认证头和 `x-opencode-session` 规则上发送 `stream: true`。响应体按 SSE 事件读取；adapter 不把原始 chunk 暴露给 core，而是产生 [流式契约](streaming.md) 中的 `text_delta`、`tool_call_delta`、`message_end` 和 `usage` 事件。
+
+```json
+{
+  "model": "deepseek-v4-flash",
+  "messages": [{ "role": "user", "content": "总结 README.md" }],
+  "tools": [{ "type": "function", "function": { "name": "read_file", "description": "读取工作区文件", "parameters": { "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"], "additionalProperties": false } } }],
+  "stream": true
+}
+```
+
+每个 SSE `data` JSON 的 `choices[0].delta.content` 转成文本事件；`delta.tool_calls[*]` 按 `index` 转成工具调用 delta；最后一个 choice 的 `finish_reason` 转成 message end。`[DONE]` 只结束传输，不能替代缺失的 message end。`finish_reason: "length"`、非法 JSON、半截 UTF-8、缺少收尾或连接中断均抛 `ResponseError`，不执行工具。
+
+阶段 03 的多轮请求仍按阶段 02 规则每次 `complete()`/`stream()` 生成独立 `x-opencode-session`；真实联调需要确认服务支持连续流式工具往返。
 
 ## 阶段 02 工具消息完整映射示例
 
