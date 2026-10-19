@@ -6,10 +6,22 @@ import type { ToolRegistry, ToolResult } from "../contracts/tool.js";
 import { validateToolBatch } from "./toolRegistry.js";
 
 /**
- * 完成一次命令中的“模型 → 工具 → 模型”顺序循环，由 CLI 注入客户端和注册表。
- * prompt 创建初始 user 消息；历史和执行结果只存在当前调用，不写入磁盘。
- * 成功返回最终文本、模型调用次数和工具结果；协议/模型/取消失败直接抛出，不返回部分 result。
- * options 供测试缩小上限，signal 同时传给模型和工具；默认最多 8 次模型、每批 4 个调用。
+ * 完成用户一次提问中的工具循环：模型要文件时先执行工具，再把结果交回模型，直到得到最终文本。
+ * bootstrap/cli 在加载配置并注册 read_file 后调用；本函数拥有本次命令的历史、次数和工具结果。
+ * 每轮先检查模型响应和整批工具结构，再判断额度，最后才顺序执行工具并追加消息。
+ * 有工具调用时即使同时带文本，也要等工具往返完成，不能提前把该段文本当最终回答。
+ *
+ * @param client CLI 注入的模型客户端；本层只调用接口，不处理 HTTP 或提供方 JSON。
+ * @param registry CLI 注入的注册表，提供工具定义和按名称执行的能力。
+ * @param model 本次命令使用的模型标识，传给每一轮请求。
+ * @param prompt 已由 CLI 检查非空白的用户原文，作为第一条 user 消息。
+ * @param options 可覆盖部分额度；默认 8 次模型调用、每批 4 个工具，测试可缩小但不能放大。
+ * @param signal 可选的命令级取消信号，同时传给模型和工具，取消后不再追加成功结果。
+ * @returns 最终回答、实际模型调用次数、已执行工具结果和 final_text 停止原因。
+ * @throws AgentLoopError 选项/工具协议非法或达到调用上限；最后一轮若仍要工具，不执行该批。
+ * @throws ResponseError 响应被截断或没有可用文本/调用；模型请求错误继续向上抛。
+ * @throws AbortError 调用方取消；失败不返回部分 AgentLoopResult。
+ * 历史只存在本次调用中；网络/文件副作用由注入的实现执行，本函数不读写磁盘或打印。
  */
 export async function agentLoop(
   client: LlmClient,
@@ -19,6 +31,7 @@ export async function agentLoop(
   options: Partial<AgentLoopOptions> = {},
   signal?: AbortSignal,
 ): Promise<AgentLoopResult> {
+  // Partial 让 options 的每个字段都可省略；?? 只在没有提供该值时采用默认额度。
   const maxModelCalls = options.maxModelCalls ?? 8;
   const maxToolCalls = options.maxToolCallsPerResponse ?? 4;
 
@@ -46,6 +59,8 @@ export async function agentLoop(
 
     const message = response.message;
     const calls = message.toolCalls ?? [];
+
+    // 全批校验在 messages.push 和任何 execute 之前完成，不能先做合法的第一项。
     validateToolBatch(calls, maxToolCalls);
 
     if (!calls.length) {
@@ -75,6 +90,8 @@ export async function agentLoop(
       if (signal?.aborted) throw new AbortError("工具循环已取消。");
 
       toolResults.push(result);
+
+      // 本地结果的 ok 用于诊断；模型通过 tool 消息的 ID 和 content 看到执行结果。
       messages.push({
         role: "tool", toolCallId: result.toolCallId, name: result.name, content: result.content,
       });

@@ -39,7 +39,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * @param value JSON.parse 得到的未验证数据；标为 unknown 强制逐项检查。
  * @returns 新的领域响应对象，保留回答原文，只提取约定字段，不返回 reasoning 或原始 JSON。
- * @throws ResponseError 必需字段缺失、类型错误、回答空白或用量非法时抛出。
+ * @throws ResponseError 字段/调用 ID 非法、既无文本又无调用、响应截断或用量非法时抛出。
+ * 这里只检查工具调用外层结构；参数 JSON 和 path 结构由 core 在整批执行前继续校验。
  * 本函数不修改输入、不发请求、不输出日志。
  */
 function parseResponse(value: unknown): LlmResponse {
@@ -180,8 +181,14 @@ async function readErrorSummary(response: Response, apiKey: string): Promise<str
 }
 
 /**
- * 将内部消息转换成 OpenAI 字段；complete 按历史顺序逐条调用。
- * 不修改输入；tool 结果只带 role/tool_call_id/content，assistant 调用保留参数原文。
+ * 把一条内部消息转换成 OpenCode Go 接收的 OpenAI 兼容消息对象。
+ * complete 构造请求体时按历史顺序 map 调用，确保工具 ID 能从模型调用对应到工具结果。
+ *
+ * @param message 内部 user/system/assistant/tool 消息，由 core 构造并按契约提供。
+ * @returns 新的可序列化对象：toolCallId 改为 tool_call_id，toolCalls 改为 tool_calls，
+ * 每个调用包装成 {id,type:"function",function:{name,arguments}}，参数原文保持字符串。
+ * tool 消息省略 name，模型停止原因不属于消息字段。空的 toolCalls 不发送。
+ * 本函数不修改原消息、不读取文件、不发请求，也不重新解析工具参数；JSON.stringify 在调用方执行。
  */
 function toWireMessage(message: Message): object {
   if (message.role === "tool") {
@@ -208,7 +215,7 @@ function toWireMessage(message: Message): object {
 /** implements 在编译期检查接口；实际网络行为由下面的方法实现。 */
 export class OpenCodeGoClient implements LlmClient {
   /**
-   * 保存连接参数，创建一个供 runPrompt 使用的 OpenCode Go 客户端。
+   * 保存连接参数，创建一个供 AgentLoop 或直接问答入口使用的 OpenCode Go 客户端。
    * CLI 在 loadConfig 校验成功后调用 new OpenCodeGoClient(config)。
    *
    * @param config 密钥、API 基地址和单次请求超时；由调用方提供已校验的值。
@@ -220,7 +227,7 @@ export class OpenCodeGoClient implements LlmClient {
 
   /**
    * 将一次模型请求发给 OpenCode Go，读取并校验响应，返回统一的回答对象。
-   * core/runPrompt 通过 LlmClient 接口调用它；HTTP 细节都在本方法内处理。
+   * core/agentLoop 或保留的 runPrompt 通过 LlmClient 接口调用它；HTTP 细节都在此处理。
    * 执行顺序：建立超时/取消控制 → POST 消息 → 检查状态 → 读取并解析响应 → 清理资源。
    *
    * @param request 模型标识和有序消息；序列化时添加 stream:false，不修改调用方对象。
@@ -251,7 +258,12 @@ export class OpenCodeGoClient implements LlmClient {
       controller.abort();
     };
 
-    /** 将外部取消事件转成 abort("caller")；也用于处理传入时就已取消的 signal。 */
+    /**
+     * 把调用方的取消信号转发给本轮 HTTP 请求，与超时取消共用内部控制器。
+     * 外部 abort 事件触发时执行；若传入时已经取消，也会在登记后立即手动调用。
+     * 无函数参数和返回值；只调用 abort("caller")，具体网络停止由内部 signal 驱动。
+     * 在 finally 通过同一个函数引用移除监听，不创建新的请求或另一个控制器。
+     */
     const onAbort = () => abort("caller");
 
     // 传的是函数引用，不是 onAbort() 的调用结果；事件发生时才执行回调。

@@ -73,7 +73,14 @@ export type AgentLoopErrorCode = "loop_limit" | "protocol_error";
 export class AgentLoopError extends Error {
   override name = "AgentLoopError";
 
-  /** 保存循环/协议错误原因，供 AgentLoop 抛出；不包含文件路径或原始模型响应。 */
+  /**
+   * 创建表示“本次命令必须停止”的循环或协议错误，供 core 校验及循环控制代码抛出。
+   * CLI 根据错误类型映射到退出码 4，而不是将它作为可恢复 tool 消息交给模型。
+   *
+   * @param code loop_limit 表示额度用完，protocol_error 表示选项、批次或执行协议不合法。
+   * @param message 可向用户显示的固定说明，不包含路径、模型原文、底层异常或密钥。
+   * 构造后得到保存 code/message 的异常实例；只有调用方 throw 后才会使异步流程失败。
+   */
   constructor(public readonly code: AgentLoopErrorCode, message: string) {
     super(message);
   }

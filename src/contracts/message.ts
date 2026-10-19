@@ -1,4 +1,8 @@
-/** contracts 层的消息格式；用 role 区分不同消息，编译期类型不能代替网络数据校验。 */
+/**
+ * contracts 层的共享消息格式，供 core 和模型 adapter 在边界上传递信息。
+ * core 操作这里的 toolCalls/toolCallId，adapter 再转成服务端 tool_calls/tool_call_id。
+ * interface/type 编译后被擦除；收到网络 JSON 时仍需检查字段，而不是直接断言为此类型。
+ */
 import type { ToolCall, ToolDefinition } from "./tool.js";
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";
@@ -12,6 +16,8 @@ export interface TextMessage {
 /** 模型可同时返回文字和工具调用；有调用时优先执行工具，再请求最终回答。 */
 export interface AssistantMessage {
   role: "assistant";
+
+  // 文本可以缺省，但必须与非空 toolCalls 至少有一项；有效性由运行时校验保证。
   content?: string;
   toolCalls?: readonly ToolCall[];
 }
@@ -43,6 +49,8 @@ export interface LlmUsage {
 /** 校验后的模型输出；finishReason 是本轮元数据，不放进消息历史发送。 */
 export interface LlmResponse {
   message: AssistantMessage;
+
+  // 例如 stop、tool_calls、length；length 会在 adapter 直接失败，不返回成功结果。
   finishReason?: string;
   usage?: LlmUsage;
 }

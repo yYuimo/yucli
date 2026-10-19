@@ -26,7 +26,8 @@ interface ConfigOptions {
  *
  * @param options 可覆盖读取目录 cwd 和环境变量 env，供测试隔离配置来源；
  * 不传时使用当前工作目录和 process.env。
- * @returns 可直接供 CLI 使用的 apiKey、baseUrl、model、timeoutMs。
+ * @returns 可直接供 CLI 使用的 apiKey、baseUrl、model、timeoutMs；端点末尾斜线已去除，
+ * 超时已从字符串转成整数，其余可选项已补默认值，密钥仅交给 adapter 构造请求头。
  * @throws ConfigError 文件读取失败（除文件不存在外），或配置值不合法时抛出。
  * 只读取文件和环境变量，不修改全局 process.env，不发网络请求。
  */

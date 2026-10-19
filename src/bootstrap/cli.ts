@@ -17,7 +17,8 @@ import { OpenCodeGoClient } from "../adapters/opencode-go/OpenCodeGoClient.js";
  * @returns Promise<void>，表示本次 CLI 工作结束；回答直接写到 stdout，不作为返回值。
  * 预期失败在本函数内捕获：错误写入 stderr，并设置退出码
  * 2（参数）、3（配置）、4（模型）；未分类错误设置为 1。正常情况退出码为 0。
- * 本函数会间接读取 .env 并发起模型请求，但不会保存消息历史或直接强制退出进程。
+ * 本函数会间接读取 .env、请求模型和读取被模型请求的工作区文件，不写入文件。
+ * 不持有跨命令历史，不提供 REPL，也不直接强制退出进程；模型/工具资源由 adapter 清理。
  */
 async function main(): Promise<void> {
   // 链式调用：Commander 的配置方法返回命令对象，可以继续调用下一个方法。
