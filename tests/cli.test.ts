@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { completion, readJson, startServer, toolCompletion } from "./helpers.js";
+import { completion, completionSse, readJson, startServer, toolCompletion } from "./helpers.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { bin: { yucli: string } };
 const sourceCli = fileURLToPath(new URL("../src/bootstrap/cli.ts", import.meta.url));
@@ -32,15 +32,15 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
       } else if (messages[0]?.content === "invalid-json") {
         res.end("invalid");
       } else if (messages[0]?.content === "loop-limit") {
-        res.end(JSON.stringify(toolCompletion()));
+        res.end(completionSse(toolCompletion()));
       } else if (messages[0]?.content === "bad-batch") {
-        res.end(JSON.stringify(toolCompletion([{ id: "valid" }, { id: "invalid", argumentsJson: "{" }])));
+        res.end(completionSse(toolCompletion([{ id: "valid" }, { id: "invalid", argumentsJson: "{" }])));
       } else if (messages[0]?.content === "truncated") {
-        res.end(JSON.stringify(toolCompletion(undefined, "length")));
+        res.end(completionSse(toolCompletion(undefined, "length")));
       } else if (messages[0]?.content === "read" && hits === 1) {
-        res.end(JSON.stringify(toolCompletion()));
+        res.end(completionSse(toolCompletion()));
       } else {
-        res.end(JSON.stringify(completion("CLI 回答")));
+        res.end(completionSse(completion("CLI 回答")));
       }
     });
   });
@@ -70,7 +70,7 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
 
   it("成功回答只写 stdout，返回 0", async () => {
     expect(await run(["--prompt", "你好"])).toEqual({ code: 0, stdout: "CLI 回答\n", stderr: "" });
-    expect(captured).toEqual({ model: "deepseek-v4-flash", messages: [{ role: "user", content: "你好" }], stream: false,
+    expect(captured).toEqual({ model: "deepseek-v4-flash", messages: [{ role: "user", content: "你好" }], stream: true,
       tools: [{ type: "function", function: expect.objectContaining({ name: "read_file" }) }],
     });
     expect(hits).toBe(1);
@@ -96,7 +96,7 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
     expect(hits).toBe(0);
   });
 
-  it.each([[], ["--prompt"], ["--prompt", "   "], ["--unknown"], ["--prompt", "hi", "extra"]])("参数错误 %j 返回 2 且不发请求", async (...args: string[]) => {
+  it.each([["--prompt"], ["--prompt", "   "], ["--unknown"], ["--prompt", "hi", "extra"]])("参数错误 %j 返回 2 且不发请求", async (...args: string[]) => {
     const result = await run(args);
     expect(result.code).toBe(2);
     expect(result.stdout).toBe("");

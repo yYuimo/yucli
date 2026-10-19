@@ -1,91 +1,65 @@
 #!/usr/bin/env node
-// bootstrap 是组合根：认识具体 adapter，创建对象后将它注入 core。
-// 顶部 shebang 让系统知道用 Node 运行脚本；本项目是 ESM，可用顶层 await。
+/** bootstrap 组合根：解析模式、加载配置并注入真实客户端和只读工具，不保存模型原始响应。 */
 import { Command, CommanderError } from "commander";
-import { agentLoop } from "../core/agentLoop.js";
 import { RegisteredTools } from "../core/toolRegistry.js";
 import { ReadFileTool } from "../adapters/filesystem/ReadFileTool.js";
 import { loadConfig } from "../adapters/config/loadConfig.js";
-import { AbortError, AgentLoopError, ConfigError, RequestError, ResponseError } from "../contracts/llm-client.js";
 import { OpenCodeGoClient } from "../adapters/opencode-go/OpenCodeGoClient.js";
+import { displayTurn, reportError } from "./output.js";
+import { runRepl } from "./repl.js";
 
 /**
- * 执行一次终端问答：读取 --prompt、加载配置、创建客户端、执行模型与只读工具循环并输出最终文本。
- * 文件末尾的 await main() 是唯一启动调用；命令行输入来自 process.argv，无函数参数。
- * --help/--version 输出后结束，参数不合法时不加载配置，也不请求模型。
- *
- * @returns Promise<void>，表示本次 CLI 工作结束；回答直接写到 stdout，不作为返回值。
- * 预期失败在本函数内捕获：错误写入 stderr，并设置退出码
- * 2（参数）、3（配置）、4（模型）；未分类错误设置为 1。正常情况退出码为 0。
- * 本函数会间接读取 .env、请求模型和读取被模型请求的工作区文件，不写入文件。
- * 不持有跨命令历史，不提供 REPL，也不直接强制退出进程；模型/工具资源由 adapter 清理。
+ * 启动 CLI：有 --prompt 时完成单次流式 turn，无参数时运行 REPL。
+ * 顶层 await 调用，无参数；输入来自 process.argv，输出通过 stdout/stderr。
+ * 先解析帮助/版本和参数，再读取配置，确保用法错误不触发 .env 或网络访问。
+ * 返回 Promise<void>，正常退出 0；用法 2、配置 3、单次模型/取消 4、意外错误 1。
+ * REPL 闲置取消退出 130；活跃取消由 REPL 放弃当前 turn 后继续输入。
+ * 间接发起网络和只读文件操作，不保存会话；信号监听在对应模式结束时清理。
  */
 async function main(): Promise<void> {
-  // 链式调用：Commander 的配置方法返回命令对象，可以继续调用下一个方法。
   const program = new Command()
     .name("yucli")
     .version("0.1.0")
-    .description("单次文件工具问答；当前阶段不支持交互 REPL。配置来自当前目录 .env 或进程环境变量。")
-    .requiredOption("--prompt <text>", "发送一次问题并输出模型回答")
+    .description("流式只读文件问答；无 --prompt 进入 REPL。配置来自当前目录 .env 或进程环境变量。")
+    .option("--prompt <text>", "发送一次问题，流式显示回答后退出")
     .allowExcessArguments(false)
-
-    // Commander 默认可能直接结束进程；改为抛 CommanderError，由下方统一处理。
     .exitOverride()
-
-    // 禁止 Commander 自动重复打印错误，下方 catch 负责输出错误和用法。
     .configureOutput({ outputError: () => undefined });
   program.addHelpText("before", `${program.name()} ${program.version()}`);
-
+  program.addHelpText("after", "\nREPL：/exit /quit 退出，/clear 清空历史，/help 帮助。\nCtrl+C：请求中取消当前轮；等待输入时退出 130；单次模式取消退出 4。\n");
   try {
-    // parse 会先检查参数；--help/--version 也在这里处理，不要求模型配置存在。
     program.parse(process.argv);
-
-    // <{ prompt: string }> 是泛型参数，只声明 opts() 的结果形状；
-    // 必填参数的运行时检查由 Commander 执行。{ prompt } 从对象中取出同名字段。
-    const { prompt } = program.opts<{ prompt: string }>();
-
-    if (!prompt.trim()) {
-      // trim 只用于判断是否空白；实际发送时仍使用用户原文 prompt。
+    // ? 表示未传 --prompt 时字段不存在；不能以真假值代替是否提供参数的判断。
+    const { prompt } = program.opts<{ prompt?: string }>();
+    if (prompt !== undefined && !prompt.trim()) {
       process.stderr.write("参数错误：--prompt 不能是空白文本。\n");
       process.exitCode = 2;
       return;
     }
-
     const config = loadConfig();
-
-    // 先创建客户端，再传入 core 的循环。await 等待 Promise 完成，失败会进入本层 catch。
+    const client = new OpenCodeGoClient(config);
     const registry = new RegisteredTools([new ReadFileTool(process.cwd())]);
-    const result = await agentLoop(new OpenCodeGoClient(config), registry, config.model, prompt);
+    if (prompt === undefined) {
+      process.exitCode = await runRepl(client, registry, config.model);
+      return;
+    }
+    const controller = new AbortController();
 
-    process.stdout.write(`${result.finalText}\n`);
+    /** 单次模式 SIGINT 转成 turn 取消；displayTurn 抛 AbortError 后统一映射退出码 4。 */
+    const onInterrupt = () => controller.abort();
+    process.on("SIGINT", onInterrupt);
+    try {
+      await displayTurn(client, registry, config.model, [], prompt, controller.signal);
+    } finally {
+      process.removeListener("SIGINT", onInterrupt);
+    }
   } catch (error) {
-    // catch 的 error 是 unknown；instanceof 在运行时判断并收窄它的 TS 类型。
-    // stdout 留给回答，stderr 用于错误，便于 shell 重定向或脚本消费。
     if (error instanceof CommanderError) {
-      // exitOverride 也将正常帮助/版本输出转成异常，退出码 0 表示无需报错。
       if (error.exitCode === 0) return;
       process.stderr.write(`${error.message}\n${program.helpInformation()}`);
       process.exitCode = 2;
-    } else if (error instanceof ConfigError) {
-      process.stderr.write(`配置错误：${error.message}\n`);
-      process.exitCode = 3;
-    } else if (
-      error instanceof RequestError ||
-      error instanceof ResponseError ||
-      error instanceof AbortError ||
-      error instanceof AgentLoopError
-    ) {
-      process.stderr.write(`${error.message}\n`);
-      process.exitCode = 4;
-    } else {
-      // 未知异常不直接打印，避免底层对象或配置进入终端。
-      process.stderr.write("程序发生未预期错误。\n");
-      process.exitCode = 1;
-    }
+    } else process.exitCode = reportError(error);
   }
-
-  // 设置 exitCode 让 Node 在没有待处理任务时自然退出，不用 process.exit 强制截断输出。
 }
 
-// 顶层 await 让入口等待 main 完成；async 表示返回 Promise，不表示另开线程。
 await main();
