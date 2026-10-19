@@ -167,7 +167,7 @@ type LlmStreamEvent =
 
 推荐让网络、SSE、协议和取消失败通过 async generator 抛出稳定错误，而不是伪装成正常事件。`message_end` 是逻辑消息收尾并决定业务成功；`[DONE]` 是可选的传输层结束标记，adapter 不能只收到 `[DONE]` 就假定消息合法。
 
-阶段 03 扩展状态为 `accepted`，`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
+阶段 03 扩展状态保持 `draft`，实现验证后转 `accepted`；`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
 
 ### 流式工具调用状态
 

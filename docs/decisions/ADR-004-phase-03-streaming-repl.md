@@ -15,7 +15,8 @@
 - 历史最多保留 20 个完整 user turn；不做 token 预算和压缩。
 - 当前轮次任意流式失败、取消或工具批次协议错误时，不提交半截消息。
 - active-stream Ctrl+C 取消当前轮并回到 REPL；idle-input Ctrl+C 退出 130；单次模式取消退出 4。
-- `finish_reason: "length"`、缺 message end、`[DONE]` 前断流和任一工具调用非法都不执行工具。
+- `finish_reason: "length"`、message end 前断流和任一工具调用非法都不执行工具；
+  合法 message end 到达后流直接关闭、没有 `[DONE]` 也按成功处理。
 
 ## 理由与取舍
 
