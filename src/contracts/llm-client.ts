@@ -66,3 +66,15 @@ export class ResponseError extends Error {
 export class AbortError extends Error {
   override name = "AbortError";
 }
+
+export type AgentLoopErrorCode = "loop_limit" | "protocol_error";
+
+/** core 的循环失败；CLI 用 code 分类、用安全 message 输出，统一退出码 4。 */
+export class AgentLoopError extends Error {
+  override name = "AgentLoopError";
+
+  /** 保存循环/协议错误原因，供 AgentLoop 抛出；不包含文件路径或原始模型响应。 */
+  constructor(public readonly code: AgentLoopErrorCode, message: string) {
+    super(message);
+  }
+}

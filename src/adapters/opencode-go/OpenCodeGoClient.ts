@@ -6,7 +6,8 @@
 import { randomUUID } from "node:crypto";
 import { AbortError, RequestError, ResponseError } from "../../contracts/llm-client.js";
 import type { LlmClient } from "../../contracts/llm-client.js";
-import type { LlmRequest, LlmResponse, LlmUsage } from "../../contracts/message.js";
+import type { ToolCall } from "../../contracts/tool.js";
+import type { LlmRequest, LlmResponse, LlmUsage, Message } from "../../contracts/message.js";
 
 // 客户端只需要连接参数，不依赖 dotenv 或配置加载器；bootstrap 负责传入。
 export interface OpenCodeGoClientOptions {
@@ -34,7 +35,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * 把服务端 JSON 转换为 yucli 的 LlmResponse，确保上层拿到可用的模型回答。
  * complete 在 HTTP 成功且 JSON 语法解析成功后调用它。
- * 先检查 choices[0].message 是非空 assistant 文本，再校验并映射可选的 token 用量。
+ * 先检查 assistant 文本/工具调用及截断信号，再校验并映射可选的 token 用量。
  *
  * @param value JSON.parse 得到的未验证数据；标为 unknown 强制逐项检查。
  * @returns 新的领域响应对象，保留回答原文，只提取约定字段，不返回 reasoning 或原始 JSON。
@@ -49,20 +50,53 @@ function parseResponse(value: unknown): LlmResponse {
     : undefined;
   const message = isRecord(choice) ? choice.message : undefined;
 
-  // || 从左到右短路求值：前面检查失败就不继续访问后面的字段。
-  // trim 仅判断空白，实际返回下方原始 content，保留回答中的空格和换行。
-  if (
-    !isRecord(message) ||
-    message.role !== "assistant" ||
-    typeof message.content !== "string" ||
-    !message.content.trim()
-  ) {
-    throw new ResponseError("响应解析失败：需要非空的 choices[0].message assistant 文本。");
+  if (!isRecord(choice) || !isRecord(message) || message.role !== "assistant") {
+    throw new ResponseError("响应解析失败：需要 assistant 消息。");
   }
 
-  const response: LlmResponse = {
-    message: { role: "assistant", content: message.content },
-  };
+  // 截断时即使 JSON 和工具参数看似完整，也不能执行可能不完整的模型意图。
+  if (choice.finish_reason !== undefined && typeof choice.finish_reason !== "string") {
+    throw new ResponseError("响应解析失败：finish_reason 必须是字符串。");
+  }
+
+  if (choice.finish_reason === "length") {
+    throw new ResponseError("响应被截断（finish_reason=length），不执行工具。");
+  }
+
+  if (message.content !== undefined && message.content !== null && typeof message.content !== "string") {
+    throw new ResponseError("响应解析失败：content 必须是文本。");
+  }
+
+  const calls: ToolCall[] = [];
+  if (message.tool_calls !== undefined) {
+    if (!Array.isArray(message.tool_calls)) {
+      throw new ResponseError("响应解析失败：tool_calls 必须是数组。");
+    }
+
+    const ids = new Set<string>();
+    for (const call of message.tool_calls as unknown[]) {
+      if (
+        !isRecord(call) || call.type !== "function" ||
+        typeof call.id !== "string" || !call.id.trim() || ids.has(call.id) ||
+        !isRecord(call.function) || typeof call.function.name !== "string" ||
+        !call.function.name.trim() || typeof call.function.arguments !== "string"
+      ) {
+        throw new ResponseError("响应解析失败：工具调用结构或调用 ID 非法。");
+      }
+
+      ids.add(call.id);
+      calls.push({ id: call.id, name: call.function.name, argumentsJson: call.function.arguments });
+    }
+  }
+
+  const content = typeof message.content === "string" ? message.content : "";
+  if (!content.trim() && calls.length === 0) {
+    throw new ResponseError("响应解析失败：需要非空文本或工具调用。");
+  }
+
+  const response: LlmResponse = { message: { role: "assistant", content } };
+  if (calls.length) response.message.toolCalls = calls;
+  if (choice.finish_reason !== undefined) response.finishReason = choice.finish_reason;
 
   // usage 是可选字段，缺失可以成功；存在时必须满足约定，不能只做类型断言。
   if (isRecord(value) && value.usage !== undefined) {
@@ -145,6 +179,32 @@ async function readErrorSummary(response: Response, apiKey: string): Promise<str
   return new TextDecoder().decode(Buffer.from(summary).subarray(0, 512), { stream: true });
 }
 
+/**
+ * 将内部消息转换成 OpenAI 字段；complete 按历史顺序逐条调用。
+ * 不修改输入；tool 结果只带 role/tool_call_id/content，assistant 调用保留参数原文。
+ */
+function toWireMessage(message: Message): object {
+  if (message.role === "tool") {
+    return { role: "tool", tool_call_id: message.toolCallId, content: message.content };
+  }
+
+  if (message.role === "assistant") {
+    return {
+      role: "assistant",
+      ...(message.content !== undefined ? { content: message.content } : {}),
+      ...(message.toolCalls?.length ? {
+        tool_calls: message.toolCalls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: { name: call.name, arguments: call.argumentsJson },
+        })),
+      } : {}),
+    };
+  }
+
+  return { role: message.role, content: message.content };
+}
+
 /** implements 在编译期检查接口；实际网络行为由下面的方法实现。 */
 export class OpenCodeGoClient implements LlmClient {
   /**
@@ -165,7 +225,7 @@ export class OpenCodeGoClient implements LlmClient {
    *
    * @param request 模型标识和有序消息；序列化时添加 stream:false，不修改调用方对象。
    * @param signal 可选的调用方取消信号，与内部超时合并；已取消时不成功返回回答。
-   * @returns Promise<LlmResponse>，成功得到非空 assistant 文本与可选 token 用量。
+   * @returns Promise<LlmResponse>，成功得到 assistant 文本或工具调用及可选用量。
    * @throws RequestError 网络失败、超时或 HTTP 非 2xx；通过拒绝 Promise 传递。
    * @throws ResponseError 响应不是有效 JSON 或不符合回答结构。
    * @throws AbortError 调用方取消请求；与超时按先触发者确定原因。
@@ -219,7 +279,10 @@ export class OpenCodeGoClient implements LlmClient {
         // JSON.stringify 把 JS 对象序列化成请求体文本；仅发送最小协议字段。
         body: JSON.stringify({
           model: request.model,
-          messages: request.messages,
+          messages: request.messages.map(toWireMessage),
+          ...(request.tools?.length ? {
+            tools: request.tools.map((tool) => ({ type: "function", function: tool })),
+          } : {}),
           stream: false,
         }),
         signal: controller.signal,

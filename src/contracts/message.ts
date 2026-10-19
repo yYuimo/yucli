@@ -1,33 +1,48 @@
-/**
- * contracts 层：core 与模型 adapter 共同使用的数据格式。
- * interface/type 用于编译期检查，编译成 JavaScript 后会被擦除；
- * 收到网络 JSON 时仍须执行运行时校验，不能只给它标注一个接口类型。
- */
+/** contracts 层的消息格式；用 role 区分不同消息，编译期类型不能代替网络数据校验。 */
+import type { ToolCall, ToolDefinition } from "./tool.js";
 
-// 字符串字面量的联合类型：role 只能是这三个字符串之一。
-export type MessageRole = "system" | "user" | "assistant";
+export type MessageRole = "system" | "user" | "assistant" | "tool";
 
-/** 一条纯文本消息；当前阶段尚无 tool 消息或多模态内容。 */
-export interface Message {
-  role: MessageRole;
+/** 用户或系统提供的纯文本；阶段 02 默认只创建 user 消息。 */
+export interface TextMessage {
+  role: "system" | "user";
   content: string;
 }
 
-/** 一次调用的输入；Message[] 表示按顺序排列的消息数组。 */
+/** 模型可同时返回文字和工具调用；有调用时优先执行工具，再请求最终回答。 */
+export interface AssistantMessage {
+  role: "assistant";
+  content?: string;
+  toolCalls?: readonly ToolCall[];
+}
+
+/** 工具结果通过调用 ID 配对；name 只供本地使用，不发送给服务端。 */
+export interface ToolMessage {
+  role: "tool";
+  toolCallId: string;
+  name?: string;
+  content: string;
+}
+
+// 判别联合：检查 message.role 后，TS 就知道该分支可以读取哪些字段。
+export type Message = TextMessage | AssistantMessage | ToolMessage;
+
+/** 模型调用输入；无工具的调用方仍可只传 model 和 messages。 */
 export interface LlmRequest {
   model: string;
   messages: Message[];
+  tools?: readonly ToolDefinition[];
 }
 
-// 字段后的 ? 表示可以不提供。没有用量统计不等于 token 用量为 0。
+/** 可选统计；字段缺失表示未提供，而非用量为零。 */
 export interface LlmUsage {
   inputTokens?: number;
   outputTokens?: number;
 }
 
-/** adapter 校验并转换后的输出，core 无须了解服务端的 choices 结构。 */
+/** 校验后的模型输出；finishReason 是本轮元数据，不放进消息历史发送。 */
 export interface LlmResponse {
-  // 内联对象类型；这里 role 比 MessageRole 更窄，只允许 assistant。
-  message: { role: "assistant"; content: string };
+  message: AssistantMessage;
+  finishReason?: string;
   usage?: LlmUsage;
 }
