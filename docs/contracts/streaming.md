@@ -1,6 +1,6 @@
 # 流式模型与 SSE 契约
 
-状态：`accepted`
+状态：`draft`（设计已评审，实现验证后转 `accepted`）
 
 适用阶段：阶段 03，OpenCode Go 非流式接口的流式扩展。
 
