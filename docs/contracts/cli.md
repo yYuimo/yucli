@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-适用阶段：阶段 01 单次模型问答。
+适用阶段：阶段 01 单次模型问答；阶段 02 单次工具往返。
 
 ## 运行模式与命令形式
 
@@ -34,10 +34,10 @@ yucli --help
 | `0` | success | 请求成功并输出 assistant 文本 |
 | `2` | usage error | 参数缺失或参数格式错误 |
 | `3` | config error | 必填配置缺失或配置值非法 |
-| `4` | model error | 网络、超时、HTTP 错误或响应解析错误 |
+| `4` | model/agent error | 网络、超时、HTTP 错误、响应解析错误、循环上限或工具协议错误 |
 | `1` | unexpected error | 未分类的程序错误 |
 
-退出码属于 CLI 边界；内部模块返回稳定错误类型，不直接决定进程退出。
+退出码属于 CLI 边界；内部模块返回稳定错误类型，不直接决定进程退出。阶段 02 的 `AgentLoopError`（`loop_limit` 或 `protocol_error`）映射为退出码 `4`。
 
 ## 帮助信息
 
@@ -58,4 +58,4 @@ yucli --help
 
 阶段 01 只有 `--prompt`，不允许 CLI 参数覆盖 API key。模型和端点使用环境变量配置，避免凭证出现在 shell 历史和进程参数中。
 
-关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)。
+关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。

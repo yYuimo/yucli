@@ -1,8 +1,8 @@
 # OpenCode Go HTTP 接口契约
 
-状态：`accepted`
+状态：`accepted`（阶段 01）；阶段 02 扩展：`draft`
 
-适用阶段：阶段 01，单次、非流式文本问答。
+适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返。
 
 本文约定 yucli 怎样调用 OpenCode Go、怎样把其响应转换为内部结果。内容依据当前实现、已有本地 HTTP 测试和阶段 01 真实联调记录，不代表 OpenCode Go 的完整官方 API 规范。本文中的请求、响应数据均为说明用示例，不包含真实凭证或真实回答。
 
@@ -15,7 +15,7 @@
 | `OpenCodeGoClient.complete()` | 将内部请求发往 OpenCode Go，处理 HTTP 和响应校验 | `LlmRequest` → `Promise<LlmResponse>`，失败则拒绝 Promise |
 | OpenCode Go 服务 | 接收模型名与消息，返回 Chat Completions 响应 | HTTP JSON 请求 → HTTP 状态与响应体 |
 
-`LlmRequest`、`LlmResponse` 是项目内部的数据结构；HTTP 请求和响应是双方在网络上传输的数据格式。它们通过 adapter 转换，core 不需要访问服务端的 `choices` 数组。
+`LlmRequest`、`LlmResponse` 是项目内部的数据结构；HTTP 请求和响应是双方在网络上传输的数据格式。它们通过 adapter 转换，core 不需要访问服务端的 `choices` 数组。阶段 02 的工具往返仍由 adapter 完成 OpenAI 兼容字段转换，AgentLoop 只接收内部工具调用。
 
 ```mermaid
 sequenceDiagram
@@ -86,13 +86,13 @@ x-opencode-session: <本次请求的随机 UUID>
 | `Content-Type` | adapter 固定设置 | 告诉服务端 body 是 JSON |
 | `x-opencode-session` | 每次 `complete()` 内调用 `randomUUID()` | 提供服务路由标识；不代表本地已保存会话或服务会自动补齐历史 |
 
-阶段 01 首次真实请求因缺少路由头返回 HTTP 400 `MissingSessionID`，补充后成功，依据见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。本阶段每次调用独立问答，路由 ID 不持久化；未来多轮对话需要重新确定其生命周期。
+阶段 01 首次真实请求因缺少路由头返回 HTTP 400 `MissingSessionID`，补充后成功，依据见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。阶段 01 每次调用独立问答；阶段 02 的多次工具往返仍暂定逐次生成独立 UUID，真实联调结果需要回写 ADR-002。
 
 上表列的是客户端显式设置的应用请求头，底层 fetch 还可能自动生成传输所需的请求头。
 
 ### 请求体：模型要看到的信息
 
-adapter 从内部请求取出 `model` 和 `messages`，额外加入 `stream: false`：
+adapter 从内部请求取出 `model` 和 `messages`，有非空工具定义时加入 `tools`，并额外加入 `stream: false`：
 
 ```json
 {
@@ -119,10 +119,35 @@ body: JSON.stringify({
 | 请求体字段 | 规则 |
 | --- | --- |
 | `model` | 要调用的模型标识，默认 `deepseek-v4-flash` |
-| `messages` | 有序消息数组；当前消息内容为字符串 |
+| `messages` | 有序消息数组；阶段 02 可包含 assistant 工具调用和 tool 结果 |
+| `tools` | 阶段 02 可选的工具定义；为空时省略，不发送空数组 |
 | `stream` | 固定为 `false`，本阶段读取完整 JSON 回答 |
 
-本阶段不发送 temperature、工具声明、response format 等字段。认证密钥、超时值和 AbortSignal 均不进入请求体；AbortSignal 用于本地取消网络操作。
+阶段 01 不发送工具声明；阶段 02 只发送已注册的 `read_file` 工具定义。本阶段不发送 temperature、response format 等字段。认证密钥、超时值和 AbortSignal 均不进入请求体；AbortSignal 用于本地取消网络操作。
+
+阶段 02 有工具时的请求体还包含：
+
+```json
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "读取工作区内的 UTF-8 文本文件，不会修改文件。",
+        "parameters": {
+          "type": "object",
+          "properties": { "path": { "type": "string" } },
+          "required": ["path"],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
+```
+
+`tools` 为空或未提供时必须从 JSON 请求体中省略；不能发送空数组，否则阶段 01 的无工具请求契约会发生变化。模型返回的 tool 消息发回服务时只包含 `role: "tool"`、`tool_call_id` 和 `content`，阶段 02 省略可选的 `name` 字段。
 
 ## 成功响应与内部转换
 
@@ -148,18 +173,20 @@ HTTP 2xx 响应示例：
 }
 ```
 
-其他字段可以存在，但阶段 01 只提取下表中的字段：
+其他字段可以存在，但阶段 01/02 只提取下表中的字段：
 
 | 服务端字段 | 检查与处理 | 内部字段 |
 | --- | --- | --- |
 | `choices[0].message.role` | 必须为 `assistant` | `message.role` |
-| `choices[0].message.content` | 必须是非空白字符串；返回时保留原文 | `message.content` |
+| `choices[0].message.content` | 阶段 01 必须是非空白字符串；阶段 02 可缺失或为 null，但必须和合法 tool calls 至少满足一项 | `message.content` |
+| `choices[0].message.tool_calls` | 阶段 02 可选；每个调用必须有非空 id、函数名和参数 JSON | `message.toolCalls` |
+| `choices[0].finish_reason` | 存在时保留；`length` 直接产生 `ResponseError`，不执行工具 | `finishReason` |
 | `usage.prompt_tokens` | 存在时必须为非负安全整数 | `usage.inputTokens` |
 | `usage.completion_tokens` | 存在时必须为非负安全整数 | `usage.outputTokens` |
 
 只取第一条 choice，不合并其他候选答案。`usage` 可以缺失；存在时必须是非 null、非数组对象。两个 token 字段可以分别缺失，缺失不等于用量为 0；例如 `usage: {}` 会转换成空用量对象。
 
-当前实现不根据 `finish_reason` 判断文本是否完整，也不输出 `reasoning_content`，不接收工具调用作为成功回答。即使服务返回工具相关字段，content 缺失或空白也会触发响应错误。
+阶段 01 当前实现不根据 `finish_reason` 判断文本是否完整，也不输出 `reasoning_content`，不接收工具调用作为成功回答。阶段 02 将保留 `finish_reason`，并允许“非空文本或至少一个合法工具调用”作为成功响应；两者都没有时仍是 `ResponseError`。`finish_reason: "length"` 无论是否有工具调用都直接失败。
 
 ### 响应按什么顺序处理
 
@@ -168,7 +195,7 @@ HTTP 2xx 响应示例：
 3. 调用 `controller.signal.throwIfAborted()` 再次检查取消状态。
 4. `JSON.parse(body)` 把 JSON 文本转成 JavaScript 数据。语法不合法则产生 `ResponseError`。
 5. `parseResponse(parsed)` 校验上述业务字段并构造内部结果。给数据写类型断言不会代替这一步校验。
-6. 返回 `LlmResponse`，经 runPrompt 交给 CLI；CLI 的 `await` 得到最终对象后输出 `result.message.content` 并追加换行。
+6. 返回 `LlmResponse`，经 runPrompt 或 AgentLoop 交给调用方；阶段 01 CLI 输出 `result.message.content`，阶段 02 AgentLoop 在工具往返完成后输出最终文本并追加换行。
 
 当前实现不检查成功响应的 Content-Type，而是直接尝试解析 JSON；成功响应体没有应用层长度上限。512 字节限制只适用于失败响应的诊断摘要。
 
@@ -201,7 +228,7 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 | 调用方取消首先触发 | `AbortError` | stderr，退出码 4 |
 | HTTP 非 2xx | 读有限摘要，抛 `RequestError`，code 为 `http` | stderr，退出码 4 |
 | HTTP 2xx，但不是有效 JSON | `ResponseError` | stderr，退出码 4 |
-| JSON 有效，但回答或用量字段不符合契约 | `ResponseError` | stderr，退出码 4 |
+| JSON 有效，但回答、工具调用、finish_reason 或用量字段不符合契约 | `ResponseError` | stderr，退出码 4 |
 
 例如服务端返回 HTTP 400 和下面的响应体：
 
@@ -241,6 +268,6 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 
 测试覆盖范围以各测试实际断言为准，不能将本文所有说明都理解为已有独立测试。本次补文档对照了当前实现及测试，没有再次调用服务。
 
-后续加入流式响应、工具调用、多轮历史或不同模型协议时，必须同步修改本文、[LlmClient 契约](llm-client.md)、adapter 和相应测试；提供方路由 ID 的生命周期变化也需要更新 ADR。
+阶段 02 的工具往返需要在真实服务中验证：一次命令的多次 HTTP 请求各自使用新的 `x-opencode-session` 是否仍能完成工具调用和最终回答；结果回写 [ADR-002](../decisions/ADR-002-opencode-session-routing.md) 与 [阶段 02 ADR](../decisions/ADR-003-phase-02-minimal-agent-loop.md)。后续加入流式响应或不同模型协议时，必须同步修改本文、[LlmClient 契约](llm-client.md)、adapter 和相应测试；提供方路由 ID 的生命周期变化也需要更新 ADR。
 
 源码入口：[runPrompt.ts](../../src/core/runPrompt.ts)、[OpenCodeGoClient.ts](../../src/adapters/opencode-go/OpenCodeGoClient.ts)、[cli.ts](../../src/bootstrap/cli.ts)。

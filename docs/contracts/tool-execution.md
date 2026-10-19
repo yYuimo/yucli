@@ -25,6 +25,13 @@ interface ToolCall {
   argumentsJson: string;
 }
 
+interface JsonSchema {
+  type: "object";
+  properties: Record<string, { type: "string"; description?: string }>;
+  required: readonly string[];
+  additionalProperties: false;
+}
+
 interface ToolResult {
   toolCallId: string;
   name: string;
@@ -33,6 +40,7 @@ interface ToolResult {
 }
 
 interface ToolDefinition {
+  // 阶段 02 只有 read_file；多工具阶段应放宽为受约束的工具名类型。
   name: "read_file";
   description: string;
   parameters: {
@@ -43,6 +51,14 @@ interface ToolDefinition {
     required: ["path"];
     additionalProperties: false;
   };
+}
+
+interface Tool {
+  definition: ToolDefinition;
+  execute(
+    args: unknown,
+    signal?: AbortSignal,
+  ): Promise<{ ok: boolean; content: string }>;
 }
 
 interface ToolRegistry {
@@ -60,19 +76,27 @@ interface ToolRegistry {
 ```text
 user：content
 assistant：content 或 tool_calls
-tool：tool_call_id、name、content
+tool：tool_call_id、content（内部结果另行保留工具名）
 ```
 
 AgentLoop 必须按以下顺序追加消息：
 
 1. 初始 user 消息。
-2. 模型返回的 assistant 消息，保留文本和完整工具调用。
+2. 模型返回的 assistant 消息，保留文本、完整工具调用和 `finishReason`。
 3. 每个工具调用对应一个 tool 消息，`tool_call_id` 必须匹配。
 4. 下一次模型请求使用完整历史和同一组工具定义。
 
 工具结果不能替换 assistant 工具调用，也不能只把文件内容拼接进下一条 user 消息。这样模型可以区分“模型请求了什么”和“工具实际返回了什么”。
 
+内部 `ToolResult` 可以保留工具名，便于测试和诊断；发送给 OpenAI 兼容接口的 `tool` 消息只发送 `role`、`tool_call_id` 和 `content`，阶段 02 省略可选的 `name` 字段。
+
 一次 assistant 响应可以有多个调用；阶段 02 顺序执行，并按调用顺序追加结果。调用 ID 在同一响应中必须唯一且非空。
+
+assistant 响应的有效性规则是：非空白文本或至少一个合法工具调用，满足其一即可；两者都没有时产生 `ResponseError`。`content` 可以缺失或为 `null`，只要存在合法工具调用即可。
+
+如果同一响应中任一调用缺少 ID、名称，参数 JSON 不是合法 JSON，或参数不是恰好包含字符串 `path` 的对象，则整个响应是协议错误，一个调用都不能执行。名称非空但没有注册、路径越界或文件读取失败属于工具执行错误，生成 `ok: false` 的 tool message。
+
+`finish_reason: "length"` 表示响应可能在文本或工具参数中途被截断。adapter 必须保留该值并产生 `ResponseError`；AgentLoop 不得执行其中任何工具调用。
 
 ## `read_file` 输入和输出
 
@@ -105,13 +129,15 @@ AgentLoop 必须按以下顺序追加消息：
 { "path": "README.md" }
 ```
 
-成功结果：`ok: true`，`content` 为完整 UTF-8 文件文本。失败结果：`ok: false`，`content` 为安全错误摘要。错误摘要不包含绝对路径、堆栈、密钥或未经限制的底层异常。
+成功结果：`ok: true`，`content` 为完整 UTF-8 文件文本；空文件是成功结果，content 为空字符串。失败结果：`ok: false`，`content` 为安全错误摘要。错误摘要不包含绝对路径、堆栈、密钥或未经限制的底层异常。
 
 ## 文件边界
 
 - 根目录是 bootstrap 在启动时解析的当前工作目录。
 - 只接受相对路径；空白、绝对路径和 `..` 越界路径拒绝。
-- 通过真实路径检查符号链接，目标必须仍位于根目录内。
+- 先 `stat` 检查文件类型和字节大小：65536 字节允许，65537 字节拒绝。
+- 通过真实路径按路径段比较符号链接，目标必须仍位于根目录内，避免 `/work` 和 `/workspace` 的前缀碰撞。
+- 使用 `Buffer` 加 `new TextDecoder("utf-8", { fatal: true })` 解码；无效 UTF-8 必须失败，不能静默替换为 U+FFFD。
 - 拒绝目录、特殊文件、超过 64 KiB 的文件和无效 UTF-8 内容。
 - 工具只读，不创建、修改或删除文件。
 
@@ -122,12 +148,24 @@ AgentLoop 必须按以下顺序追加消息：
 - 没有工具调用且 assistant 文本非空：成功结束。
 - 有合法工具调用：执行全部调用，追加结果，再进行下一次模型调用。
 - assistant 没有文本且没有合法工具调用：响应协议错误。
-- 达到 `maxModelCalls`：循环上限错误，不再发起下一次模型请求。
+- 达到 `maxModelCalls`：循环上限错误，不再发起下一次模型请求；如果最后一次响应包含工具调用，这批工具也不执行。
 - `maxModelCalls` 推荐默认值为 `8`，阶段 02 不暴露为 CLI 参数。
+- 单个 assistant 响应最多允许 `4` 个工具调用；超过后产生 `protocol_error`，该批次一个调用也不执行。
+
+AgentLoop 对外返回：
+
+```ts
+interface AgentLoopResult {
+  finalText: string;
+  modelCalls: number;
+  toolResults: readonly ToolResult[];
+  stopKind: "final_text";
+}
+```
 
 ## OpenCode Go 映射
 
-阶段 02 的 OpenAI 兼容请求需要在阶段 01 请求基础上增加 `tools` 字段：
+阶段 02 的 OpenAI 兼容请求需要在阶段 01 请求基础上按需增加 `tools` 字段：
 
 ```json
 {
@@ -149,7 +187,9 @@ AgentLoop 必须按以下顺序追加消息：
 }
 ```
 
-服务端响应中的 `choices[0].message.tool_calls` 必须转换为内部 `ToolCall[]`；每个调用至少包含 `id`、函数名和参数 JSON。阶段 02 仍不处理流式工具调用，也不依赖提供方以外的原始字段。
+服务端响应中的 `choices[0].message.tool_calls` 必须转换为内部 `ToolCall[]`；每个调用至少包含 `id`、函数名和参数 JSON。`choices[0].finish_reason` 转换为内部 `finishReason` 并保留。发送 tool 消息时省略 `name`，只保留 `role`、`tool_call_id` 和 `content`。阶段 02 仍不处理流式工具调用，也不依赖提供方以外的原始字段。
+
+`LlmRequest.tools` 是可选字段；当工具列表为空时，adapter 必须省略 JSON 中的 `tools` 字段，不能发送空数组。这样阶段 01 的请求体和测试保持兼容。
 
 阶段 02 实现前必须同步更新 [LlmClient 契约](llm-client.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md)，并增加请求体和响应解析测试。阶段 01 的无工具请求仍应保持兼容。
 
