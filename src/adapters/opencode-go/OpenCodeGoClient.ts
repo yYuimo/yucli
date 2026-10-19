@@ -3,11 +3,13 @@
  * 调用顺序：complete → fetch → 读取响应 → parseResponse → 返回领域响应。
  * 本模块负责网络资源和协议校验；不打印终端文本、不保存会话。
  */
+import { SseParser } from "./SseParser.js";
+import { parseStreamChunk } from "./streamChunk.js";
 import { randomUUID } from "node:crypto";
 import { AbortError, RequestError, ResponseError } from "../../contracts/llm-client.js";
 import type { LlmClient } from "../../contracts/llm-client.js";
 import type { ToolCall } from "../../contracts/tool.js";
-import type { LlmRequest, LlmResponse, LlmUsage, Message } from "../../contracts/message.js";
+import type { LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage, Message } from "../../contracts/message.js";
 
 /**
  * 创建 OpenCodeGoClient 时必须提供的连接配置，由 bootstrap 注入，客户端保存后逐次使用。
@@ -366,4 +368,127 @@ export class OpenCodeGoClient implements LlmClient {
       signal?.removeEventListener("abort", onAbort);
     }
   }
+  /**
+   * 发起一次 SSE 请求并逐步交付业务事件，供 runTurnStream 驱动一轮模型响应。
+   * request 包含完整历史和可选工具；不修改输入，按流式契约使用 stream:true 与独立路由 UUID。
+   * async generator 在 for await 迭代时开始执行，yield 暂停后由消费者继续请求下个事件。
+   * 只有合法 message_end 才可成功结束；[DONE] 可选，usage 独立并按值去重。
+   * 外层 HTTP 失败使用 RequestError；字节/SSE/协议/提前断流使用 ResponseError；
+   * 调用方取消使用 AbortError，超时使用 RequestError(timeout)，原因以先触发者为准。
+   * finally 在正常结束、异常或调用方提前关闭 generator 时取消 reader、释放锁并清理定时器。
+   * 本方法只发网络请求，不打印、不执行工具、不保存跨轮历史。
+   */
+  async *stream(request: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmStreamEvent> {
+    const controller = new AbortController();
+    let abortKind: "timeout" | "caller" | undefined;
+
+    /** 超时和外部信号共用的取消入口；只记首次原因，无返回值，并停止本次 fetch/读取。 */
+    const abort = (kind: "timeout" | "caller") => {
+      if (controller.signal.aborted) return;
+      abortKind = kind;
+      controller.abort();
+    };
+
+    /** 外部 abort 事件转发到本次控制器；finally 用此引用移除监听。 */
+    const onAbort = () => abort("caller");
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+
+    // 单次请求总期限包含连接、读取与收尾，不因收到响应头或首个片段而重置。
+    const timer = setTimeout(() => abort("timeout"), this.config.timeoutMs);
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let status: number | undefined;
+    let ended = false;
+    const seenUsage = new Set<string>();
+
+    /**
+     * 把一帧 data 转为事件并维护本次请求的逻辑状态，供下方读取循环调用。
+     * 返回去重后的事件；结束后不允许新的文本/调用或第二个 message_end。
+     * usage 不进入消息历史；这里只校验传输顺序，工具参数仍由 core 整批预检。
+     */
+    const eventsFrom = (data: string): LlmStreamEvent[] => {
+      const events: LlmStreamEvent[] = [];
+      for (const event of parseStreamChunk(data)) {
+        if (event.type === "usage") {
+          const key = JSON.stringify(event.usage);
+          if (seenUsage.has(key)) continue;
+          seenUsage.add(key);
+        } else {
+          if (ended) throw new ResponseError("message end 后出现新的消息内容或重复收尾。");
+          if (event.type === "message_end") ended = true;
+        }
+        events.push(event);
+      }
+      return events;
+    };
+
+    try {
+      controller.signal.throwIfAborted();
+      const response = await fetch(`${this.config.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.apiKey}`,
+          "Content-Type": "application/json",
+          "x-opencode-session": randomUUID(),
+        },
+        body: JSON.stringify({
+          model: request.model,
+          messages: request.messages.map(toWireMessage),
+          ...(request.tools?.length ? {
+            tools: request.tools.map((tool) => ({ type: "function", function: tool })),
+          } : {}),
+          stream: true,
+        }),
+        signal: controller.signal,
+        redirect: "error",
+      });
+      status = response.status;
+      if (!response.ok) {
+        const summary = await readErrorSummary(response, this.config.apiKey);
+        throw new RequestError("http", `模型请求失败（HTTP ${status}）${summary ? `：${summary}` : "。"}`, status, summary);
+      }
+      if (!response.body) throw new ResponseError("流式响应没有响应体。");
+      reader = response.body.getReader();
+      const parser = new SseParser();
+      while (true) {
+        let part: ReadableStreamReadResult<Uint8Array>;
+        try {
+          part = await reader.read();
+        } catch {
+          controller.signal.throwIfAborted();
+          if (ended) break;
+          throw new ResponseError("流式连接在 message end 前中断。");
+        }
+        controller.signal.throwIfAborted();
+        const frames = part.done ? parser.finish() : parser.push(part.value);
+        for (const data of frames) {
+          if (data === "[DONE]") {
+            if (!ended) throw new ResponseError("只收到 [DONE]，缺少 message end。");
+            return;
+          }
+          for (const event of eventsFrom(data)) {
+            controller.signal.throwIfAborted();
+            yield event;
+          }
+        }
+        if (part.done) break;
+      }
+      if (!ended) throw new ResponseError("流式响应缺少 message end。");
+    } catch (error) {
+      if (abortKind === "caller") throw new AbortError("模型请求已取消。");
+      if (abortKind === "timeout") throw new RequestError("timeout", `模型请求超时（${this.config.timeoutMs} ms）。`, status);
+      if (error instanceof RequestError || error instanceof ResponseError) throw error;
+      throw new RequestError("network", "模型流式请求网络失败。", status);
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      // cancel 主动停止剩余 body；清理失败不能遮盖原来的协议/取消错误。
+      if (reader) {
+        await reader.cancel().catch(() => undefined);
+        reader.releaseLock();
+      }
+      controller.abort();
+    }
+  }
+
 }

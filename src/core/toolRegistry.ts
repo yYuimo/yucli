@@ -124,3 +124,24 @@ export class RegisteredTools implements ToolRegistry {
     }
   }
 }
+
+/**
+ * 顺序执行已预检的完整批次，由流式 turn 和非流式循环在预算允许后调用。
+ * registry 为名称分派器，calls 为原始调用顺序；signal 贯穿所有工具。
+ * 返回有序配对结果；取消/内部错误抛异常，不返回部分批次，也不继续后面的工具。
+ * 实际文件读取由 registry 中的工具负责；本函数不修改 calls、不追加模型历史。
+ */
+export async function executeToolBatch(
+  registry: ToolRegistry,
+  calls: readonly ToolCall[],
+  signal?: AbortSignal,
+): Promise<ToolResult[]> {
+  const results: ToolResult[] = [];
+  for (const call of calls) {
+    if (signal?.aborted) throw new AbortError("工具循环已取消。");
+    const result = await registry.execute(call, signal);
+    if (signal?.aborted) throw new AbortError("工具循环已取消。");
+    results.push(result);
+  }
+  return results;
+}

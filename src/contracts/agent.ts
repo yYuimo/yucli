@@ -1,3 +1,4 @@
+import type { Message } from "./message.js";
 import type { ToolResult } from "./tool.js";
 
 /**
@@ -41,4 +42,17 @@ export interface AgentLoopResult {
 
   /** 成功停止原因；当前只允许 final_text，失败不通过这个字段表示。 */
   stopKind: "final_text";
+}
+
+/**
+ * 流式 turn 完整成功的交付结果，由 runTurnStream 创建、REPL 提交到内存历史。
+ * 继承阶段 02 成功结果的文本、次数、工具结果与停止原因，不增加失败状态。
+ * 流中途失败会抛异常，没有可提交结果；屏幕已经显示的片段不会自动变成历史。
+ */
+export interface StreamTurnResult extends AgentLoopResult {
+  /**
+   * 当前 turn 的完整 user/assistant/tool 消息组；不含传入的旧历史。
+   * readonly 约束数组操作，不深度冻结消息对象；REPL 仅在成功后一次性追加。
+   */
+  appendedMessages: readonly Message[];
 }

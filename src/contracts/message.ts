@@ -115,3 +115,27 @@ export interface LlmResponse {
   /** 可选的本轮 token 统计；缺失时调用方仍可以处理正常模型结果。 */
   usage?: LlmUsage;
 }
+
+/**
+ * 一次模型流中逐个到达的业务事件，由 adapter 创建、core 消费，bootstrap 只显示文本。
+ * type 是判别字段：检查它后才能访问该分支字段。事件不包含原始 SSE 或 reasoning。
+ * 这些类型只约束本地编译；外部 JSON 的结构仍必须由 adapter 在运行时检查。
+ */
+export type LlmStreamEvent =
+  // 文本片段保留原文，可能为空白；完整消息结束时才检查是否有可用答案。
+  | { type: "text_delta"; text: string }
+  | {
+      type: "tool_call_delta";
+      /** 同一响应内的非负整数序号，用于隔离交错到达的多项调用。 */
+      index: number;
+      /** 调用 ID，可在后续片段补齐；不是逐片拼接的文本。 */
+      id?: string;
+      /** 工具名，可在后续片段补齐；同一 index 不能变更为另一个非空名称。 */
+      name?: string;
+      /** 本次参数 JSON 片段，按该 index 的到达顺序追加，结束前不可执行。 */
+      argumentsDelta?: string;
+    }
+  // 模型的逻辑收尾，不等于可选传输标记 [DONE]；usage 始终单独发出。
+  | { type: "message_end"; finishReason?: string }
+  // 服务端提供的用量统计；不参与最终文本和消息历史。
+  | { type: "usage"; usage: LlmUsage };

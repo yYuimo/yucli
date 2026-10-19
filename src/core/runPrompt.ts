@@ -15,7 +15,7 @@ import type { LlmResponse } from "../contracts/message.js";
  * 客户端失败时，返回的 Promise 保留其拒绝原因，交给调用方捕获。
  */
 export function runPrompt(
-  client: LlmClient,
+  client: Pick<LlmClient, "complete">,
   model: string,
   prompt: string,
   signal?: AbortSignal,

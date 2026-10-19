@@ -3,7 +3,8 @@ import type { LlmClient } from "../contracts/llm-client.js";
 import type { AgentLoopOptions, AgentLoopResult } from "../contracts/agent.js";
 import type { Message } from "../contracts/message.js";
 import type { ToolRegistry, ToolResult } from "../contracts/tool.js";
-import { validateToolBatch } from "./toolRegistry.js";
+import { resolveLoopLimits } from "./loopLimits.js";
+import { executeToolBatch, validateToolBatch } from "./toolRegistry.js";
 
 /**
  * 完成用户一次提问中的工具循环：模型要文件时先执行工具，再把结果交回模型，直到得到最终文本。
@@ -24,23 +25,15 @@ import { validateToolBatch } from "./toolRegistry.js";
  * 历史只存在本次调用中；网络/文件副作用由注入的实现执行，本函数不读写磁盘或打印。
  */
 export async function agentLoop(
-  client: LlmClient,
+  client: Pick<LlmClient, "complete">,
   registry: ToolRegistry,
   model: string,
   prompt: string,
   options: Partial<AgentLoopOptions> = {},
   signal?: AbortSignal,
 ): Promise<AgentLoopResult> {
-  // Partial 让 options 的每个字段都可省略；?? 只在没有提供该值时采用默认额度。
-  const maxModelCalls = options.maxModelCalls ?? 8;
-  const maxToolCalls = options.maxToolCallsPerResponse ?? 4;
-
-  if (
-    !Number.isInteger(maxModelCalls) || maxModelCalls < 1 || maxModelCalls > 8 ||
-    !Number.isInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 4
-  ) {
-    throw new AgentLoopError("protocol_error", "循环选项超出阶段 02 的允许范围。");
-  }
+  // 两种循环共用额度校验；Partial 允许调用方只覆盖一个选项。
+  const { maxModelCalls, maxToolCallsPerResponse: maxToolCalls } = resolveLoopLimits(options);
 
   const messages: Message[] = [{ role: "user", content: prompt }];
   const toolResults: ToolResult[] = [];
@@ -82,13 +75,9 @@ export async function agentLoop(
 
     messages.push(message);
 
-    // for...of + await 保证先完成一个调用再开始下一个，不使用并发 Promise.all。
-    for (const call of calls) {
-      if (signal?.aborted) throw new AbortError("工具循环已取消。");
-
-      const result = await registry.execute(call, signal);
-      if (signal?.aborted) throw new AbortError("工具循环已取消。");
-
+    // 共用顺序执行器；整批执行成功后才追加完整的工具结果组。
+    const results = await executeToolBatch(registry, calls, signal);
+    for (const result of results) {
       toolResults.push(result);
 
       // 本地结果的 ok 用于诊断；模型通过 tool 消息的 ID 和 content 看到执行结果。

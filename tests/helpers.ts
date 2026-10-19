@@ -48,3 +48,36 @@ export function toolCompletion(
     }],
   };
 }
+
+/** SSE 帧可以先编码再按任意字节切块，用于真实检验 decoder 的跨 chunk 行为。 */
+export function sseFrame(value: unknown, crlf = false): string {
+  const end = crlf ? "\r\n" : "\n";
+  return `data: ${typeof value === "string" ? value : JSON.stringify(value)}${end}${end}`;
+}
+
+export function streamChunk(delta: object = {}, finishReason: string | null = null, usage?: object) {
+  return { choices: [{ delta, finish_reason: finishReason }], ...(usage ? { usage } : {}) };
+}
+
+export function completionSse(value: ReturnType<typeof completion> | ReturnType<typeof toolCompletion>) {
+  const choice = value.choices[0]!;
+  const message = choice.message;
+  const delta = { ...message, ...("tool_calls" in message ? {
+    tool_calls: message.tool_calls.map((call, index) => ({ ...call, index })),
+  } : {}) };
+  return sseFrame(streamChunk(delta, "finish_reason" in choice ? choice.finish_reason : "stop")) + sseFrame("[DONE]");
+}
+
+export async function writeSse(
+  response: import("node:http").ServerResponse,
+  blocks: readonly (string | Uint8Array)[],
+  intervalMs = 0,
+) {
+  response.writeHead(200, { "Content-Type": "text/event-stream" });
+  for (const block of blocks) {
+    if (response.destroyed) return;
+    response.write(block);
+    if (intervalMs) await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  if (!response.destroyed) response.end();
+}

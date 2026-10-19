@@ -1,6 +1,6 @@
 // import type 只引入编译期类型，不会在生成的 JS 中执行模块导入。
 // ESM 源码使用 .js 后缀，TypeScript 检查时会解析对应 .ts 文件。
-import type { LlmRequest, LlmResponse } from "./message.js";
+import type { LlmRequest, LlmResponse, LlmStreamEvent } from "./message.js";
 
 /**
  * 应用调用模型所依赖的能力接口，把 core 与具体提供方隔开。
@@ -22,6 +22,15 @@ export interface LlmClient {
   // Promise<LlmResponse> 是未来完成的结果；调用方 await 后才取得 LlmResponse。
   // signal? 表示可选取消信号。成功 resolve；失败 reject，交给调用方处理。
   complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse>;
+
+  /**
+   * 逐步交付一次模型响应，供 runTurnStream 边显示文本边拼装工具请求。
+   * request 是当前完整历史及工具定义，signal 是当前 turn 的可选取消信号；不修改输入。
+   * 返回 AsyncGenerator，调用方通过 for await...of 顺序消费；开始迭代时才发 HTTP 请求。
+   * message_end 表示逻辑收尾，usage 为独立事件；网络、协议、超时和取消以异常传播。
+   * 调用方提前 break/return 时，实现必须释放 reader、定时器和监听器。
+   */
+  stream(request: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmStreamEvent>;
 }
 
 // 这些类在运行时真实存在，因此 CLI 可以通过 instanceof 区分它们。
