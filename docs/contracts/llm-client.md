@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-阶段 02 扩展状态：`draft`
+阶段 02 扩展状态：`accepted`
 
 适用阶段：阶段 01 单次模型问答；阶段 02 增加工具调用和 AgentLoop。
 
@@ -84,9 +84,9 @@ export interface LlmClient {
 }
 ```
 
-阶段 01 的已实现接口不暴露工具调用；阶段 02 的扩展增加工具定义、工具消息、工具调用和 `finishReason`，仍不暴露流式 chunk、提供方专属字段或原始 HTTP 响应。
+阶段 01 的无工具调用方式保持兼容；阶段 02 已增加工具定义、工具消息、工具调用和 `finishReason`，仍不暴露流式 chunk、提供方专属字段或原始 HTTP 响应。
 
-代码位置：数据结构在 `src/contracts/message.ts`，`LlmClient` 与稳定错误在 `src/contracts/llm-client.ts`。`core/runPrompt.ts` 只依赖这两个契约模块；`adapters/opencode-go/OpenCodeGoClient.ts` 实现接口，并自行声明构造参数类型，不依赖配置加载器。
+代码位置：数据结构在 `src/contracts/message.ts`，`LlmClient` 与稳定错误在 `src/contracts/llm-client.ts`。`core/runPrompt.ts` 保留直接调用方式；阶段 02 的 `core/agentLoop.ts` 另依赖工具/循环契约；`adapters/opencode-go/OpenCodeGoClient.ts` 实现接口，并自行声明构造参数类型，不依赖配置加载器。
 
 ## 调用约定
 
@@ -136,6 +136,8 @@ x-opencode-session: <每次请求独立的 UUID>
 ```text
 choices[0].message.role
 choices[0].message.content
+choices[0].message.tool_calls
+choices[0].finish_reason
 usage.prompt_tokens
 usage.completion_tokens
 ```
@@ -198,3 +200,5 @@ export class AgentLoopError extends Error {
 这个契约只依赖 OpenAI Chat Completions 的最小公共字段。阶段 02 的工具调用扩展必须与 [工具执行契约](tool-execution.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md) 同步；若后续加入流式、提供方扩展或更多工具，应新增字段和测试，并在阶段文档或 ADR 中记录兼容性影响，不能静默改变 `complete()` 的语义。
 
 关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。
+
+实现分工：adapter 校验 HTTP 外层、tool_calls 的字段与 ID、finish_reason 类型及截断；core 在执行任何工具前检查整批数量、ID 和参数结构。参数 JSON 或 `{path:string}` 不合法抛 AgentLoopError(protocol_error)，不会先执行同批的合法调用。契约验证记录见[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。

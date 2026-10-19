@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 已按四层依赖结构实现、验证，并获用户授权集成到 main（`done`）；阶段 02 已形成待评审设计，尚未实现。
+状态：阶段 01 已按四层依赖结构实现、验证，并获用户授权集成到 main（`done`）；阶段 02 已完成顺序只读工具循环及本地/真实验证（`verified`），待审查与集成授权。
 
 ## 目标场景
 
@@ -67,17 +67,19 @@ bootstrap ──→ core ───────→ contracts
 ```text
 src/
 ├── contracts/
-│   ├── message.ts            # Message、LlmRequest、LlmResponse
-│   └── llm-client.ts         # LlmClient 和稳定错误类型
+│   ├── message.ts            # 文本、assistant 调用、tool 消息和模型请求/响应
+│   ├── llm-client.ts         # LlmClient 和稳定错误（含 AgentLoopError）
+│   ├── tool.ts               # 工具定义、调用、结果和注册表接口
+│   └── agent.ts              # AgentLoopOptions / AgentLoopResult
 ├── core/
-│   └── runPrompt.ts          # 一次 prompt 的应用流程
+│   ├── agentLoop.ts          # 历史、预算、整批预检、顺序执行
+│   ├── toolRegistry.ts       # 参数解析、批次校验、工具名称分派
+│   └── runPrompt.ts          # 保留阶段 01 的直接无工具调用入口
 ├── adapters/
-│   ├── opencode-go/
-│   │   └── OpenCodeGoClient.ts # OpenAI 兼容 HTTP 客户端
-│   └── config/
-│       └── loadConfig.ts     # dotenv、环境变量和默认值
-└── bootstrap/
-    └── cli.ts                # Commander、依赖组装、输出和退出码
+│   ├── filesystem/ReadFileTool.ts # 工作区内只读 UTF-8 文件，最大 64 KiB
+│   ├── opencode-go/OpenCodeGoClient.ts # OpenAI 字段转换、超时、响应校验
+│   └── config/loadConfig.ts  # dotenv、环境变量和默认值
+└── bootstrap/cli.ts          # 注册工具、注入循环、输出与退出码
 ```
 
 各层职责：
@@ -87,9 +89,13 @@ src/
 - `adapters` 实现 `contracts` 定义的接口，负责外部系统、配置和资源边界；不能 import `bootstrap`。
 - `bootstrap` 是组合根，创建 adapter 并注入 core，负责 CLI 生命周期；不把业务流程写进参数解析器。
 
-当前调用链为 `bootstrap/cli → adapters/config → core/runPrompt → contracts/LlmClient → adapters/opencode-go → CLI 输出`。配置在一次命令启动时构造，prompt、请求和回答只存在于本次进程内；core 不读取环境变量、不依赖提供方响应格式。OpenCode Go adapter 每次请求生成独立的 `x-opencode-session` 路由 UUID，持有独立超时控制器，并在 `finally` 清理定时器与外部取消监听器。超时覆盖响应体读取，HTTP 诊断只读取最多 512 字节并脱敏。
+当前调用链为 `bootstrap/cli → adapters/config → core/agentLoop → LlmClient/OpenCodeGoClient → ToolRegistry/ReadFileTool → 下一轮模型 → CLI 输出`。配置在一次命令启动时构造，prompt、请求和回答只存在于本次进程内；core 不读取环境变量、不依赖提供方响应格式。OpenCode Go adapter 每次请求生成独立的 `x-opencode-session` 路由 UUID，持有独立超时控制器，并在 `finally` 清理定时器与外部取消监听器。超时覆盖响应体读取，HTTP 诊断只读取最多 512 字节并脱敏。
 
-阶段 02 计划在 `core` 增加 `AgentLoop`，在 `contracts` 增加工具调用和工具结果，在 `adapters` 增加工作区内的 `ReadFileTool`，由 `bootstrap` 注册并注入。循环按模型调用顺序执行工具，默认最多 8 次模型调用；工具错误作为 tool message 返回模型。阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。`session` 在阶段 4 加入；当前不提前拆成独立 package，也不加入假模型客户端。
+阶段 02 由 bootstrap 注册并注入 `ReadFileTool`。循环持有完整消息历史和工具结果，执行前整批检查调用 ID、参数 JSON 与 `{path:string}` 结构；结构非法或超过 4 个调用时全部拒绝。工具按顺序执行，可恢复错误回传 tool message，模型请求错误、取消和协议错误直接抛出。第 8 次响应如仍请求工具，跳过最后一批并抛 loop_limit。
+
+文件工具先检查词法路径和真实路径的包含关系，再 stat、打开句柄并有界读取；fatal UTF-8 解码保留原文，空文件允许。真实路径按路径段比较，末端打开使用 O_NOFOLLOW，并再次检查句柄类型与大小；这些检查不能代替操作系统沙箱，也不保证面对工作区父目录并发替换时的原子隔离。
+
+阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。`session` 在阶段 4 按需加入；没有拆分多包 workspace，也没有新增生产假模型客户端。
 
 ### 依赖检查
 
@@ -112,14 +118,16 @@ core 与模型 adapter 的内部约定见 [LlmClient 契约](contracts/llm-clien
 Message = system | user | assistant
 LlmRequest  = { messages, model, ... }
 LlmResponse = { message, usage? }
-失败通过稳定的 ConfigError / RequestError / ResponseError / AbortError 抛出；RunResult 待 Agent Loop 阶段再设计。
+失败通过稳定的 ConfigError / RequestError / ResponseError / AbortError 抛出；循环成功结果见 AgentLoopResult，循环失败抛 AgentLoopError。
 ```
 
 阶段 2 扩展为：
 
 ```text
 assistant.toolCalls[]
-tool { toolCallId, name, content, isError }
+ToolResult { toolCallId, name, content, ok }
+ToolMessage { role: tool, toolCallId, name?, content }
+AgentLoopResult { finalText, modelCalls, toolResults, stopKind: final_text }
 ```
 
 每次工具结果必须使用对应的 `toolCallId`，并在下一次模型请求前追加到历史。模型请求失败、工具失败和循环达到上限属于不同的退出原因。
@@ -141,7 +149,7 @@ tool { toolCallId, name, content, isError }
 
 ### 阶段 2：最小 Agent Loop
 
-- 模型能请求 `readFile`。
+- 模型能请求 `read_file`。
 - 工具参数在执行前校验，文件不存在等错误作为工具结果回传。
 - 工具结果进入下一次模型请求，最终回答能引用工具内容。
 - 覆盖未知工具、非法参数和循环轮次上限。

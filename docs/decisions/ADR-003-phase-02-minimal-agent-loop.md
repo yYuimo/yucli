@@ -1,6 +1,6 @@
 # ADR-003：阶段 02 采用顺序只读工具循环
 
-状态：`proposed`
+状态：`accepted`
 
 ## 背景与问题
 
@@ -43,4 +43,10 @@
 - [LlmClient 契约](../contracts/llm-client.md)
 - [OpenCode Go HTTP 契约](../contracts/opencode-go-http.md)
 - [CLI 行为契约](../contracts/cli.md)
-- 预期代码：`src/core/agentLoop.ts`、`src/adapters/filesystem/ReadFileTool.ts`
+- 实现代码：`src/core/agentLoop.ts`、`src/adapters/filesystem/ReadFileTool.ts`
+
+## 阶段 02 联调记录（2026-10-19）
+
+独立于本地 mock 测试，使用项目工具链运行真实 CLI，模型为 `deepseek-v4-flash`，只读取工作区 README.md。共 2 次 HTTP 请求，状态均为 200；finish_reason 依次为 `tool_calls` 和 `stop`。第二次请求携带 user/assistant/tool 完整历史，read_file 调用和工具结果 ID 配对，2 个路由 UUID 各不相同。CLI 退出码 0、回答非空、stderr 为空，约 8.07 秒。
+
+结果验证了当前账号和模型下“每次 complete 生成新 x-opencode-session”的规则可完成工具往返，因此保持原决定，不改成命令级复用。只记录计数、配对和停止原因，不保留凭证、文件正文或完整模型回答。后续服务行为改变时再更新契约与 ADR，不将单次成功视为所有模型的兼容性保证。

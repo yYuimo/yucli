@@ -2,13 +2,15 @@
 
 状态：`accepted`
 
+阶段 02 扩展状态：`accepted`
+
 适用阶段：阶段 01 单次模型问答；阶段 02 单次工具往返。
 
 ## 运行模式与命令形式
 
 阶段 01 是一次性命令：每次进程只处理一个 prompt。请求成功或失败后，进程都会结束；持续输入和多轮对话属于后续阶段。
 
-组合根为 `src/bootstrap/cli.ts`，构建入口为 `dist/bootstrap/cli.js`。`package.json` 中 `dev`、`start` 和 `bin.yucli` 与这两个入口一致；`bootstrap` 负责创建具体 adapter 并传入 core。
+组合根为 `src/bootstrap/cli.ts`，构建入口为 `dist/bootstrap/cli.js`。`package.json` 中 `dev`、`start` 和 `bin.yucli` 与这两个入口一致；`bootstrap` 负责创建具体 adapter，固定注册 `read_file` 并传入 core/agentLoop；无额外工具开关或额度 CLI 参数。
 
 ```text
 yucli --prompt <text>
@@ -22,7 +24,7 @@ yucli --help
 - 成功的 assistant 文本写入标准输出。
 - 错误文本写入标准错误。
 - 不在输出中显示 API key、Authorization 头或完整请求体。
-- 阶段 01 不显示 reasoning、HTTP 调试信息或原始 JSON。
+- 阶段 01/02 均不显示 reasoning、HTTP 调试信息、工具中间消息或原始 JSON。
 - 成功输出后以换行结束。
 
 ## 退出码
@@ -59,3 +61,9 @@ yucli --help
 阶段 01 只有 `--prompt`，不允许 CLI 参数覆盖 API key。模型和端点使用环境变量配置，避免凭证出现在 shell 历史和进程参数中。
 
 关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。
+
+## 阶段 02 运行路径
+
+一次 prompt 可以触发多个模型请求，但仍是一次命令；最多 8 次调用、每批 4 个顺序工具调用。工作区固定为启动 cwd，仅允许最大 64 KiB 的工作区相对 UTF-8 普通文件。无工具的最终文本直接返回；模型先调用工具时只输出循环完成后的 finalText。
+
+成功的工具错误回传并不单独决定退出码：模型看到文件错误后给出最终文本，CLI 仍以 0 结束。AgentLoopError、ResponseError、RequestError 和 AbortError 均映射到 4。无 prompt、配置非法和帮助命令仍在发请求前处理。

@@ -1,6 +1,6 @@
 # 工具执行契约
 
-状态：`draft`
+状态：`accepted`
 
 适用阶段：阶段 02，只读 `read_file` 与最小 Agent Loop。
 
@@ -60,7 +60,7 @@ interface ToolRegistry {
 }
 ```
 
-`argumentsJson` 保留模型原始参数文本；工具实现必须先 `JSON.parse`，再检查对象、字段类型和允许字段。TypeScript 类型断言不能替代这个运行时检查。
+`argumentsJson` 保留模型原始参数文本；core 的工具执行器在整批预检时先 `JSON.parse`，再检查对象、字段类型和允许字段，分派时再次校验；ReadFileTool 接收解析后的对象并复核结构。TypeScript 类型断言不能替代这个运行时检查。
 
 ## 消息历史规则
 
@@ -75,7 +75,7 @@ tool：tool_call_id、content（内部结果另行保留工具名）
 AgentLoop 必须按以下顺序追加消息：
 
 1. 初始 user 消息。
-2. 模型返回的 assistant 消息，保留文本、完整工具调用和 `finishReason`。
+2. 模型返回的 assistant 消息，保留文本和完整工具调用；`finishReason` 保留在 LlmResponse 作为本轮判断依据，不发送进消息历史。
 3. 每个工具调用对应一个 tool 消息，`tool_call_id` 必须匹配。
 4. 下一次模型请求使用完整历史和同一组工具定义。
 
@@ -187,10 +187,21 @@ interface AgentLoopResult {
 
 `LlmRequest.tools` 是可选字段；当工具列表为空时，adapter 必须省略 JSON 中的 `tools` 字段，不能发送空数组。这样阶段 01 的请求体和测试保持兼容。
 
-阶段 02 实现前必须同步更新 [LlmClient 契约](llm-client.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md)，并增加请求体和响应解析测试。阶段 01 的无工具请求仍应保持兼容。
+阶段 02 已同步更新 [LlmClient 契约](llm-client.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md)，并增加请求体和响应解析测试。阶段 01 的无工具请求仍应保持兼容。
 
 ## 关联文档
 
 - [阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)
 - [阶段 01 LlmClient 契约](llm-client.md)
 - [OpenCode Go HTTP 契约](opencode-go-http.md)
+
+## 已实现代码与验证
+
+- [tool.ts](../../src/contracts/tool.ts)、[agent.ts](../../src/contracts/agent.ts)：工具和循环公共数据。
+- [toolRegistry.ts](../../src/core/toolRegistry.ts)：整批结构预检、参数解析和名称分派；结构错误抛 AgentLoopError，未知名称返回安全工具结果。
+- [agentLoop.ts](../../src/core/agentLoop.ts)：历史与预算、顺序执行和结果；adapter 的结构/截断错误为 ResponseError，core 的批次/参数错误为 AgentLoopError。
+- [ReadFileTool.ts](../../src/adapters/filesystem/ReadFileTool.ts)：路径、stat、受限读取与 fatal UTF-8 解码。采用 ignoreBOM:true 保留文件开头 BOM；读取后再次检查大小，文件增长不会静默截断成功。
+- 文件错误摘要使用稳定前缀：invalid_arguments、invalid_path、outside_workspace、file_not_found、not_regular_file、file_too_large、invalid_utf8、permission_denied、read_failed；不拼接底层异常或绝对路径。
+- 取消在操作前后和每次读取之间检查，同一个 signal 贯穿循环、注册表和工具；底层 stat/read 没有 OS 级抢占取消保证，已开始的文件调用完成后检查信号，拒绝继续追加成功结果。句柄在 finally 关闭。
+- 真实路径检查不是操作系统沙箱，不承诺对父目录并发替换提供原子隔离；当前边界和大小限制测试结果见阶段规格。
+- [agentLoop.test.ts](../../tests/agentLoop.test.ts)、[readFile.test.ts](../../tests/readFile.test.ts)、[toolHttp.test.ts](../../tests/toolHttp.test.ts)覆盖循环、工具和协议往返，CLI 子进程测试覆盖源码及产物入口。

@@ -1,6 +1,6 @@
 # 阶段 02：只读文件工具与最小 Agent Loop
 
-状态：`implementing`
+状态：`verified`
 
 本阶段建立在阶段 01 的单次模型问答之上。用户仍然从命令行提供一个 prompt，但模型可以提出 `read_file` 工具调用；yucli 执行一次只读文件操作，把工具结果加入消息历史，再让模型继续生成最终回答。
 
@@ -296,16 +296,16 @@ protocol_error  # 工具批次或模型循环协议不合法
 ## 任务清单
 
 - [x] 将阶段状态从 `proposed` 改为 `designed`，确认范围和推荐选择。
-- [ ] 扩展 `Message`、`LlmRequest`、`LlmResponse`，支持 assistant tool calls、tool messages、可选 `tools` 和 `finishReason`。
-- [ ] 扩展 OpenCode Go adapter 的请求体和响应解析，覆盖工具定义、调用 ID 和参数 JSON。
-- [ ] 新增 `Tool`、`ToolDefinition`、`ToolCall`、`ToolResult`、`ToolRegistry` 和 `AgentLoopError` 契约。
-- [ ] 实现 `ReadFileTool`，先 `stat` 再读取，使用 fatal UTF-8 解码，并完成路径段、符号链接、大小、目录校验。
-- [ ] 实现 `AgentLoop`，覆盖最终文本、工具调用、工具错误、截断响应、全有或全无校验、批次上限和最大轮数。
-- [ ] 在 bootstrap 中注册 `read_file` 并把工作区根目录传入工具。
-- [ ] 更新 CLI，使阶段 01 的单次无工具路径继续兼容。
-- [ ] 更新 CLI 契约，记录 `AgentLoopError` 的退出码 4。
-- [ ] 增加本地 HTTP、工具执行、循环和 CLI 子进程测试。
-- [ ] 更新 `LlmClient`、OpenCode Go HTTP、工具和 CLI 契约，以及相关 ADR。
+- [x] 扩展 `Message`、`LlmRequest`、`LlmResponse`，支持 assistant tool calls、tool messages、可选 `tools` 和 `finishReason`。
+- [x] 扩展 OpenCode Go adapter 的请求体和响应解析，覆盖工具定义、调用 ID 和参数 JSON。
+- [x] 新增 `Tool`、`ToolDefinition`、`ToolCall`、`ToolResult`、`ToolRegistry` 和 `AgentLoopError` 契约。
+- [x] 实现 `ReadFileTool`，先 `stat` 再读取，使用 fatal UTF-8 解码，并完成路径段、符号链接、大小、目录校验。
+- [x] 实现 `AgentLoop`，覆盖最终文本、工具调用、工具错误、截断响应、全有或全无校验、批次上限和最大轮数。
+- [x] 在 bootstrap 中注册 `read_file` 并把工作区根目录传入工具。
+- [x] 更新 CLI，使阶段 01 的单次无工具路径继续兼容。
+- [x] 更新 CLI 契约，记录 `AgentLoopError` 的退出码 4。
+- [x] 增加本地 HTTP、工具执行、循环和 CLI 子进程测试。
+- [x] 更新 `LlmClient`、OpenCode Go HTTP、工具和 CLI 契约，以及相关 ADR。
 
 ## 验证计划
 
@@ -344,14 +344,56 @@ pnpm dev --prompt "请总结 README.md"
 
 ### 已完成
 
-阶段 02 尚未实现。本文件只记录设计和验收要求。
+2026-10-19，阶段 02 已实现并通过开发自验，状态 `verified`；等待项目规划审查及用户集成授权。由助手完成实现与运行，不等于学习者已独立完成或掌握。
+
+- 前置提交先将规格改为 designed，并将“返回 AgentLoopError”修正为“抛出 AgentLoopError”；实现期间扩展契约保持 draft，验证后改为 accepted。
+- 新增 `contracts/tool.ts`、`contracts/agent.ts`，扩展消息、模型输入输出和 AgentLoopError；保留阶段 01 直接调用入口和精确无工具 HTTP 请求体。
+- OpenCode Go adapter 按需发送 tools、转换 assistant/tool 消息、解析调用及 finishReason，length 直接 ResponseError；不输出 reasoning。
+- 新增 core/agentLoop 和工具注册表：整批参数及 ID 预检、顺序执行、未知名称及文件错误回传、每批最多 4 个、最多 8 次模型调用；最后一轮工具不执行。
+- ReadFileTool 只读工作区内 UTF-8 普通文件，按路径段检查词法与真实路径，先 stat 再打开，有界 Buffer 读取后 fatal 解码；支持空文件和 65536 字节，拒绝 65537 字节及非法 UTF-8，保留原文/BOM。
+- bootstrap 固定注册 read_file，使用 cwd 为根，输出最终文本或安全错误，AgentLoopError 退出码为 4。
+- 更新 README、架构、四份契约及 ADR-002/003。无新增依赖；未加入 REPL、流式、写文件、审批、持久化、重试或命令执行工具。
 
 ### 验证命令与结果
 
-尚未运行阶段 02 的实现验证。阶段 01 的既有验证结果见[阶段 01 规格](phase-01-single-model.md)。
+使用 Node 24.14.0、pnpm 10.33.2。在本机通过下列方式临时选用工具链：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm <命令>'
+```
+
+| 检查 | 实际结果 |
+| --- | --- |
+| pnpm typecheck | 通过，包含源码与测试 |
+| pnpm lint | 通过 |
+| pnpm test | 7 个文件、141 项测试通过；测试先构建，均使用本地 HTTP、测试桩和临时文件，不调用真实模型 |
+| pnpm build | 单独执行并通过 |
+| pnpm dev --help | 在项目工具链下运行，正常输出帮助并退出 |
+| CLI 子进程冒烟 | 源码与构建产物均验证直接回答、真实临时文件往返、参数/配置/模型失败、批次非法、截断与循环上限；只输出最终文本 |
+| 真实 CLI 工具往返 | 单独使用已有 .env 运行构建产物，读取 README.md；2 次请求均 HTTP 200，调用 ID 配对，路由 UUID 各自不同，退出码 0、stdout 非空、stderr 为空，约 8.07 秒 |
+| 文档/Git 检查 | 链接、围栏、JSON 示例、契约与导出类型、diff 空白、敏感文件忽略及提交范围检查 |
+
+对应测试：
+
+- `agentLoop.test.ts`：直接回答、历史、串行、多调用、全批拒绝、未知工具/工具错误回传、8 次边界、结果对象、模型失败和取消。
+- `readFile.test.ts`：空文件、原文/BOM、65536/65537 字节与多字节大小、fatal UTF-8、相对路径/绝对路径/越界、前缀碰撞和符号链接、目录/特殊文件、先 stat 后 open、文件增长、权限错误安全摘要、取消与句柄清理。
+- `toolHttp.test.ts`：真实 adapter + core + 文件工具的本地 HTTP 往返、工具声明、tool_call_id 映射、name 省略、每请求 UUID、无工具精确请求兼容、外部调用字段错误、批次非法、length 与未知 finish_reason。
+- `cli.test.ts`：源码与产物 CLI 行为；阶段 01 的参数、配置、输出和退出码回归。
+- 既有 `client.test.ts`、`config.test.ts`、`architecture.test.ts` 继续通过。
+
+测试开发中遇到 Node 内置 ESM 导出不能直接 spyOn，已通过测试内包装 stat/open 解决，生产文件操作没有为测试新增接口。
+
+### 真实联调观察
+
+独立真实验证使用的模型为 deepseek-v4-flash，两次请求角色列表分别为 `[user]` 和 `[user, assistant, tool]`；finish_reason 依次为 tool_calls、stop。read_file 调用一次，回传工具结果一次，调用 ID 匹配，2 个 x-opencode-session 均不相同，回答非空。
+
+临时诊断钩子只记录请求角色、状态码、工具调用与 ID 配对、路由唯一性及停止原因，不保存密钥、文件正文、reasoning 或完整回答；临时文件已随运行清理。ADR-002/003 已回写，继续采用每次 complete 独立 UUID，不改动提供方路由策略。
 
 ### 遗留问题与下一步
 
-- 阶段 02 尚未实现；本文件中的规则需要在进入实现前保持与契约和测试一致。
-- 需要在真实联调中确认多轮请求下 `x-opencode-session` 每请求独立 UUID 的可行性，并回写 ADR-002/003。
-- 阶段 02 完成后，才能决定阶段 03 是否引入 REPL、流式输出或更长的消息历史。
+- 阶段 02 实现与验收范围内无阻塞或未开发项；待审查，不自动合并或推送。
+- 验证平台为本机 macOS；使用 O_NOFOLLOW/O_NONBLOCK 的文件访问和 mkfifo 测试尚未在其他平台验证。
+- 真实验证仅覆盖当前账号、端点、模型的一次完整工具往返，不承诺其他模型或未来服务行为一致。
+- 工具检查避免静态符号链接越界、末端链接替换和超限读取，但不是 OS 沙箱；不承诺对工作区父目录的并发替换提供原子隔离。底层 stat/read 取消在调用前后检查，不承诺 OS 级抢占。
+- 消息历史在单次命令中增长，当前只按模型次数、每批数量和文件字节数限制；未引入 token 预算或上下文压缩。
+- 后续先结合中文注释讲解工具 ID、参数预检和历史增长，再审查阶段 03 是否需要 REPL 与流式，不提前实现。

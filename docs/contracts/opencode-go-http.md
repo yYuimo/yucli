@@ -2,18 +2,18 @@
 
 状态：`accepted`
 
-阶段 02 扩展状态：`draft`
+阶段 02 扩展状态：`accepted`
 
 适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返。
 
-本文约定 yucli 怎样调用 OpenCode Go、怎样把其响应转换为内部结果。内容依据当前实现、已有本地 HTTP 测试和阶段 01 真实联调记录，不代表 OpenCode Go 的完整官方 API 规范。本文中的请求、响应数据均为说明用示例，不包含真实凭证或真实回答。
+本文约定 yucli 怎样调用 OpenCode Go、怎样把其响应转换为内部结果。内容依据当前实现、已有本地 HTTP 测试和阶段 01/02 真实联调记录，不代表 OpenCode Go 的完整官方 API 规范。本文中的请求、响应数据均为说明用示例，不包含真实凭证或真实回答。
 
 ## 调用双方与职责
 
 | 参与方 | 做什么 | 输入与输出 |
 | --- | --- | --- |
-| `bootstrap/cli.ts` | 检查参数、加载配置、创建客户端、输出结果 | `--prompt` → `runPrompt(...)` → stdout 或 stderr |
-| `core/runPrompt.ts` | 把用户原文包装为一条 user 消息 | prompt 与模型名 → `LlmRequest` |
+| `bootstrap/cli.ts` | 检查参数、加载配置、注册 read_file、输出最终文本 | `--prompt` → `agentLoop(...)` → stdout 或 stderr |
+| `core/agentLoop.ts` | 创建初始消息、整批校验工具、顺序执行并保存历史 | prompt → 多次 `LlmRequest` → `AgentLoopResult` |
 | `OpenCodeGoClient.complete()` | 将内部请求发往 OpenCode Go，处理 HTTP 和响应校验 | `LlmRequest` → `Promise<LlmResponse>`，失败则拒绝 Promise |
 | OpenCode Go 服务 | 接收模型名与消息，返回 Chat Completions 响应 | HTTP JSON 请求 → HTTP 状态与响应体 |
 
@@ -22,17 +22,24 @@
 ```mermaid
 sequenceDiagram
     participant CLI as CLI
-    participant Core as runPrompt
+    participant Loop as AgentLoop
     participant Client as OpenCodeGoClient
     participant Go as OpenCode Go
-    CLI->>Core: client、model、prompt
-    Core->>Client: complete({model, messages})
-    Client->>Go: POST /chat/completions，headers + JSON body
-    Go-->>Client: HTTP 状态 + 响应体
-    Client->>Client: 读 body、解析 JSON、校验字段
-    Client-->>Core: LlmResponse 或拒绝 Promise
-    Core-->>CLI: 原样传回结果或失败
-    CLI->>CLI: 输出回答或错误，设置退出码
+    participant Tool as ReadFileTool
+    CLI->>Loop: client、registry、model、prompt
+    Loop->>Client: user 消息与工具定义
+    Client->>Go: POST，新的 session UUID
+    Go-->>Client: assistant tool_calls
+    Client-->>Loop: 内部 ToolCall 与 finishReason
+    Loop->>Loop: 整批结构预检及调用预算检查
+    Loop->>Tool: 顺序读取工作区内文件
+    Tool-->>Loop: 内容或安全错误摘要
+    Loop->>Client: user + assistant + tool 完整历史
+    Client->>Go: POST，另一个 session UUID
+    Go-->>Client: 最终 assistant 文本
+    Client-->>Loop: LlmResponse
+    Loop-->>CLI: AgentLoopResult.finalText
+    CLI->>CLI: stdout 输出并结束
 ```
 
 ## 从终端输入到模型消息
@@ -43,7 +50,7 @@ sequenceDiagram
 pnpm dev --prompt "解释一下 Promise"
 ```
 
-CLI 先确认 prompt 非空白，再加载配置。`runPrompt` 将它包装成内部请求：
+CLI 先确认 prompt 非空白，再加载配置。阶段 02 的 AgentLoop 创建初始 user 消息并附加注册工具；阶段 01 保留的 `runPrompt` 仍可生成下面的无工具请求：
 
 ```json
 {
@@ -56,7 +63,7 @@ CLI 先确认 prompt 非空白，再加载配置。`runPrompt` 将它包装成�
 
 `model` 来自 `OPENCODE_GO_MODEL` 或默认值；`content` 保留用户输入原文，包括其中的空格和换行。阶段 01 不主动添加 system message，也不附加过去问答或项目文件。
 
-内部接口允许 `system`、`user`、`assistant` 纯文本消息；adapter 按调用方给出的消息顺序发送，不修改请求对象。当前 adapter 信任内部 TypeScript 契约，不额外对传入的 `LlmRequest` 做完整运行时校验；CLI 的正常路径只构造一条 user 消息。
+内部接口允许 `system`、`user`、`assistant` 纯文本消息；adapter 按调用方给出的消息顺序发送，不修改请求对象。当前 adapter 信任内部 TypeScript 契约，不额外对传入的 `LlmRequest` 做完整运行时校验；阶段 02 CLI 以一条 user 消息开始，再由 AgentLoop 添加 assistant 调用和 tool 结果。
 
 ## HTTP 请求契约
 
@@ -88,7 +95,7 @@ x-opencode-session: <本次请求的随机 UUID>
 | `Content-Type` | adapter 固定设置 | 告诉服务端 body 是 JSON |
 | `x-opencode-session` | 每次 `complete()` 内调用 `randomUUID()` | 提供服务路由标识；不代表本地已保存会话或服务会自动补齐历史 |
 
-阶段 01 首次真实请求因缺少路由头返回 HTTP 400 `MissingSessionID`，补充后成功，依据见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。阶段 01 每次调用独立问答；阶段 02 的多次工具往返仍暂定逐次生成独立 UUID，真实联调结果需要回写 ADR-002。
+阶段 01 首次真实请求因缺少路由头返回 HTTP 400 `MissingSessionID`，补充后成功，依据见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。阶段 01 每次调用独立问答；阶段 02 同一次命令的各轮请求仍使用独立 UUID，已在真实工具往返中验证；结果见 ADR-002。
 
 上表列的是客户端显式设置的应用请求头，底层 fetch 还可能自动生成传输所需的请求头。
 
@@ -111,7 +118,10 @@ adapter 从内部请求取出 `model` 和 `messages`，有非空工具定义时�
 ```ts
 body: JSON.stringify({
   model: request.model,
-  messages: request.messages,
+  messages: request.messages.map(toWireMessage),
+  ...(request.tools?.length ? {
+    tools: request.tools.map((tool) => ({ type: "function", function: tool })),
+  } : {}),
   stream: false,
 }),
 ```
@@ -188,7 +198,7 @@ HTTP 2xx 响应示例：
 
 只取第一条 choice，不合并其他候选答案。`usage` 可以缺失；存在时必须是非 null、非数组对象。两个 token 字段可以分别缺失，缺失不等于用量为 0；例如 `usage: {}` 会转换成空用量对象。
 
-阶段 01 当前实现不根据 `finish_reason` 判断文本是否完整，也不输出 `reasoning_content`，不接收工具调用作为成功回答。阶段 02 将保留 `finish_reason`，并允许“非空文本或至少一个合法工具调用”作为成功响应；两者都没有时仍是 `ResponseError`。`finish_reason: "length"` 无论是否有工具调用都直接失败。
+阶段 01 历史实现只提取文本。阶段 02 已保留 `finish_reason`，允许“非空文本或至少一个合法工具调用”作为成功响应；两者都没有时仍是 `ResponseError`。`finish_reason: "length"` 无论是否有工具调用都直接失败。
 
 ### 响应按什么顺序处理
 
@@ -212,7 +222,8 @@ HTTP 2xx 响应示例：
   "usage": {
     "inputTokens": 12,
     "outputTokens": 18
-  }
+  },
+  "finishReason": "stop"
 }
 ```
 
@@ -220,7 +231,7 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 
 ## 失败怎样传回 CLI
 
-`complete` 是 async 方法。它内部的 throw 会使返回的 Promise 拒绝；runPrompt 原样返回该 Promise，最终由 CLI 的 `await` / `catch` 接住，不会把错误当作模型回答。
+`complete` 是 async 方法。它内部的 throw 会使返回的 Promise 拒绝；AgentLoop 不将该失败当成 tool 结果，最终由 CLI 的 `await` / `catch` 接住，不会把错误当作模型回答。
 
 | 情况 | adapter 或配置层的处理 | CLI 结果 |
 | --- | --- | --- |
@@ -230,7 +241,9 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 | 调用方取消首先触发 | `AbortError` | stderr，退出码 4 |
 | HTTP 非 2xx | 读有限摘要，抛 `RequestError`，code 为 `http` | stderr，退出码 4 |
 | HTTP 2xx，但不是有效 JSON | `ResponseError` | stderr，退出码 4 |
-| JSON 有效，但回答、工具调用、finish_reason 或用量字段不符合契约 | `ResponseError` | stderr，退出码 4 |
+| JSON 有效，但回答、工具调用字段、finish_reason 或用量字段不符合契约 | adapter 抛 `ResponseError` | stderr，退出码 4 |
+| 工具参数 JSON/字段非法、批次过大或 ID 不合法 | core 预检抛 `AgentLoopError(protocol_error)` | stderr，退出码 4 |
+| 第 8 次响应仍有工具调用 | 不执行最后一批，抛 `AgentLoopError(loop_limit)` | stderr，退出码 4 |
 
 例如服务端返回 HTTP 400 和下面的响应体：
 
@@ -268,8 +281,53 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 | 源码/产物 CLI 的 stdout、stderr 和退出码 | [cli.test.ts](../../tests/cli.test.ts) |
 | 真实服务路由要求和成功调用记录 | [阶段 01](../specs/phase-01-single-model.md)、[ADR-002](../decisions/ADR-002-opencode-session-routing.md) |
 
-测试覆盖范围以各测试实际断言为准，不能将本文所有说明都理解为已有独立测试。本次补文档对照了当前实现及测试，没有再次调用服务。
+测试覆盖范围以各测试实际断言为准，不能将本文所有说明都理解为已有独立测试。阶段 02 新增循环、文件工具与 HTTP 往返测试；最近一次真实验证结果见下文。
 
 阶段 02 的工具往返需要在真实服务中验证：一次命令的多次 HTTP 请求各自使用新的 `x-opencode-session` 是否仍能完成工具调用和最终回答；结果回写 [ADR-002](../decisions/ADR-002-opencode-session-routing.md) 与 [阶段 02 ADR](../decisions/ADR-003-phase-02-minimal-agent-loop.md)。后续加入流式响应或不同模型协议时，必须同步修改本文、[LlmClient 契约](llm-client.md)、adapter 和相应测试；提供方路由 ID 的生命周期变化也需要更新 ADR。
 
 源码入口：[runPrompt.ts](../../src/core/runPrompt.ts)、[OpenCodeGoClient.ts](../../src/adapters/opencode-go/OpenCodeGoClient.ts)、[cli.ts](../../src/bootstrap/cli.ts)。
+
+## 阶段 02 工具消息完整映射示例
+
+模型返回（工具参数是 JSON 字符串，尚未信任）：
+
+```json
+{
+  "choices": [{
+    "finish_reason": "tool_calls",
+    "message": {
+      "role": "assistant", "content": null,
+      "tool_calls": [{
+        "id": "call-1", "type": "function",
+        "function": { "name": "read_file", "arguments": "{\"path\":\"README.md\"}" }
+      }]
+    }
+  }]
+}
+```
+
+adapter 转换为 `message.toolCalls: [{id,name,argumentsJson}]`，null content 规范化为空字符串，并保留 `finishReason: "tool_calls"`。这里先检查外层字段；AgentLoop 随后在执行任何一项前解析整批参数，确保每项恰好包含字符串 path。名称非空但未知属于可恢复执行错误。
+
+读取成功后下一次请求的 messages 为：
+
+```json
+[
+  { "role": "user", "content": "总结 README.md" },
+  {
+    "role": "assistant", "content": "",
+    "tool_calls": [{
+      "id": "call-1", "type": "function",
+      "function": { "name": "read_file", "arguments": "{\"path\":\"README.md\"}" }
+    }]
+  },
+  { "role": "tool", "tool_call_id": "call-1", "content": "示例文件正文" }
+]
+```
+
+该请求仍带同一组工具定义，且产生新的 session UUID；消息不带 finishReason，tool 消息不带 name 或 ok。失败工具通过安全 content 前缀告知模型，详细 ok/name 状态留在本地 ToolResult。模型返回最终非空文本后，AgentLoop 返回成功结果，CLI 输出 finalText。
+
+## 阶段 02 真实验证结果
+
+2026-10-19，使用项目工具链运行构建产物 CLI，prompt 只要求读取 README.md 并总结。两次请求均为 deepseek-v4-flash、HTTP 200；finish_reason 依次为 tool_calls、stop；第二次请求角色顺序为 user/assistant/tool，工具结果与调用 ID 配对。两次 x-opencode-session 各自不同，CLI 退出码 0，stdout 非空、stderr 为空，约 8.07 秒。临时观测器只提取协议元数据，未保存密钥、文件正文或完整回答。
+
+本次验证支持当前账号、端点和模型下的逐请求 UUID 策略，不代表服务承诺所有模型的永久兼容性。
