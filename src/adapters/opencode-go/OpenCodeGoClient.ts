@@ -9,10 +9,20 @@ import type { LlmClient } from "../../contracts/llm-client.js";
 import type { ToolCall } from "../../contracts/tool.js";
 import type { LlmRequest, LlmResponse, LlmUsage, Message } from "../../contracts/message.js";
 
-// 客户端只需要连接参数，不依赖 dotenv 或配置加载器；bootstrap 负责传入。
+/**
+ * 创建 OpenCodeGoClient 时必须提供的连接配置，由 bootstrap 注入，客户端保存后逐次使用。
+ * 只包含 HTTP 连接所需的字段；model/messages 属于每次 complete 的 LlmRequest。
+ * RuntimeConfig 包含这些同名兼容字段，因此可以直接传入，不需要继承本接口。
+ * 此接口不调用 dotenv 或做运行时校验，调用方应传入 loadConfig 校验后的值。
+ */
 export interface OpenCodeGoClientOptions {
+  /** 认证密钥；客户端只将它用于 Authorization 及错误摘要脱敏，不放进 body。 */
   apiKey: string;
+
+  /** 提供方 API 基地址，允许带 /v1 等路径；每次请求再拼接 /chat/completions。 */
   baseUrl: string;
+
+  /** 本次请求的超时毫秒数；每次 complete 各自创建和清理定时器。 */
   timeoutMs: number;
 }
 

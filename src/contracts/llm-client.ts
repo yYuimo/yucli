@@ -3,8 +3,11 @@
 import type { LlmRequest, LlmResponse } from "./message.js";
 
 /**
- * core 依赖的模型能力，OpenCodeGoClient 负责实现。
- * 类比 Java 接口，但 TS 按对象结构检查：具有兼容方法的对象即可满足接口。
+ * 应用调用模型所依赖的能力接口，把 core 与具体提供方隔开。
+ * OpenCodeGoClient 提供真实实现；CLI 创建实现并注入 AgentLoop，测试可注入有相同方法的对象。
+ * 它只约定 complete 的输入、异步输出和失败行为，不保存模型配置或消息历史。
+ * 类比 Java 接口，但 TS 采用结构类型：对象只要具备兼容方法，不显式 implements 也能匹配。
+ * 编译后接口不存在，不能 new LlmClient 或用 instanceof LlmClient；执行的是具体对象的方法。
  */
 export interface LlmClient {
   /**
@@ -28,6 +31,10 @@ export class ConfigError extends Error {
   override name = "ConfigError";
 }
 
+/**
+ * 请求错误分类的字符串联合；程序读取 code 区分失败，message 则用于给用户看。
+ * network 包含连接/发送/响应体中断，timeout 为超时先触发，http 为已收到非 2xx 响应。
+ */
 export type RequestErrorCode = "network" | "timeout" | "http";
 
 /** 传输错误：保留稳定分类及安全诊断，不向上暴露原始 fetch 异常。 */
@@ -67,6 +74,7 @@ export class AbortError extends Error {
   override name = "AbortError";
 }
 
+/** core 的停止原因：额度耗尽或协议不合法；CLI 均映射为退出码 4，普通文件错误不在此列。 */
 export type AgentLoopErrorCode = "loop_limit" | "protocol_error";
 
 /** core 的循环失败；CLI 用 code 分类、用安全 message 输出，统一退出码 4。 */
