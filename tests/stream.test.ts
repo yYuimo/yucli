@@ -225,6 +225,31 @@ describe("真实 SSE → assembler → 流式 turn", () => {
     await expect(runTurnStream(client(), registry().tools, "test", [], "hi", vi.fn())).rejects.toBeInstanceOf(ResponseError);
   });
 
+  it("每批 4 个合法调用全部顺序执行，缩小额度时最后一轮不执行", async () => {
+    respond = (res, i) => writeSse(res, i ? [normal] : [
+      ...[0, 1, 2, 3].map((n) => sseFrame(toolDelta(n, String(n)))), sseFrame(streamChunk({}, "tool_calls")),
+    ]);
+    const ctx = registry();
+    expect((await runTurnStream(client(), ctx.tools, "test", [], "read", vi.fn())).toolResults).toHaveLength(4);
+    requests = [];
+    ctx.execute.mockClear();
+    await expect(runTurnStream(client(), ctx.tools, "test", [], "read", vi.fn(), { maxModelCalls: 1 })).rejects.toMatchObject({ code: "loop_limit" });
+    expect(ctx.execute).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(1);
+  });
+
+  it("ID/名称可在后续片段补齐，补齐后才可执行", async () => {
+    respond = (res, i) => writeSse(res, i ? [normal] : [
+      sseFrame(streamChunk({ tool_calls: [{ index: 0, function: { arguments: '{"path":' } }] })),
+      sseFrame(toolDelta(0, "late-id", '"README.md"}')),
+      sseFrame(streamChunk({}, "tool_calls")),
+    ]);
+    const ctx = registry();
+    const result = await runTurnStream(client(), ctx.tools, "test", [], "read", vi.fn());
+    expect(result.toolResults[0]?.toolCallId).toBe("late-id");
+    expect(ctx.execute).toHaveBeenCalledTimes(1);
+  });
+
   it("最多 8 请求，只执行前 7 批；第 8 轮文本允许成功", async () => {
     const ctx = registry();
     respond = (res) => writeSse(res, [sseFrame(toolDelta()), sseFrame(streamChunk({}, "tool_calls"))]);
