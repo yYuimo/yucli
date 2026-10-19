@@ -59,7 +59,12 @@ export function validateToolBatch(calls: readonly ToolCall[], maxCalls: number):
   }
 }
 
-/** core 中的名称分派器；具体 Tool 实例由 bootstrap 注入，没有文件系统依赖。 */
+/**
+ * ToolRegistry 的默认实现：持有本次命令的工具集合，向模型公开定义并按名称分派调用。
+ * 与单个 Tool 的分工：查找、参数解析（argumentsJson → 已校验对象）和结果配对都在这里完成，
+ * 具体工具只负责执行已解析的参数。工具实例由 bootstrap 注入，本类不依赖文件系统，
+ * 也不认识任何具体工具类。
+ */
 export class RegisteredTools implements ToolRegistry {
   /**
    * 建立本次命令的工具集合，供模型查询定义和循环按名称分派。

@@ -77,6 +77,8 @@ export interface ToolResult {
  * ReadFileTool 实现它；RegisteredTools 持有 Tool 实例并调用，不依赖具体文件工具类。
  * 与只描述数据的 ToolCall/ToolResult 不同，它描述对象必须具备的属性和方法；
  * 接口本身不会创建实例，运行时方法由实现对象提供。
+ * 单个工具只认识自己的定义和实现，不感知注册表如何找到自己、结果如何配对，
+ * 也不知道是否还有同类工具；“有哪些工具、这活派给谁”由 ToolRegistry 负责。
  */
 export interface Tool {
   /** 供模型查看的工具说明；与 execute 实际接受的参数规则应保持一致。 */
@@ -98,6 +100,8 @@ export interface Tool {
  * bootstrap 创建 RegisteredTools 并注入 AgentLoop，循环只需要这个接口。
  * 它不等于某个 Tool，也不负责决定循环何时结束；一次 execute 只处理一项调用。
  * 接口描述方法契约，具体工具集合与实现状态由 RegisteredTools 保存。
+ * 与 Tool 的分工：调用链是 AgentLoop → ToolRegistry → Tool；查找工具、解析参数原文、
+ * 结果配对 ID 这些分派杂活都在这一层完成，具体工具只接收已解析参数并执行。
  */
 export interface ToolRegistry {
   /**
