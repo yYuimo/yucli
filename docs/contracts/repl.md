@@ -1,6 +1,6 @@
 # REPL 与内存会话契约
 
-状态：`draft`（设计已评审，实现验证后转 `accepted`）
+状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
 适用阶段：阶段 03，同一进程中的持续对话。
 
@@ -53,3 +53,7 @@ interface StreamTurnResult {
 - turn 执行中不处理新的输入；需要中断当前 turn 时使用 Ctrl+C。`/clear` 只在提示符可用时清空全部已完成内存历史。
 
 关联文档：[阶段 03 规格](../specs/phase-03-repl-streaming.md)、[CLI 契约](cli.md)。
+
+## 实现与验证
+
+实现位于 [repl.ts](../../src/bootstrap/repl.ts)，按完整 StreamTurnResult.appendedMessages 分组保存历史，数组快照传给 core；超出 20 组时整体裁剪，不把工具消息单独留存。输入循环在 turn 完成后才处理下一行。[repl.test.ts](../../tests/repl.test.ts) 覆盖源码/构建产物，真实两轮文本、工具往返与 PTY Ctrl+C 结果见阶段 03 规格。

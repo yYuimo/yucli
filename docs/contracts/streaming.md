@@ -1,6 +1,6 @@
 # 流式模型与 SSE 契约
 
-状态：`draft`（设计已评审，实现验证后转 `accepted`）
+状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
 适用阶段：阶段 03，OpenCode Go 非流式接口的流式扩展。
 
@@ -98,6 +98,6 @@ message end 后必须同时满足：
 
 ## 兼容性
 
-`complete()` 的阶段 01/02 语义保持不变。`stream()` 是阶段 03 已接受设计、尚未实现的扩展；未来流式 reasoning、音频、多 provider 或重连需要新增事件类型和契约测试，不能把原始 provider chunk 直接暴露给 core。
+`complete()` 的阶段 01/02 语义保持不变。`stream()` 是阶段 03 已实现并验证的扩展；未来流式 reasoning、音频、多 provider 或重连需要新增事件类型和契约测试，不能把原始 provider chunk 直接暴露给 core。
 
 关联文档：[阶段 03 规格](../specs/phase-03-repl-streaming.md)、[LlmClient 契约](llm-client.md)、[OpenCode Go HTTP 契约](opencode-go-http.md)。

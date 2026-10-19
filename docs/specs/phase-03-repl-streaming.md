@@ -1,12 +1,12 @@
 # 阶段 03：持续对话与流式输出
 
-状态：`implementing`
+状态：`verified`
 
-设计评审：2026-10-19，用户确认七项推荐选择；已进入阶段 03 实现。
+设计评审：2026-10-19，用户确认七项推荐选择；实现、本地验收及真实联调已完成，等待项目规划审查与集成。
 
 阶段 03 建立在阶段 02 的单次工具循环之上，把一次命令扩展为同一进程内的 REPL，并把 OpenCode Go 的非流式请求扩展为 SSE 流式请求。历史只存在内存；会话持久化、恢复和上下文压缩留到阶段 04 及以后。
 
-本文件已根据评审确认七项高影响选择，并接受相关 ADR；契约扩展保持 `draft`，待实现验证后转 `accepted`。实现遵循本文任务清单与验收边界。
+本文件已根据评审确认七项高影响选择，并接受相关 ADR；契约扩展在开发期间保持 `draft`，现已随实现验证转为 `accepted`。实现遵循本文任务清单与验收边界。
 
 ## 目标场景
 
@@ -167,7 +167,7 @@ type LlmStreamEvent =
 
 推荐让网络、SSE、协议和取消失败通过 async generator 抛出稳定错误，而不是伪装成正常事件。`message_end` 是逻辑消息收尾并决定业务成功；`[DONE]` 是可选的传输层结束标记，adapter 不能只收到 `[DONE]` 就假定消息合法。
 
-阶段 03 扩展状态保持 `draft`，实现验证后转 `accepted`；`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
+阶段 03 扩展已实现并验证，状态为 `accepted`；`complete()` 和阶段 01/02 的无工具请求保持兼容。`--prompt` 在阶段 03 改走 `stream()`；`complete()` 和阶段 02 的非流式 `agentLoop` 保留为兼容/测试路径，不再是阶段 03 CLI 的生产调用者。阶段 01/02 的 wire 测试继续直接覆盖 `complete()` 的 `stream:false` 请求；阶段 03 另加 `stream:true` SSE 测试，CLI 的 stdout/stderr/退出码兼容不等于 wire 字段不变。`stream()` 的事件模型只暴露 provider-neutral 字段，不把 OpenCode 的原始 chunk 交给 core。
 
 ### 流式工具调用状态
 
@@ -243,19 +243,19 @@ EOF             结束进程，退出码 0
 
 ## 任务清单
 
-- [ ] 将阶段状态改为 `designed`，确认上述七项决策。
-- [ ] 按已接受的流式事件和 `LlmClient.stream()` 契约实现代码。
-- [ ] 新增 SSE 解析契约，定义 UTF-8、事件边界、心跳、JSON 和 `[DONE]` 行为。
-- [ ] 实现 OpenCode Go `stream: true` 请求、SSE parser 和资源清理。
-- [ ] 实现按 index/ID 的工具调用 assembler，支持交错 delta 和全批校验。
-- [ ] 将阶段 02 的工具循环提取为可被流式 turn 使用的 core 流程，保持 4/8 上限。
-- [ ] 实现 REPL 输入循环、历史持有、20 turn 上限和 `/exit`、`/quit`、`/clear`、`/help`。
-- [ ] 实现朴素 stdout delta 渲染、换行收尾和错误状态输出。
-- [ ] 实现 active-stream Ctrl+C、idle-input Ctrl+C、超时和连接中断收尾。
-- [ ] 更新 `llm-client`、OpenCode Go、tool、CLI 契约和架构文档。
-- [ ] 新增 ADR-004（流式事件与 REPL 生命周期）和 ADR-005（暂不抽 OpenAI 兼容基类）。
-- [ ] 增加本地 mock SSE、assembler、取消/超时和 REPL 子进程测试。
-- [ ] 真实联调一次连续两轮文本，再联调一次流式 `read_file` 工具往返。
+- [x] 将阶段状态改为 `designed`，确认上述七项决策。
+- [x] 按已接受的流式事件和 `LlmClient.stream()` 契约实现代码。
+- [x] 新增 SSE 解析契约，定义 UTF-8、事件边界、心跳、JSON 和 `[DONE]` 行为。
+- [x] 实现 OpenCode Go `stream: true` 请求、SSE parser 和资源清理。
+- [x] 实现按 index/ID 的工具调用 assembler，支持交错 delta 和全批校验。
+- [x] 将阶段 02 的工具循环提取为可被流式 turn 使用的 core 流程，保持 4/8 上限。
+- [x] 实现 REPL 输入循环、历史持有、20 turn 上限和 `/exit`、`/quit`、`/clear`、`/help`。
+- [x] 实现朴素 stdout delta 渲染、换行收尾和错误状态输出。
+- [x] 实现 active-stream Ctrl+C、idle-input Ctrl+C、超时和连接中断收尾。
+- [x] 更新 `llm-client`、OpenCode Go、tool、CLI 契约和架构文档。
+- [x] 新增 ADR-004（流式事件与 REPL 生命周期）和 ADR-005（暂不抽 OpenAI 兼容基类）。
+- [x] 增加本地 mock SSE、assembler、取消/超时和 REPL 子进程测试。
+- [x] 真实联调一次连续两轮文本，再联调一次流式 `read_file` 工具往返。
 
 ## 验证计划
 
@@ -292,14 +292,50 @@ pnpm dev --prompt "请读取 README.md 并总结"
 
 ### 已完成
 
-阶段 03 尚未实现。本文件只记录设计和验收要求。
+- 先以独立提交对齐 ADR-004 的 message end 边界和本规格的契约状态措辞，全文扫描 accepted、[DONE] 前、收尾前、message_end.usage，未发现同类遗漏；未改变已确认设计。
+- 新增 provider-neutral 的 LlmStreamEvent、LlmClient.stream 和 StreamTurnResult。complete、runPrompt、非流式 agentLoop 保留；兼容路径只依赖 Pick<LlmClient, "complete">。
+- OpenCodeGoClient.stream 每请求使用独立 UUID、控制器、总超时、reader 与 decoder；SseParser 处理 fatal UTF-8、跨字节块、LF/CRLF、心跳、多行 data，streamChunk 映射业务字段并忽略 reasoning。message end 才是逻辑成功，[DONE] 可选，缺 message end 仍失败。
+- StreamAssembler 使用 Map<number, ToolCallAssembly> 隔离交错调用，按 index 排序后复用整批结构/参数校验；任一调用非法、length、缺帧或超批次时一个工具也不执行。两种循环共用 loopLimits 与 executeToolBatch，8 次模型/每批 4 项、顺序执行，最后一轮若仍有工具则不执行。
+- CLI 两种模式均走 stream；REPL 保存最近 20 个成功完整 turn，成功才提交 appendedMessages，/clear 整体清空，支持 /help、/exit、/quit、空行和 EOF。文本即时显示，失败后补足换行，部分输出不提交历史。
+- 取消贯穿模型和工具：REPL 活跃时取消当前 turn 并恢复输入，闲置退出 130，单次取消退出 4。reader、定时器、监听器与 readline 在相应边界清理。
+- README、architecture、客户端/流式/REPL/工具/CLI 契约与 ADR-002 已同步；新增与修改的 src 函数、接口及字段均提供中文说明和逻辑空行。
+- 未新增运行依赖，未加入持久化、文件写入、审批、MCP、多 provider、renderer 抽象或 token 预算。
 
 ### 验证命令与结果
 
-尚未运行阶段 03 实现验证。阶段 01/02 的验证记录保留在各自规格中。
+工具链为项目固定的 Node.js 24.14.0、pnpm 10.33.2；本机通过下列包装运行 pnpm（未使用全局旧版本）：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test && pnpm build && pnpm dev --help'
+```
+
+- typecheck、lint、test、build 全部通过；9 个测试文件、205 个用例。
+- CLI --help 用项目工具链运行成功，显示无 prompt 的 REPL 入口、内置命令和三种 Ctrl+C 语义。
+- CLI --prompt 与 REPL 子进程测试同时覆盖源码/构建产物；complete wire 测试继续断言 stream:false，阶段 03 CLI/SSE 断言 stream:true；空/缺 tools 省略。
+- mock SSE 支持指定原始字节块和写入间隔；覆盖单字节跨 UTF-8/CRLF/事件边界、LF、多行 data、心跳、reasoning 忽略、非法 JSON/字段、[DONE]、缺帧、length、连接中断、读取超时、取消和 generator 提前关闭清理。
+- 流式 turn 覆盖交错 index、ID/名称晚到、身份变更、缺 ID/名称/参数、重复 ID、坏 JSON/参数、4 项成功/5 项拒绝、空白最终文本、8 次上限和第 8 次文本成功。整批拒绝时验证工具执行次数为零。
+- REPL 子进程覆盖两轮历史、完整工具组裁剪、20 turn 上限、失败/超时/取消不提交、下一轮可用、三种 SIGINT、命令、空行和管道连续输入/EOF。
+- 另用本地 SSE 服务及 Python 标准库 PTY，向构建产物终端实际发送 Ctrl+C 字节（0x03）：活跃时取消、下一轮成功、闲置退出 130，全部通过。临时脚本无新依赖，不访问真实凭证。
+
+### 真实联调（2026-10-19）
+
+使用现有 .env、项目工具链和构建产物，模型 deepseek-v4-flash。临时观测器仅提取请求计数、角色顺序、事件计数、ID 配对、finish reason、路由 UUID 独立性及字段是否出现，不保存凭证、文件正文或模型回答，也未把模型文本写入断言。
+
+| 场景 | 请求与历史 | 流事件/协议结果 | CLI 结果 |
+| --- | --- | --- | --- |
+| REPL 连续两轮纯文本 | 2 次 HTTP 200；角色依次 user，user/assistant/user；2 个独立 UUID | text_delta 74、message_end 2、usage 2；finish reason 均 stop；两次均出现 [DONE]、usage 对象和 reasoning 字段 | /exit 后 0；回答非空，stderr 为空；约 6.366 秒 |
+| --prompt 流式 read_file 往返 | 2 次 HTTP 200；第二次含 user/assistant/tool；1 项调用与 tool 结果 ID 配对；2 个独立 UUID | tool_call_delta 11、text_delta 105、message_end 2、usage 2；finish reason 为 tool_calls、stop；两次均出现 [DONE]、usage 对象和 reasoning 字段 | 0；回答非空，stderr 为空；约 6.511 秒 |
+
+成功的四次请求 UUID 互不相同。reasoning 字段只做存在性观测，未渲染或存入历史。上述成功结果支持当前账号/模型的逐请求 UUID 策略，已回写 ADR-002。
+
+联调过程中也记录了失败与修复：
+
+1. 首轮文本两次、工具一次，共 3 次 HTTP 200，早期 SSE 帧的 usage:null 被初版流式映射误判为非法对象，均未完成 turn、未执行工具。现将流式 null 视为尚未提供统计，只有对象用量才发独立事件，并补回归；complete 对 null usage 的既有拒绝行为保持且有测试。契约同步明确了此映射。
+2. 修复后的首次工具尝试在 tool_calls 的 message end 后遇到不合规 choice/delta 收尾帧，按 ResponseError 拒绝，退出 4，工具执行零次。未保存原始帧，无法进一步确定是哪一种形状不合规；为诊断增加仅记录字段结构的观测后，以相同生产实现重跑，2 请求工具往返成功，未复现该异常。没有放宽缺 choice/delta 的拒绝策略，也未实现自动重试。
+3. 本阶段真实验证共发起 8 次 HTTP 请求（含上述失败尝试）；成功场景见表格，不能将 REPL 在 /exit 时返回 0 等同于此前每个 turn 都成功。
 
 ### 遗留问题与下一步
 
-- 七项设计已于 2026-10-19 确认；相关契约扩展保持 `draft`，实现并验证后再转 `accepted`。
-- 20 个 turn 是数量上限，未覆盖 token 体积；上下文溢出在阶段 03 暂以模型错误 + `/clear` 处理，token 预算与压缩留到阶段 04。
-- 阶段 03 完成后，阶段 04 再设计会话持久化、恢复和中断轮次修复。
+- 无未完成的阶段 03 范围项；当前为 verified，停在 phase/03-repl-streaming 等待审查，不合并、不推送。
+- 真实服务曾返回不合规收尾帧；当前严格拒绝并放弃该 turn，REPL 可继续，单次模式退出 4。不保证提供方永久兼容，也不自动重试；若复现，应继续只采集结构元数据，经契约评审后决定是否支持新形状。
+- 20 turn 只限制数量，未限制 token 或单条响应体积；上下文溢出仍按模型错误 + /clear 处理。持久化、恢复、压缩等留到阶段 04 设计。

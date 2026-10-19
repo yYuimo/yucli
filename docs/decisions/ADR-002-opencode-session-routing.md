@@ -4,7 +4,7 @@
 
 日期：2026-10-17
 
-关联阶段：阶段 01 单次模型问答；阶段 02 工具调用往返。
+关联阶段：阶段 01 单次模型问答；阶段 02 工具调用往返；阶段 03 REPL 与流式工具循环。
 
 ## 背景
 
@@ -12,7 +12,7 @@
 
 ## 决定
 
-`OpenCodeGoClient.complete()` 每次生成一个随机 UUID，作为 `x-opencode-session` 请求头。该字段属于提供方适配层，不加入 `LlmRequest`，不进入模型消息，不保存到文件。
+`OpenCodeGoClient.complete()`/`stream()` 每次生成一个随机 UUID，作为 `x-opencode-session` 请求头。该字段属于提供方适配层，不加入 `LlmRequest`，不进入模型消息，不保存到文件。
 
 ## 备选方案与影响
 
@@ -29,3 +29,15 @@
 独立于本地 mock 测试，使用项目工具链运行真实 CLI，模型为 `deepseek-v4-flash`，只读取工作区 README.md。共 2 次 HTTP 请求，状态均为 200；finish_reason 依次为 `tool_calls` 和 `stop`。第二次请求携带 user/assistant/tool 完整历史，read_file 调用和工具结果 ID 配对，2 个路由 UUID 各不相同。CLI 退出码 0、回答非空、stderr 为空，约 8.07 秒。
 
 结果验证了当前账号和模型下“每次 complete 生成新 x-opencode-session”的规则可完成工具往返，因此保持原决定，不改成命令级复用。只记录计数、配对和停止原因，不保留凭证、文件正文或完整模型回答。后续服务行为改变时再更新契约与 ADR，不将单次成功视为所有模型的兼容性保证。
+
+## 阶段 03 联调记录（2026-10-19）
+
+使用现有配置、项目工具链和构建产物 CLI，deepseek-v4-flash：
+
+- REPL 连续两轮文本：2 次 HTTP 200，第二轮角色为 user/assistant/user，2 个路由 UUID 独立；74 个 text_delta、2 个 message_end、2 个独立 usage；finish reason 均 stop。约 6.366 秒，/exit 后退出 0，stderr 为空。
+- 单次流式 read_file 往返：2 次 HTTP 200，第二次角色为 user/assistant/tool；1 项 read_file 调用与 tool 结果 ID 配对，2 个路由 UUID 独立；11 个 tool_call_delta、105 个 text_delta、2 个 message_end、2 个独立 usage；finish reason 依次 tool_calls、stop。约 6.511 秒，退出 0，stderr 为空。
+- 成功四次请求的 UUID 均不同，均观测到 [DONE]、对象 usage 和 reasoning 字段。reasoning 不渲染；usage 只作为独立事件，中间帧 usage:null 视为未提供统计。
+
+上述成功之前共有 4 次失败 HTTP 200 尝试：3 次因初版误拒 usage:null，修复并补回归；1 次工具流在 message end 后遇到不合规 choice/delta 帧，整批工具未执行，退出 4。诊断性重跑使用相同生产实现完成了上述工具往返，异常未复现；未放宽缺 choice/delta 的拒绝规则、未加入自动重试。累计 8 次真实请求，详情见阶段 03 实际结果。
+
+当前结果支持继续逐请求生成 UUID，不改成进程/turn 级共享路由头；偶发协议不合规仍按契约失败，不保证所有提供方帧形状长期兼容。观测仅保留元数据，不保存凭证、文件正文、完整响应或模型回答。

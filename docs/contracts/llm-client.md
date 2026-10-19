@@ -4,7 +4,7 @@
 
 阶段 02 扩展状态：`accepted`
 
-阶段 03 流式扩展状态：`draft`（设计已评审，实现验证后转 `accepted`）
+阶段 03 流式扩展状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
 适用阶段：阶段 01 单次模型问答；阶段 02 工具调用和 AgentLoop；阶段 03 REPL 与流式输出。
 
@@ -164,7 +164,7 @@ usage.prompt_tokens
 usage.completion_tokens
 ```
 
-`x-opencode-session` 是 OpenCode Go 的必需路由扩展，由适配器使用 `randomUUID()` 逐次生成，不放入公共请求对象或模型消息。阶段 01 每次请求即一次独立问答；未来多轮会话需要重新设计其生命周期，见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。
+`x-opencode-session` 是 OpenCode Go 的必需路由扩展，由适配器使用 `randomUUID()` 逐次生成，不放入公共请求对象或模型消息。阶段 01 每次请求即一次独立问答；阶段 02/03 多轮仍逐请求生成独立 UUID，真实结果支持当前策略，见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。
 
 `reasoning_content` 不作为阶段 01 的最终输出。未知字段允许存在；必需字段缺失或类型不正确时拒绝响应。
 
@@ -224,3 +224,9 @@ export class AgentLoopError extends Error {
 关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)、[阶段 03 规格](../specs/phase-03-repl-streaming.md)。
 
 实现分工：adapter 校验 HTTP 外层、tool_calls 的字段与 ID、finish_reason 类型及截断；core 在执行任何工具前检查整批数量、ID 和参数结构。参数 JSON 或 `{path:string}` 不合法抛 AgentLoopError(protocol_error)，不会先执行同批的合法调用。契约验证记录见[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。
+
+## 阶段 03 实现与验证
+
+`LlmStreamEvent` 位于 [message.ts](../../src/contracts/message.ts)，[runTurnStream](../../src/core/runTurnStream.ts) 消费 stream 并在成功后返回新增消息。非流式 runPrompt/agentLoop 用 `Pick<LlmClient, "complete">` 表达最小能力要求，旧调用方不必实现无关 stream。
+
+SSE 中间帧的 `usage:null` 不构成用量对象，忽略而不发事件；完整对象用量独立发出且等值去重。complete 仍沿用原有严格对象校验。协议和真实验证结果见阶段 03 规格。

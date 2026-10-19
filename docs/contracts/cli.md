@@ -4,7 +4,7 @@
 
 阶段 02 扩展状态：`accepted`
 
-阶段 03 扩展状态：`draft`（设计已评审，实现验证后转 `accepted`）
+阶段 03 扩展状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
 适用阶段：阶段 01 单次模型问答；阶段 02 单次工具往返；阶段 03 REPL 与流式输出。
 
@@ -12,7 +12,7 @@
 
 阶段 01/02 的 `--prompt` 是一次性命令；阶段 03 无 `--prompt` 时进入 REPL。单次模式和 REPL 共用配置、模型和工具注册，但 REPL 在一个进程中保留内存历史。
 
-组合根为 `src/bootstrap/cli.ts`，构建入口为 `dist/bootstrap/cli.js`。`package.json` 中 `dev`、`start` 和 `bin.yucli` 与这两个入口一致；`bootstrap` 负责创建具体 adapter，固定注册 `read_file` 并传入 core/agentLoop；无额外工具开关或额度 CLI 参数。
+组合根为 `src/bootstrap/cli.ts`，构建入口为 `dist/bootstrap/cli.js`。`package.json` 中 `dev`、`start` 和 `bin.yucli` 与这两个入口一致；`bootstrap` 负责创建具体 adapter，固定注册 `read_file` 并传入 core/runTurnStream（阶段 02 的 agentLoop 保留兼容路径）；无额外工具开关或额度 CLI 参数。
 
 ```text
 yucli --prompt <text>
@@ -76,3 +76,7 @@ yucli --help
 ## 阶段 03 REPL 与流式路径
 
 无 `--prompt` 时，REPL 读取一行普通文本并调用流式 turn；成功后提交历史并显示下一次提示。`/clear` 清空全部内存历史（历史上限为最近 20 个完整 turn），`/exit`、`/quit`、EOF 返回 0。turn 执行中不读取新输入；流式请求中 Ctrl+C 取消当前 turn、丢弃半截消息并回到提示；等待输入时 Ctrl+C 返回 130。单次 `--prompt` 的取消、超时和流协议错误返回 4。
+
+## 阶段 03 实现与验证
+
+入口 [cli.ts](../../src/bootstrap/cli.ts) 使用 [repl.ts](../../src/bootstrap/repl.ts) 持有历史，用 [output.ts](../../src/bootstrap/output.ts) 写文本和安全状态。[cli.test.ts](../../tests/cli.test.ts) 与 [repl.test.ts](../../tests/repl.test.ts) 分别运行源码和构建产物；模型请求由本地 SSE 服务接收，断言 stream:true。非流式 stream:false 的兼容断言继续由 client/toolHttp 测试覆盖。

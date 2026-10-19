@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 设计已确认（`designed`），尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已实现并验证（`verified`），等待集成审查。
 
 ## 目标场景
 
@@ -72,14 +72,22 @@ src/
 │   ├── tool.ts               # 工具定义、调用、结果和注册表接口
 │   └── agent.ts              # AgentLoopOptions / AgentLoopResult
 ├── core/
-│   ├── agentLoop.ts          # 历史、预算、整批预检、顺序执行
+│   ├── runTurnStream.ts      # 流式 turn，完整成功后返回新增消息
+│   ├── streamAssembler.ts    # 按 index Map 拼装调用并整批校验
+│   ├── loopLimits.ts         # 两种循环共用的 8/4 上限
+│   ├── agentLoop.ts          # 非流式兼容路径
 │   ├── toolRegistry.ts       # 参数解析、批次校验、工具名称分派
 │   └── runPrompt.ts          # 保留阶段 01 的直接无工具调用入口
 ├── adapters/
 │   ├── filesystem/ReadFileTool.ts # 工作区内只读 UTF-8 文件，最大 64 KiB
-│   ├── opencode-go/OpenCodeGoClient.ts # OpenAI 字段转换、超时、响应校验
+│   ├── opencode-go/OpenCodeGoClient.ts # complete/stream、请求与资源归属
+│   ├── opencode-go/SseParser.ts # fatal UTF-8、行/事件边界
+│   ├── opencode-go/streamChunk.ts # SSE JSON 到内部事件
 │   └── config/loadConfig.ts  # dotenv、环境变量和默认值
-└── bootstrap/cli.ts          # 注册工具、注入循环、输出与退出码
+└── bootstrap/
+    ├── cli.ts                # 模式、配置、对象组装与退出码
+    ├── repl.ts               # 输入、完整 turn 历史与取消
+    └── output.ts             # 朴素文本 delta、换行和安全错误
 ```
 
 各层职责：
@@ -89,13 +97,22 @@ src/
 - `adapters` 实现 `contracts` 定义的接口，负责外部系统、配置和资源边界；不能 import `bootstrap`。
 - `bootstrap` 是组合根，创建 adapter 并注入 core，负责 CLI 生命周期；不把业务流程写进参数解析器。
 
-当前调用链为 `bootstrap/cli → adapters/config → core/agentLoop → LlmClient/OpenCodeGoClient → ToolRegistry/ReadFileTool → 下一轮模型 → CLI 输出`。配置在一次命令启动时构造，prompt、请求和回答只存在于本次进程内；core 不读取环境变量、不依赖提供方响应格式。OpenCode Go adapter 每次请求生成独立的 `x-opencode-session` 路由 UUID，持有独立超时控制器，并在 `finally` 清理定时器与外部取消监听器。超时覆盖响应体读取，HTTP 诊断只读取最多 512 字节并脱敏。
+当前调用链为 `bootstrap/cli → REPL 或单次 displayTurn → core/runTurnStream → LlmClient.stream/OpenCodeGoClient → StreamAssembler → ToolRegistry/ReadFileTool → 下一轮流 → 完整结果提交`。配置在一次命令启动时构造，prompt、请求和回答只存在于本次进程内；core 不读取环境变量、不依赖提供方响应格式。OpenCode Go adapter 每次请求生成独立的 `x-opencode-session` 路由 UUID，持有独立超时控制器，并在 `finally` 清理定时器与外部取消监听器。超时覆盖响应体读取，HTTP 诊断只读取最多 512 字节并脱敏。
 
 阶段 02 由 bootstrap 注册并注入 `ReadFileTool`。循环持有完整消息历史和工具结果，执行前整批检查调用 ID、参数 JSON 与 `{path:string}` 结构；结构非法或超过 4 个调用时全部拒绝。工具按顺序执行，可恢复错误回传 tool message，模型请求错误、取消和协议错误直接抛出。第 8 次响应如仍请求工具，跳过最后一批并抛 loop_limit。
 
 文件工具先检查词法路径和真实路径的包含关系，再 stat、打开句柄并有界读取；fatal UTF-8 解码保留原文，空文件允许。真实路径按路径段比较，末端打开使用 O_NOFOLLOW，并再次检查句柄类型与大小；这些检查不能代替操作系统沙箱，也不保证面对工作区父目录并发替换时的原子隔离。
 
-阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。阶段 03 计划在 `core` 增加流式 turn/assembler，在 adapter 增加 SSE 解析，在 bootstrap 增加 REPL 和朴素 stdout 渲染；历史只存内存，最多保留 20 个完整 user turn。`session` 在阶段 4 按需加入；没有拆分多包 workspace，也没有新增生产假模型客户端。
+阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。阶段 03 已在 `core` 增加流式 turn/assembler，在 adapter 增加 SSE 解析，在 bootstrap 增加 REPL 和朴素 stdout 渲染；历史只存内存，最多保留 20 个完整 user turn。`session` 在阶段 4 按需加入；没有拆分多包 workspace，也没有新增生产假模型客户端。
+
+### 阶段 03 的流与历史边界
+
+- `complete()` 与非流式 `agentLoop` 保留兼容/测试路径，wire 仍为 `stream:false`；两种 CLI 模式都走 `stream:true`。
+- adapter 每请求拥有 reader、fatal UTF-8 decoder、定时器和取消监听；SSE 分片经 parser/chunk 映射为 provider-neutral 事件，未知 reasoning 字段忽略。`usage:null` 不提供统计，用量对象转换为独立事件并去重。
+- `StreamAssembler` 为每个 index 保存独立参数字符串，message end 时按 index 排序并全批预检；合法结束且整条 generator 成功完成后才执行工具。`[DONE]` 可选，只有 `[DONE]` 不能成功。
+- `runTurnStream` 接收旧历史快照，独占当前 turn 的临时消息；失败只抛稳定异常。`appendedMessages` 仅在完整成功时返回，REPL 将它作为一组保存，超限整组丢弃最旧 turn。
+- 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
+- 真实文本两轮与工具往返均已通过；服务偶发不合规 choice/delta 帧仍严格拒绝，失败 turn 不提交历史，详情见阶段 03 实际结果。
 
 ### 依赖检查
 

@@ -4,7 +4,7 @@
 
 阶段 02 扩展状态：`accepted`
 
-阶段 03 流式扩展状态：`draft`（设计已评审，实现验证后转 `accepted`）
+阶段 03 流式扩展状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
 适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返；阶段 03 SSE 流式文本和工具调用。
 
@@ -95,7 +95,7 @@ x-opencode-session: <本次请求的随机 UUID>
 | --- | --- | --- |
 | `Authorization` | `OPENCODE_GO_API_KEY`，由配置模块读取后传给客户端 | 向服务端认证；密钥不放入消息、JSON body 或 URL |
 | `Content-Type` | adapter 固定设置 | 告诉服务端 body 是 JSON |
-| `x-opencode-session` | 每次 `complete()` 内调用 `randomUUID()` | 提供服务路由标识；不代表本地已保存会话或服务会自动补齐历史 |
+| `x-opencode-session` | 每次 `complete()`/`stream()` 内调用 `randomUUID()` | 提供服务路由标识；不代表本地已保存会话或服务会自动补齐历史 |
 
 阶段 01 首次真实请求因缺少路由头返回 HTTP 400 `MissingSessionID`，补充后成功，依据见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。阶段 01 每次调用独立问答；阶段 02 同一次命令的各轮请求仍使用独立 UUID，已在真实工具往返中验证；结果见 ADR-002。
 
@@ -271,7 +271,7 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 - 内部只记录第一次取消原因，避免超时和调用方取消互相覆盖。
 - 定时器覆盖请求和响应体读取；读取结束前不会因拿到响应头而撤销超时。
 - complete 的 finally 清理定时器和外部监听器；错误摘要读取的 finally 取消剩余读取并释放 reader 锁。
-- 取消代表本地停止等待/读取，不保证服务端已停止推理或撤销费用。当前 CLI 不提供额外取消交互，接口级取消能力供调用方和测试使用。
+- 取消代表本地停止等待/读取，不保证服务端已停止推理或撤销费用。阶段 01/02 当时未提供取消交互；阶段 03 CLI 的 Ctrl+C 生命周期见 REPL 契约。
 
 ## 验证依据与兼容性
 
@@ -289,7 +289,7 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 
 源码入口：[runPrompt.ts](../../src/core/runPrompt.ts)、[OpenCodeGoClient.ts](../../src/adapters/opencode-go/OpenCodeGoClient.ts)、[cli.ts](../../src/bootstrap/cli.ts)。
 
-## 阶段 03 SSE 流式映射（已接受设计，尚未实现）
+## 阶段 03 SSE 流式映射（已实现并验证）
 
 阶段 03 在相同 URL、认证头和 `x-opencode-session` 规则上发送 `stream: true`。响应体按 SSE 事件读取；adapter 不把原始 chunk 暴露给 core，而是产生 [流式契约](streaming.md) 中的 `text_delta`、`tool_call_delta`、`message_end` 和 `usage` 事件。
 
@@ -350,3 +350,12 @@ adapter 转换为 `message.toolCalls: [{id,name,argumentsJson}]`，null content 
 2026-10-19，使用项目工具链运行构建产物 CLI，prompt 只要求读取 README.md 并总结。两次请求均为 deepseek-v4-flash、HTTP 200；finish_reason 依次为 tool_calls、stop；第二次请求角色顺序为 user/assistant/tool，工具结果与调用 ID 配对。两次 x-opencode-session 各自不同，CLI 退出码 0，stdout 非空、stderr 为空，约 8.07 秒。临时观测器只提取协议元数据，未保存密钥、文件正文或完整回答。
 
 本次验证支持当前账号、端点和模型下的逐请求 UUID 策略，不代表服务承诺所有模型的永久兼容性。
+
+## 阶段 03 验证入口
+
+阶段 03 CLI 已改为 `cli → displayTurn/runRepl → runTurnStream → stream()`；上文 complete/AgentLoop 的序列图与 stream:false 请求示例用于非流式兼容路径。
+
+- [stream.test.ts](../../tests/stream.test.ts)：按字节/间隔 SSE、事件顺序、UTF-8、usage、终止、资源清理、交错工具和 8/4 上限。
+- [repl.test.ts](../../tests/repl.test.ts)：源码与产物子进程的历史提交、裁剪、命令、EOF 和三种取消。
+- SSE 中间帧 `usage:null` 视为未提供统计；对象用量始终独立发事件，等值去重；complete 仍拒绝 null usage。
+- 真实服务结果及偶发不合规帧的安全拒绝记录见[阶段 03 实际结果](../specs/phase-03-repl-streaming.md#实际结果)与 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。

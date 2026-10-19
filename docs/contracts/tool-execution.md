@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-适用阶段：阶段 02，只读 `read_file` 与最小 Agent Loop。
+适用阶段：阶段 02/03，只读 `read_file`、非流式 AgentLoop 与流式 turn。
 
 本文定义模型工具调用如何转换为 yucli 的内部请求、如何执行工具以及如何把结果放回消息历史。它不定义文件编辑、命令执行、MCP 或用户审批。
 
@@ -205,3 +205,7 @@ interface AgentLoopResult {
 - 取消在操作前后和每次读取之间检查，同一个 signal 贯穿循环、注册表和工具；底层 stat/read 没有 OS 级抢占取消保证，已开始的文件调用完成后检查信号，拒绝继续追加成功结果。句柄在 finally 关闭。
 - 真实路径检查不是操作系统沙箱，不承诺对父目录并发替换提供原子隔离；当前边界和大小限制测试结果见阶段规格。
 - [agentLoop.test.ts](../../tests/agentLoop.test.ts)、[readFile.test.ts](../../tests/readFile.test.ts)、[toolHttp.test.ts](../../tests/toolHttp.test.ts)覆盖循环、工具和协议往返，CLI 子进程测试覆盖源码及产物入口。
+
+## 阶段 03 流式复用
+
+[streamAssembler.ts](../../src/core/streamAssembler.ts) 将每个 index 独立拼装成完整 ToolCall，message end 后整批复用 validateToolBatch；整条 stream 成功结束后才能调用 executeToolBatch。两种循环共用顺序执行器和 loopLimits，仍为 8 次模型、每批 4 项。任一协议错误、length、缺 message end 或取消都不执行未完成批次；流式失败不向 REPL 返回可提交的半截消息。验证入口见 [stream.test.ts](../../tests/stream.test.ts)。
