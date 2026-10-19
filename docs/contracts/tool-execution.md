@@ -43,14 +43,7 @@ interface ToolDefinition {
   // 阶段 02 只有 read_file；多工具阶段应放宽为受约束的工具名类型。
   name: "read_file";
   description: string;
-  parameters: {
-    type: "object";
-    properties: {
-      path: { type: "string" };
-    };
-    required: ["path"];
-    additionalProperties: false;
-  };
+  parameters: JsonSchema;
 }
 
 interface Tool {
@@ -159,9 +152,12 @@ interface AgentLoopResult {
   finalText: string;
   modelCalls: number;
   toolResults: readonly ToolResult[];
+  // 阶段 02 只有 final_text；后续阶段可扩展为其他成功停止原因。
   stopKind: "final_text";
 }
 ```
+
+`AgentLoopResult` 只表示成功完成并得到最终文本。循环上限、工具批次协议错误、模型请求错误和取消都不返回 result，而是抛出相应的稳定错误；阶段 02 的循环和协议失败抛 `AgentLoopError`。
 
 ## OpenCode Go 映射
 

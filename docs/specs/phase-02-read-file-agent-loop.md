@@ -203,9 +203,12 @@ interface AgentLoopResult {
   finalText: string;
   modelCalls: number;
   toolResults: readonly ToolResult[];
+  // 阶段 02 只有 final_text；后续阶段可以扩展成功停止原因。
   stopKind: "final_text";
 }
 ```
+
+`AgentLoopResult` 只在成功得到最终文本时返回。循环上限、工具协议错误、模型请求错误和取消都通过稳定错误抛出；阶段 02 的循环与协议失败抛 `AgentLoopError`，不会同时返回部分 result。
 
 模型消息需要表达三种新增状态：
 
@@ -257,7 +260,7 @@ tool：tool_call_id、工具结果文本；内部 `ToolResult` 另行保留工�
 
 推荐每次 CLI 命令最多进行 `8` 次模型调用，包含第一次请求。这个上限足够覆盖“请求工具 → 返回结果 → 生成回答”的学习场景，也能防止错误模型无限循环。实现时允许通过 core 的测试选项传入较小上限，但阶段 02 不把它暴露成 CLI 参数。
 
-第 8 次响应如果仍然包含工具调用，AgentLoop 直接返回 `AgentLoopError("loop_limit")`，不执行这一批工具，也不发起第 9 次模型调用。这样不会产生没有机会被模型消费的孤立 tool message。
+第 8 次响应如果仍然包含工具调用，AgentLoop 抛出 `AgentLoopError("loop_limit")`，不执行这一批工具，也不发起第 9 次模型调用。这样不会产生没有机会被模型消费的孤立 tool message。
 
 ### 工具执行顺序
 
@@ -283,6 +286,8 @@ protocol_error  # 工具批次或模型循环协议不合法
 ### finish_reason 一致性
 
 阶段 02 只把 `finish_reason: "length"` 定义为必须失败的截断信号。其他值与 `tool_calls` 的组合暂不增加额外一致性拒绝规则；如果服务端返回工具调用但使用未知 `finish_reason`，只要工具调用结构完整，按工具调用处理，并在真实联调记录实际行为。
+
+这是阶段 02 的保守选择。阶段 03 如果引入可恢复的 `limited` 或部分输出语义，应重新评估是否仍对 `length` 全量失败，并同步更新响应契约和测试。
 
 ### 工具路径范围
 
@@ -327,6 +332,8 @@ pnpm dev --prompt "请总结 README.md"
 - 工具批次中任一调用结构非法时，整个批次不执行。
 - 空工具列表时请求体省略 `tools`；有工具时请求体包含工具定义。
 - 请求体包含工具定义，响应中的 `tool_calls` 和 `finish_reason` 能转换为内部结构。
+- 发往模型的 tool message 省略 `name` 字段，只保留 `role`、`tool_call_id` 和 `content`。
+- AgentLoop 成功返回 `AgentLoopResult`；循环或协议失败抛出 `AgentLoopError`。
 - `read_file` 对 65536/65537 字节、空文件和非法 UTF-8 具有明确结果。
 - AgentLoop 返回包含 `finalText`、`modelCalls`、`toolResults` 和 `stopKind` 的结果对象。
 - 阶段 01 的参数错误、配置错误、模型错误、stdout/stderr 和退出码不回归。

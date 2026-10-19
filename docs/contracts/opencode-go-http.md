@@ -1,6 +1,8 @@
 # OpenCode Go HTTP 接口契约
 
-状态：`accepted`（阶段 01）；阶段 02 扩展：`draft`
+状态：`accepted`
+
+阶段 02 扩展状态：`draft`
 
 适用阶段：阶段 01 单次、非流式文本问答；阶段 02 非流式工具调用往返。
 

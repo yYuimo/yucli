@@ -1,6 +1,8 @@
 # LlmClient 契约
 
-状态：`accepted`（阶段 01）；阶段 02 扩展：`draft`
+状态：`accepted`
+
+阶段 02 扩展状态：`draft`
 
 适用阶段：阶段 01 单次模型问答；阶段 02 增加工具调用和 AgentLoop。
 
