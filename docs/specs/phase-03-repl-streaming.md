@@ -92,7 +92,7 @@ yucli> /exit
 
 ### 截断、缺帧和连接中断
 
-**给定**：`finish_reason: "length"`、缺少 message end、SSE JSON 非法或响应流在收尾前断开。
+**给定**：`finish_reason: "length"`、缺少 message end、SSE JSON 非法或响应流在 message end 前断开。
 
 **那么**：
 
@@ -217,7 +217,7 @@ EOF             结束进程，退出码 0
 
 ### 2. SSE 和工具拼装的收尾
 
-推荐由 adapter 负责字节到 `LlmStreamEvent` 的 SSE 转换，由 core assembler 负责按 index 拼装。`finish_reason: "length"`、缺少 message end、`[DONE]` 前连接中断、非法 JSON、缺 ID/名称/参数和批次超限都直接失败，不执行工具。message end 到达且没有工具调用时，最终文本仍必须是非空白；空文本加无工具调用是 `ResponseError`。message end 成功后即使服务随后没有发送 `[DONE]`，也按成功处理。流式文本可以已经显示，但不进入历史。
+推荐由 adapter 负责字节到 `LlmStreamEvent` 的 SSE 转换，由 core assembler 负责按 index 拼装。`finish_reason: "length"`、message end 前断开、非法 JSON、缺 ID/名称/参数和批次超限都直接失败，不执行工具。message end 到达且没有工具调用时，最终文本仍必须是非空白；空文本加无工具调用是 `ResponseError`。message end 成功后即使服务随后没有发送 `[DONE]`，也按成功处理。流式文本可以已经显示，但不进入历史。
 
 ### 3. REPL 历史和上下文上限
 

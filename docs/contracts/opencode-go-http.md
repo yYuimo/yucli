@@ -302,7 +302,7 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 }
 ```
 
-每个 SSE `data` JSON 的 `choices[0].delta.content` 转成文本事件；`delta.tool_calls[*]` 按 `index` 转成工具调用 delta；最后一个 choice 的 `finish_reason` 转成 message end。`[DONE]` 只结束传输，不能替代缺失的 message end。`finish_reason: "length"`、非法 JSON、半截 UTF-8、缺少收尾或连接中断均抛 `ResponseError`，不执行工具。
+每个 SSE `data` JSON 的 `choices[0].delta.content` 转成文本事件；`delta.tool_calls[*]` 按 `index` 转成工具调用 delta；最后一个 choice 的 `finish_reason` 转成 message end。`[DONE]` 只结束传输，不能替代缺失的 message end。`finish_reason: "length"`、非法 JSON、半截 UTF-8、缺少 message end 或 message end 前连接中断均抛 `ResponseError`，不执行工具；message end 到达后即使没有 `[DONE]` 也按成功收尾。
 
 阶段 03 的多轮请求仍按阶段 02 规则每次 `complete()`/`stream()` 生成独立 `x-opencode-session`；真实联调需要确认服务支持连续流式工具往返。
 
