@@ -9,11 +9,11 @@ import type { LlmRequest, LlmResponse } from "./message.js";
 export interface LlmClient {
   /**
    * 接收一组模型消息，完成一次模型调用，返回经过校验的 assistant 回答。
-   * core/runPrompt 调用此接口，具体 HTTP 实现由 adapter 提供。
+   * core/runPrompt 与 core/agentLoop 调用此接口，具体 HTTP 实现由 adapter 提供。
    *
    * @param request 要使用的模型和按顺序排列的消息，实现方不得修改它们。
    * @param signal 可选取消信号；取消后不能继续将结果作为成功返回。
-   * @returns Promise，成功时包含非空 assistant 文本和可选用量。
+   * @returns Promise，成功时包含 assistant 文本或工具调用，以及可选用量。
    * 网络、超时、协议错误或取消通过拒绝 Promise 交给调用方处理。
    */
   // Promise<LlmResponse> 是未来完成的结果；调用方 await 后才取得 LlmResponse。

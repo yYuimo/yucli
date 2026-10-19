@@ -2,13 +2,15 @@
 // bootstrap 是组合根：认识具体 adapter，创建对象后将它注入 core。
 // 顶部 shebang 让系统知道用 Node 运行脚本；本项目是 ESM，可用顶层 await。
 import { Command, CommanderError } from "commander";
-import { runPrompt } from "../core/runPrompt.js";
+import { agentLoop } from "../core/agentLoop.js";
+import { RegisteredTools } from "../core/toolRegistry.js";
+import { ReadFileTool } from "../adapters/filesystem/ReadFileTool.js";
 import { loadConfig } from "../adapters/config/loadConfig.js";
-import { AbortError, ConfigError, RequestError, ResponseError } from "../contracts/llm-client.js";
+import { AbortError, AgentLoopError, ConfigError, RequestError, ResponseError } from "../contracts/llm-client.js";
 import { OpenCodeGoClient } from "../adapters/opencode-go/OpenCodeGoClient.js";
 
 /**
- * 执行一次终端问答：读取 --prompt、加载配置、创建客户端、调用模型并输出结果。
+ * 执行一次终端问答：读取 --prompt、加载配置、创建客户端、执行模型与只读工具循环并输出最终文本。
  * 文件末尾的 await main() 是唯一启动调用；命令行输入来自 process.argv，无函数参数。
  * --help/--version 输出后结束，参数不合法时不加载配置，也不请求模型。
  *
@@ -22,7 +24,7 @@ async function main(): Promise<void> {
   const program = new Command()
     .name("yucli")
     .version("0.1.0")
-    .description("单次模型问答；当前阶段不支持交互 REPL。配置来自当前目录 .env 或进程环境变量。")
+    .description("单次文件工具问答；当前阶段不支持交互 REPL。配置来自当前目录 .env 或进程环境变量。")
     .requiredOption("--prompt <text>", "发送一次问题并输出模型回答")
     .allowExcessArguments(false)
 
@@ -50,10 +52,11 @@ async function main(): Promise<void> {
 
     const config = loadConfig();
 
-    // 先创建客户端，再传入 core。await 等待 Promise 完成，失败会进入本层 catch。
-    const result = await runPrompt(new OpenCodeGoClient(config), config.model, prompt);
+    // 先创建客户端，再传入 core 的循环。await 等待 Promise 完成，失败会进入本层 catch。
+    const registry = new RegisteredTools([new ReadFileTool(process.cwd())]);
+    const result = await agentLoop(new OpenCodeGoClient(config), registry, config.model, prompt);
 
-    process.stdout.write(`${result.message.content}\n`);
+    process.stdout.write(`${result.finalText}\n`);
   } catch (error) {
     // catch 的 error 是 unknown；instanceof 在运行时判断并收窄它的 TS 类型。
     // stdout 留给回答，stderr 用于错误，便于 shell 重定向或脚本消费。
@@ -68,7 +71,8 @@ async function main(): Promise<void> {
     } else if (
       error instanceof RequestError ||
       error instanceof ResponseError ||
-      error instanceof AbortError
+      error instanceof AbortError ||
+      error instanceof AgentLoopError
     ) {
       process.stderr.write(`${error.message}\n`);
       process.exitCode = 4;

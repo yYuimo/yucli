@@ -29,3 +29,22 @@ export async function readJson(request: IncomingMessage): Promise<unknown> {
 export function completion(content = "你好！") {
   return { choices: [{ message: { role: "assistant", content, reasoning_content: "不应显示的推理" } }] };
 }
+
+/** 构造本地服务的工具调用响应；arguments 保持 JSON 字符串，供 adapter/core 验证。 */
+export function toolCompletion(
+  calls: { id: string; name?: string; argumentsJson?: string }[] = [{ id: "call-1" }],
+  finishReason = "tool_calls",
+) {
+  return {
+    choices: [{
+      finish_reason: finishReason,
+      message: {
+        role: "assistant", content: null,
+        tool_calls: calls.map((call) => ({
+          id: call.id, type: "function",
+          function: { name: call.name ?? "read_file", arguments: call.argumentsJson ?? '{"path":"README.md"}' },
+        })),
+      },
+    }],
+  };
+}

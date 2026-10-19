@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { completion, readJson, startServer } from "./helpers.js";
+import { completion, readJson, startServer, toolCompletion } from "./helpers.js";
 
 const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { bin: { yucli: string } };
 const sourceCli = fileURLToPath(new URL("../src/bootstrap/cli.ts", import.meta.url));
@@ -21,6 +21,7 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), "yucli-cli-"));
     hits = 0;
+    await writeFile(join(cwd, "README.md"), "CLI 文件内容");
     server = await startServer(async (req, res) => {
       hits++;
       captured = await readJson(req);
@@ -30,6 +31,14 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
         res.end(`Authorization: Bearer ${apiKey}`);
       } else if (messages[0]?.content === "invalid-json") {
         res.end("invalid");
+      } else if (messages[0]?.content === "loop-limit") {
+        res.end(JSON.stringify(toolCompletion()));
+      } else if (messages[0]?.content === "bad-batch") {
+        res.end(JSON.stringify(toolCompletion([{ id: "valid" }, { id: "invalid", argumentsJson: "{" }])));
+      } else if (messages[0]?.content === "truncated") {
+        res.end(JSON.stringify(toolCompletion(undefined, "length")));
+      } else if (messages[0]?.content === "read" && hits === 1) {
+        res.end(JSON.stringify(toolCompletion()));
       } else {
         res.end(JSON.stringify(completion("CLI 回答")));
       }
@@ -61,8 +70,20 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
 
   it("成功回答只写 stdout，返回 0", async () => {
     expect(await run(["--prompt", "你好"])).toEqual({ code: 0, stdout: "CLI 回答\n", stderr: "" });
-    expect(captured).toEqual({ model: "deepseek-v4-flash", messages: [{ role: "user", content: "你好" }], stream: false });
+    expect(captured).toEqual({ model: "deepseek-v4-flash", messages: [{ role: "user", content: "你好" }], stream: false,
+      tools: [{ type: "function", function: expect.objectContaining({ name: "read_file" }) }],
+    });
     expect(hits).toBe(1);
+  });
+
+  it("工具往返后只输出最终回答，后续请求含调用与真实文件结果", async () => {
+    expect(await run(["--prompt", "read"])).toEqual({ code: 0, stdout: "CLI 回答\n", stderr: "" });
+    expect(hits).toBe(2);
+    expect(captured).toMatchObject({ messages: [
+      { role: "user", content: "read" },
+      { role: "assistant", tool_calls: [expect.objectContaining({ id: "call-1" })] },
+      { role: "tool", tool_call_id: "call-1", content: "CLI 文件内容" },
+    ] });
   });
 
   it("help 不要求配置且不发请求", async () => {
@@ -91,7 +112,7 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
     expect(hits).toBe(0);
   });
 
-  it.each(["fail", "invalid-json"])("模型错误 %s 只写 stderr，返回 4", async (prompt) => {
+  it.each(["fail", "invalid-json", "loop-limit", "bad-batch", "truncated"])("模型错误 %s 只写 stderr，返回 4", async (prompt) => {
     const result = await run(["--prompt", prompt]);
     expect(result.code).toBe(4);
     expect(result.stdout).toBe("");
