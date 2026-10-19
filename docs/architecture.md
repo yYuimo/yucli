@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 已按四层依赖结构实现、验证，并获用户授权集成到 main（`done`）；后续阶段为演进路线。
+状态：阶段 01 已按四层依赖结构实现、验证，并获用户授权集成到 main（`done`）；阶段 02 已形成待评审设计，尚未实现。
 
 ## 目标场景
 
@@ -89,7 +89,7 @@ src/
 
 当前调用链为 `bootstrap/cli → adapters/config → core/runPrompt → contracts/LlmClient → adapters/opencode-go → CLI 输出`。配置在一次命令启动时构造，prompt、请求和回答只存在于本次进程内；core 不读取环境变量、不依赖提供方响应格式。OpenCode Go adapter 每次请求生成独立的 `x-opencode-session` 路由 UUID，持有独立超时控制器，并在 `finally` 清理定时器与外部取消监听器。超时覆盖响应体读取，HTTP 诊断只读取最多 512 字节并脱敏。
 
-`AgentLoop` 和工具接口在阶段 2 按实际需求加入，`session` 在阶段 4 加入；当前不提前拆成独立 package，也不加入假模型客户端。
+阶段 02 计划在 `core` 增加 `AgentLoop`，在 `contracts` 增加工具调用和工具结果，在 `adapters` 增加工作区内的 `ReadFileTool`，由 `bootstrap` 注册并注入。循环按模型调用顺序执行工具，默认最多 8 次模型调用；工具错误作为 tool message 返回模型。阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。`session` 在阶段 4 加入；当前不提前拆成独立 package，也不加入假模型客户端。
 
 ### 依赖检查
 

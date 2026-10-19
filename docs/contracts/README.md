@@ -7,6 +7,7 @@
 - [LlmClient 契约](llm-client.md)：core 与模型 adapter 之间的消息、结果和错误约定。
 - [OpenCode Go HTTP 接口契约](opencode-go-http.md)：adapter 如何构造网络请求、读取响应并转换成内部结果。
 - [CLI 行为契约](cli.md)：参数、配置、输出和退出码。
+- [工具执行契约](tool-execution.md)：工具定义、调用 ID、`read_file` 边界和 AgentLoop 消息顺序。
 
 ## 适合建立契约的内容
 
