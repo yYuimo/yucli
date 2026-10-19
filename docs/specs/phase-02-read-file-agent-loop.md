@@ -1,6 +1,6 @@
 # 阶段 02：只读文件工具与最小 Agent Loop
 
-状态：`proposed`
+状态：`designed`
 
 本阶段建立在阶段 01 的单次模型问答之上。用户仍然从命令行提供一个 prompt，但模型可以提出 `read_file` 工具调用；yucli 执行一次只读文件操作，把工具结果加入消息历史，再让模型继续生成最终回答。
 
@@ -270,7 +270,7 @@ tool：tool_call_id、工具结果文本；内部 `ToolResult` 另行保留工�
 
 推荐把可恢复的工具错误作为 `ok: false` 的 tool message 交给模型，而不是立即终止进程。模型仍然可以解释“文件不存在”或改用已有信息。循环协议错误、模型请求错误和取消则直接结束本次命令。
 
-单个 assistant 响应最多允许 `4` 个工具调用；超过这个数量视为本阶段不支持的工具批次，返回 `AgentLoopError("protocol_error")`，不执行该批次。这样在单文件 64 KiB 上限下，也把一轮工具结果控制在约 256 KiB 以内。
+单个 assistant 响应最多允许 `4` 个工具调用；超过这个数量视为本阶段不支持的工具批次，抛出 `AgentLoopError("protocol_error")`，不执行该批次。这样在单文件 64 KiB 上限下，也把一轮工具结果控制在约 256 KiB 以内。
 
 ### AgentLoop 错误
 
@@ -295,7 +295,7 @@ protocol_error  # 工具批次或模型循环协议不合法
 
 ## 任务清单
 
-- [ ] 将阶段状态从 `proposed` 改为 `designed`，确认范围和推荐选择。
+- [x] 将阶段状态从 `proposed` 改为 `designed`，确认范围和推荐选择。
 - [ ] 扩展 `Message`、`LlmRequest`、`LlmResponse`，支持 assistant tool calls、tool messages、可选 `tools` 和 `finishReason`。
 - [ ] 扩展 OpenCode Go adapter 的请求体和响应解析，覆盖工具定义、调用 ID 和参数 JSON。
 - [ ] 新增 `Tool`、`ToolDefinition`、`ToolCall`、`ToolResult`、`ToolRegistry` 和 `AgentLoopError` 契约。
