@@ -22,6 +22,7 @@
   - [ADR-003：阶段 02 顺序只读工具循环](decisions/ADR-003-phase-02-minimal-agent-loop.md)
   - [ADR-004：阶段 03 流式事件与内存 REPL](decisions/ADR-004-phase-03-streaming-repl.md)
   - [ADR-005：暂不抽取 OpenAI 兼容客户端基类](decisions/ADR-005-defer-openai-compatible-base-client.md)
+- [非主流程代码清单（历史与降级路径）](legacy-paths.md)
 - [Agent 开发报告模板](templates/development-report.md)
 
 ## 目录约定
