@@ -369,3 +369,6 @@ adapter 转换为 `message.toolCalls: [{id,name,argumentsJson}]`，null content 
 - [repl.test.ts](../../tests/repl.test.ts)：源码与产物子进程的历史提交、裁剪、命令、EOF 和三种取消。
 - SSE 中间帧 `usage:null` 视为未提供统计；对象用量始终独立发事件，等值去重；complete 仍拒绝 null usage。
 - 真实服务结果及 usage-only 兼容缺陷的修复记录见[阶段 03 实际结果](../specs/phase-03-repl-streaming.md#实际结果)与 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。
+
+
+2026-10-20 修复后真实重跑：--prompt 纯文本 1 请求、read_file 往返 2 请求，均 HTTP 200 且使用独立路由 UUID；每请求收到 1 个 usage-only 帧、原始 usage 2 份，经去重仅发 1 个 usage 事件，message_end/[DONE] 均正常。两个 CLI 进程均 stdout 有回答、stderr 为空、退出 0。原先对尾帧的拒绝是客户端帧分类缺陷，现已修复；详细失败与成功证据见阶段规格。

@@ -2,7 +2,7 @@
 
 状态：`implementing`
 
-设计评审：2026-10-19，用户确认七项推荐选择；主体实现已完成；2026-10-20 因已确认的 usage-only 兼容缺陷重新进入实现与验证。
+设计评审：2026-10-19，用户确认七项推荐选择；主体实现已完成；2026-10-20 重开 usage-only 兼容修复并完成验证，按本次要求保持 implementing，等待修复审查。
 
 阶段 03 建立在阶段 02 的单次工具循环之上，把一次命令扩展为同一进程内的 REPL，并把 OpenCode Go 的非流式请求扩展为 SSE 流式请求。历史只存在内存；会话持久化、恢复和上下文压缩留到阶段 04 及以后。
 
@@ -332,17 +332,30 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typech
 
 1. 首轮文本两次、工具一次，共 3 次 HTTP 200，早期 SSE 帧的 usage:null 被初版流式映射误判为非法对象，均未完成 turn、未执行工具。现将流式 null 视为尚未提供统计，只有对象用量才发独立事件，并补回归；complete 对 null usage 的既有拒绝行为保持且有测试。契约同步明确了此映射。
 2. 修复后的首次工具尝试在 tool_calls 的 message end 后抛 ResponseError，退出 4，工具执行零次；当时错误归因为“不合规 choice/delta 收尾帧、重跑未复现”。2026-10-20 用户提供的 2026-10-19 抓包和稳定 CLI 复现已纠正该结论：这是合法的 `choices:[] + usage` 统计帧被客户端误拒，不是服务端协议不合规。后续修复与验证记录见下节。
-3. 本阶段真实验证共发起 8 次 HTTP 请求（含上述失败尝试）；成功场景见表格，不能将 REPL 在 /exit 时返回 0 等同于此前每个 turn 都成功。
+3. 2026-10-19 初次阶段验证共发起 8 次 HTTP 请求（含上述失败尝试）；成功场景见表格，不能将 REPL 在 /exit 时返回 0 等同于此前每个 turn 都成功。
 
-### usage-only 兼容修复（2026-10-20，验证进行中）
+### usage-only 兼容修复（2026-10-20，修复验证完成）
 
 - 证据来源：用户提供的 2026-10-19 抓包与实际 CLI 稳定复现。服务在 finish 帧后、[DONE] 前发送 `data: {"choices":[],"usage":{...}}`；usage 与 finish 帧逐字段相同，属于重复统计。
 - 缺陷原因：parseStreamChunk 无条件读取 choices[0].delta，统计帧尚未进入 usage 校验就被拒绝。可见表现是答案已输出，随后 stderr 报“流式响应需要 choice 和 delta 对象。”、单次退出 4；REPL 的该 turn 同样失败，不提交历史。
 - 已确认修复边界：非空 choices 仍严格校验 delta/工具/finish reason；空 choices 仅在带合法 usage 对象时作为统计帧，空 choices 无 usage 仍拒绝。统计帧只发 usage，不产生 message_end；去重继续由每请求 seenUsage 处理，等值一次、不同值分别发出。
-- 本地复现、实现验证与真实纯文本/工具往返的结果待本次修复后补录；不得沿用先前成功记录作为本次通过依据。
+- 失败复现（助手本轮实际运行）：修复前新增“usage-only 首次提供统计”“finish 与统计帧等值去重”“两个统计帧不同值”三个 mock SSE 用例，三项均失败，堆栈定位 parseStreamChunk，错误正是“流式响应需要 choice 和 delta 对象。”。使用真实 adapter + 本地 SSE，没有新增假模型客户端。
+- 实现：先校验 choices 数组，再按非空消息帧/空数组统计帧分支；提取 parseStreamUsage 复用同一套对象、非负安全整数与字段映射校验。OpenCodeGoClient.seenUsage、message_end/[DONE]/length 校验和 complete() 均未改动；src 补充了分支、数据流和校验边界的中文注释。
+- 本地验证（本轮重新执行）：固定 Node.js 24.14.0 / pnpm 10.33.2 下运行 `pnpm typecheck`、`pnpm lint`、`pnpm test`、`pnpm build`，全部通过；9 个文件、220 个用例。命令包装为 `npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test && pnpm build'`。
+- 回归覆盖：三种成功统计/去重情况均检查事件及完整 turn 成功；空 choices 无 usage、无 choices、非法 usage 对象/计数、非空 choices 的坏 delta 仍拒绝。统计帧不能掩盖缺 message_end、空白最终文本或 length，相关批次工具执行次数为零。原有坏 JSON/tool_calls、UTF-8、取消、超时及 8/4 额度测试全部保留通过。
+- CLI/REPL 回归：mock helper 可在 finish 帧携带 usage 并在 [DONE] 前追加等值 usage-only；源码与构建产物的 --prompt、工具往返和 REPL 历史/命令/取消测试均使用该序列通过，stdout 不显示统计帧，也不再丢弃合法 turn。
+
+真实联调使用现有 .env 和构建产物，以临时观测器只采集协议元数据（未保存密钥、文件正文或模型回答，未将模型文本写进断言）：
+
+| 场景 | 请求与停止原因 | usage 与流结束 | CLI 结果 |
+| --- | --- | --- | --- |
+| --prompt 纯文本 | 1 次 HTTP 200，deepseek-v4-flash，stream:true，finish reason 为 stop | 实际收到 1 个 choices:[] + usage 对象的统计帧；原始 usage 2 份、规范化后等值、内部 usage 事件 1 次；message_end 1、text_delta 17；正常收到 [DONE] | stdout 有回答，stderr 为空，退出 0；约 3.872 秒 |
+| --prompt 流式 read_file 往返 | 2 次 HTTP 200，finish reason 依次 tool_calls、stop；第二次请求为 user/assistant/tool，1 项 read_file 调用与结果 ID 配对 | 每次均实际收到 1 个 usage-only 帧、原始 usage 2 份、内部 usage 事件 1 次；message_end 各 1；首请求 tool_call_delta 11，次请求 text_delta 13；两次 [DONE] 均正常 | stdout 有回答，stderr 为空，退出 0；约 6.187 秒 |
+
+本次真实重跑共 3 次请求、3 个不同的 x-opencode-session UUID；共 3 个 usage-only 帧，原始 6 份用量规范化去重后发出 3 个事件。纯文本及工具首请求出现 reasoning 字段，工具最终回答未见该字段；均未渲染 reasoning。真实帧结构与用户给出的证据一致，修复后的成功不是此前“未复现”重试的替代陈述；不同值统计分别发出的行为由确定性 mock SSE 验证。
 
 ### 遗留问题与下一步
 
-- usage-only 修复及回归/真实联调尚在进行；当前为 implementing，停在 phase/03-repl-streaming，不合并、不推送。
-- 原“不合规收尾帧”已确认是合法 usage-only 帧兼容缺陷，必须修复；其他坏 JSON、delta、工具批次、缺 message_end 和 length 的拒绝边界保持。
+- 本次修复范围与验证均已完成，无未完成修复项；阶段按本次要求从 verified 回到 implementing，保持此状态等待修复审查。停在 phase/03-repl-streaming，不合并、不推送。
+- 原“不合规收尾帧”已确认是客户端误拒合法 usage-only 帧，现已修复；不再将该兼容缺陷归因于服务异常。其他坏 JSON、delta、工具批次、缺 message_end 和 length 的拒绝边界保持。
 - 20 turn 只限制数量，未限制 token 或单条响应体积；上下文溢出仍按模型错误 + /clear 处理。持久化、恢复、压缩等留到阶段 04 设计。
