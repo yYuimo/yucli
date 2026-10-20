@@ -4,6 +4,10 @@
 
 调研日期：2026-10-20（Asia/Shanghai）
 
+补充日期：2026-10-20（Asia/Shanghai）
+
+变更记录：补正参考快照 commit；补充单写者、落盘成功语义、v1 事件/replay、目录恢复、版本/未知事件、坏行、隐私保留和失败 turn 边界；扩充评审问题。
+
 本报告只用于技术选型评审。本次没有修改 `src/`、没有创建阶段规格、接口契约或 ADR，也没有开始阶段 04 实现。
 
 ## 1. 调研范围和资料状态
@@ -17,13 +21,13 @@
 
 参考项目：
 
-| 项目 | 本地位置 | 资料状态 |
-| --- | --- | --- |
-| Pi | `agent-lab/references/pi` | 工作区可读；重点阅读 coding-agent 的 JSONL session、SessionManager 和 compaction |
-| ZCode | `agent-lab/references/zcode` | 工作区可读；重点阅读 session-persistence 设计、SQLite store、message/part 和 history hydration |
-| DSH | `agent-lab/references/dsh` | 工作区可读；重点阅读 session-format、persistence catalog、版本迁移和 storage contract |
-| OpenAI Codex CLI | `agent-lab/references/codex` | 工作区可读；重点阅读 Rust rollout recorder、resume、压缩、索引和状态数据库 |
-| OpenCode | `agent-lab/references/opencode` | 源码可读；本地 Git 引用损坏，不能可靠取得 commit hash，因此以下结论以当前源码快照为依据 |
+| 项目 | 本地位置 | 快照 commit | 资料状态 |
+| --- | --- | --- | --- |
+| Pi | `agent-lab/references/pi` | 快照待补 | 工作区可读；重点阅读 coding-agent 的 JSONL session、SessionManager 和 compaction |
+| ZCode | `agent-lab/references/zcode` | `aac4755` | 官方来源记录为 `aac4755666d09fdcd70272fcf063c077a639015f`；重点阅读 session-persistence 设计、SQLite store、message/part 和 history hydration |
+| DSH | `agent-lab/references/dsh` | `5badb15` | 官方来源记录为 `5badb15009ae1756c3afe0ae0cef1faafc290ccc`；重点阅读 session-format、persistence catalog、版本迁移和 storage contract |
+| OpenAI Codex CLI | `agent-lab/references/codex` | `4be9cfd` | 工作区当前快照为 `4be9cfd`；重点阅读 Rust rollout recorder、resume、压缩、索引和状态数据库 |
+| OpenCode | `agent-lab/references/opencode` | `d814879` | 工作区当前快照为 `d814879`；重点阅读 SQLite session、durable event、projector、history 和 compaction |
 
 当前 `yucli` 阶段 03 已完成并提交；本报告不改变它的流式 REPL 和内存历史行为。
 
@@ -349,6 +353,143 @@ Pi 的 `firstKeptEntryId`、Codex 的 replacement history/window、ZCode 的 com
 
 到那时可以参考 ZCode/OpenCode 的 session/message/part 分层，并考虑从 JSONL 做一次显式导入，而不是让两种格式长期同时作为写入真相源。
 
+### 9.7 单写者与并发边界
+
+阶段 04 的 v1 推荐只支持**同一会话同一时间一个写者**。这里的“写者”是负责该 session 文件 append、flush 和 replay 快照的一条进程内写入路径；不承诺两个线程、两个 REPL 实例或两个进程同时修改同一文件。
+
+多进程同时追加 JSONL 可能造成：
+
+- 两个写者分配出重复或交错的 `seq`。
+- 一行 JSON 被交错写入，形成无法解析的中部坏行。
+- 一个进程按旧历史追加，另一个进程已经写入 turn_end 或 compaction，导致语义顺序错误。
+- 一个进程重写/压缩文件时，另一个进程仍持有旧文件描述符，产生丢失或覆盖。
+
+Codex 用进程内 writer task、`WriterLockCoordinator` 和临时文件/原子发布来处理这类边界；这些是本次需要理解的可靠性方案，**阶段 04 暂不实现跨进程锁、压缩转换或原子重写**。如果未来开放多进程 resume，应先新增锁和冲突策略，不能只把 append 调用暴露出去。
+
+### 9.8 “保存成功”的语义与失败行为
+
+`append` 和 `fsync` 不是同一个承诺：
+
+- `append` 表示数据已经交给操作系统文件缓存，进程继续运行时通常可以读到。
+- `fsync` 返回成功后，才可以把数据视为已经请求底层文件系统持久化；它仍不等同于跨设备备份。
+
+v1 有两个可评审选项：
+
+| 选项 | 语义 | 优点 | 代价 |
+| --- | --- | --- | --- |
+| A（推荐） | user 事件发出后先 flush/fsync 一次；turn 终止事件再 fsync 一次 | 崩溃时至少保住用户输入；成功/失败边界也可恢复 | 每个 turn 至少两次 fsync，速度较慢 |
+| B | 只在 turn 结束时 flush/fsync | 实现简单、写入次数少 | 模型请求中进程崩溃时，user 事件也可能丢失；不适合承诺“输入已保存” |
+
+推荐 A，因为阶段 04 的核心目标是 resume，用户已经提交的 prompt 不应因为模型尚未返回就消失。按 A 承诺时，进程崩溃最多丢失上一次 fsync 之后的中间事件；若 user 已完成第一次 fsync，则不会丢失该 user，未完成的 assistant/tool 仍由 `turn_end` 缺失表示。
+
+写入失败时的 REPL 行为也有两个方向：
+
+- **推荐**：报告保存错误，把当前内存状态标记为“未保存”，停止接受下一次模型 turn；允许用户重试 flush 或退出。这样不会继续制造已经无法恢复的内存历史。
+- **备选**：保留内存历史并继续 REPL，但每次后续输入都带未保存警告。这更顺滑，却容易让用户误以为会话可恢复。
+
+“已保存”的文案只能在所选 fsync 边界成功后出现；append 成功不能单独作为持久化成功提示。
+
+### 9.9 v1 最小事件表与 replay 规则
+
+下面是调研阶段建议的最小事件集合。它不是已经接受的契约；字段和命名需要用户评审后才进入阶段规格。
+
+| 事件 | 是否进入模型历史 | 元数据字段 | 与当前 `Message` 类型的关系 |
+| --- | --- | --- | --- |
+| `session_meta` | 否 | cwd、模型默认值、创建时间、格式信息 | 不对应 `Message`；用于恢复会话身份 |
+| `user` | 是 | `turnId`、来源、创建时间 | 投影为当前 `TextMessage` 的 `{ role: "user", content }` |
+| `assistant` | 是 | `turnId`、finish reason、usage；可带 `toolCalls` | 投影为当前 `AssistantMessage`；阶段 03 已支持 `content?` 和 `toolCalls?` |
+| `tool_result` | 是 | `turnId`、`ok`、执行耗时、错误分类 | 投影为当前 `ToolMessage`；`ok` 是本地元数据，`content` 才是模型可见文本 |
+| `turn_end` | 否 | outcome、错误、取消原因、保存边界 | 不对应 `Message`；标记本次 turn 是否可继续恢复 |
+| `compaction`（预留） | 完成后以 checkpoint 形式影响模型历史 | summary、保留边界、版本和来源 | 未来转换为 summary/checkpoint，不直接伪造普通 user/assistant 消息 |
+
+v1 推荐把工具调用放在 `assistant.toolCalls` 中，不另建 `tool_call` 事件；这样和当前 [Message 类型](/Users/yuimo/dev-learn/agent-lab/yucli/src/contracts/message.ts) 以及阶段 03 的 `runTurnStream` 结果一致。未来如果需要记录流式工具调用的中间状态，再单独增加事件类型。
+
+replay 的建议顺序是：
+
+1. 按 `seq` 读取并验证 session 文件。
+2. `session_meta` 只恢复会话元数据。
+3. `user` 追加一条 user message。
+4. `assistant` 追加 assistant message；如果带 tool calls，保留调用 ID、名称和参数。
+5. `tool_result` 追加对应的 tool message，按 `toolCallId` 关联。
+6. `turn_end` 不进入消息数组，只决定该 turn 是成功、失败、取消还是中断。
+7. 遇到已确认的 compaction checkpoint 时，未来由 context builder 用 checkpoint + suffix 替换更早历史。
+
+如果 replay 发现 assistant 工具调用没有对应的 `tool_result`，推荐合成一条本地 tool message：`[tool interrupted before resume]`，并把该 turn 标为 interrupted；不自动再次执行工具。这样下一次模型请求看到的是结构完整但明确失败的历史。
+
+### 9.10 目录布局与恢复入口
+
+可选布局有三种：
+
+| 方案 | 做法 | 优点 | 风险 |
+| --- | --- | --- | --- |
+| Pi 风格 cwd 编码目录 | `sessions/--<cwd>--/<timestamp>_<id>.jsonl` | 列表时天然按 cwd 分组 | 长路径、特殊字符、大小写和不同平台路径规则容易产生碰撞或过长路径 |
+| 扁平目录 + header 扫描（推荐） | `sessions/<timestamp>_<id>.jsonl`，cwd 保存在 `session_meta` | 文件名只含安全字符；跨平台规则简单；不会把 cwd 直接放进路径 | 列表需要扫描文件并读取 header，文件多时需要索引 |
+| 按 hash 分组 | `sessions/<cwd-hash>/<timestamp>_<id>.jsonl`，header 保留原 cwd | 路径短，分组扫描成本较低 | 需要维护 hash 算法、碰撞处理和跨版本稳定性 |
+
+推荐扁平目录：session ID 使用 UUID/安全字符，时间仅用于排序，真实 cwd 只写入 header。这样不需要把 `/`、`\\`、`:`、空格、Unicode、大小写路径规则编码进文件名；Windows 大小写不敏感、macOS 规范化和 Linux 大小写敏感的差异也不会改变文件定位。
+
+长路径和特殊字符仍需要在 header/filter 层处理：cwd 应保存规范化后的绝对路径，但“是否大小写折叠”属于跨平台待确认规则，不能在报告阶段假定所有系统一致。
+
+恢复入口暂列为开放项：
+
+- 会话列表：扫描 header，显示 ID、创建/更新时间、cwd 和首条 user 文本。
+- cwd 过滤：按规范化路径匹配，大小写策略待确认。
+- `--continue`：推荐先恢复当前 cwd 最近一个 session。
+- `/resume`：后续提供交互选择器；也可以先支持 `--resume <session-id>`。
+- 显式路径恢复：可作为调试入口，但不应成为普通用户的唯一方式。
+
+### 9.11 版本与未知事件
+
+推荐把 `formatVersion` 放在**文件 header**，而不是每一行重复：
+
+- 一个文件只需读取一次格式版本。
+- 每行保留 `seq`、`eventType`、`eventId` 和 payload，避免重复版本字段。
+- header 缺失或损坏时不能可靠判断整段文件的解释方式，应拒绝恢复并报告。
+
+同一版本遇到未知 `eventType` 时，推荐采用显式可忽略标记：
+
+- `ignorable: true` 的未知事件可以跳过，但要记录警告并继续检查 `seq`。
+- 没有可忽略标记的未知事件拒绝恢复，因为它可能改变模型历史或 turn 终止语义。
+
+遇到高于当前支持版本的 `formatVersion`，拒绝恢复并提示升级；低于当前版本时，只有存在明确的相邻迁移才能读取。这里采用 DSH 的“相邻迁移”原则，但 v1 暂不实现完整迁移目录；未来版本增加时不能静默重解释旧 payload。
+
+### 9.12 坏行位置策略
+
+坏行需要区分位置：
+
+- **尾部坏行**：如果坏行是文件最后一行，且前面的最后一行以换行结束，可以把它视为进程崩溃留下的半截写入；停止在最后一个完整事件，报告“尾部未完成”，并允许恢复已确认的前缀。
+- **中部坏行**：如果坏行后面还有有效事件，不能确定 `seq`、turn 或工具结果是否被跳过；v1 应拒绝整段恢复，避免把不连续历史拼成合法上下文。
+
+每行的 `seq` 用于检测：
+
+- 重复：同一 session 内出现相同 `seq`，拒绝恢复。
+- 缺口：`seq` 不连续，拒绝恢复；除非未来事件格式明确允许范围/继承边界。
+- 倒退：`seq` 小于前一行，拒绝恢复。
+
+Codex 的 `load_rollout_items` 会统计 `parse_errors` 并跳过坏 JSON 行，这是它在复杂 rollout、兼容旧数据和索引回填中的取舍。yucli 的模型历史更小但语义更敏感，v1 不建议直接复制“中部坏行继续读”的策略；可以保留 Codex 的诊断计数思路，用于显示恢复警告。
+
+### 9.13 隐私与保留
+
+会话文件会包含用户原始输入、assistant 回答、工具调用参数，以及 `read_file` 读到的文件内容。它可能包含源码、配置片段、路径、个人信息或密钥误输入。因此：
+
+- v1 明文保存，不加密；报告必须明确这是本地学习项目的选择，不是安全存储保证。
+- 不把 API key、Authorization 头或完整 HTTP 原始响应写入会话。
+- 文件权限、目录位置和备份行为需要在实现前确认；跨平台权限不能假定一致。
+- 自动清理策略暂不决定：删除命令、按会话数量、按总容量和按时间过期都列为开放问题。
+- 导出/分享不属于阶段 04 初始范围；在实现前必须重新评估敏感内容暴露。
+
+### 9.14 失败/取消 turn 的持久化
+
+阶段 03 的 `runTurnStream` 只有在完整成功时才返回 `StreamTurnResult.appendedMessages`；流中途失败、取消或超时不会把半截消息提交给 REPL 内存历史。阶段 04 若要保持这个行为，应采用以下推荐边界：
+
+1. user 事件在发起模型请求前持久化；因此恢复时用户输入存在，即使模型没有回答。
+2. assistant 和 tool_result 只在整个 turn 成功、拿到 `appendedMessages` 后作为一组写入。
+3. 半截 assistant 文本、未完成的流式 tool call 和屏幕上已经显示的 delta 不写成模型历史消息。
+4. 无论成功、失败、取消还是超时，都写 `turn_end`；失败时记录 outcome、错误分类和取消原因。
+5. 恢复看到有 user 但没有成功 assistant/tool 组、且 `turn_end` 非 success 或缺失时，将该 turn 标为 interrupted，不自动重跑。
+
+这种策略与阶段 03 对齐，但有一个明确限制：如果某一批工具已经执行成功、随后最终模型请求失败，阶段 04 v1 只保留 user + turn_end，不保留那批未形成 `appendedMessages` 的工具往返。若未来要完整审计半截工具状态，需要先修改 core 的交付契约，再单独设计事件和幂等执行规则。
+
 ## 10. 本阶段建议的评审问题
 
 这份调研报告供用户确认方向，下一步只需要评审以下选择，不应直接进入代码：
@@ -359,6 +500,10 @@ Pi 的 `firstKeptEntryId`、Codex 的 replacement history/window、ZCode 的 com
 4. 第一版是否只恢复消息历史，不恢复旧工具进程、网络请求和 REPL 状态？
 5. 是否先设计一个带 `formatVersion`、`seq`、`eventType` 的小 envelope，再决定完整事件字段？
 6. compaction 是否只做格式预留，留到后续阶段实现？
+7. 目录布局、cwd 分组、会话列表与 `/resume` / `--continue` 入口怎么定？
+8. 阶段 04 是否明确只支持单进程、同一会话单写者？
+9. 写入失败、append/fsync 语义和 REPL 行为采用哪种方案？
+10. 会话文件的隐私边界、删除命令和容量/时间保留策略怎么定？
 
 在这些问题确认前，不建议编写阶段 04 规格或实现代码。
 
