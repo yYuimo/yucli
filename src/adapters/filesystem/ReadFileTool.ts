@@ -30,6 +30,8 @@ function failure(code: string, message: string): { ok: false; content: string } 
  * 这是纯路径比较，不访问磁盘、不解析符号链接，也不判断目标是否为文件。
  */
 function isWithin(root: string, target: string): boolean {
+  // relative 得到从根到目标的路径；越界会以独立的 .. 路径段开头，跨盘可能仍是绝对路径。
+  // 按路径段判断而非 startsWith(root)，避免 /work 与 /workspace 的同前缀碰撞。
   const parts = relative(root, target);
   return !isAbsolute(parts) && parts.split(sep)[0] !== "..";
 }
@@ -73,6 +75,8 @@ export class ReadFileTool implements Tool {
   async execute(args: unknown, signal?: AbortSignal): Promise<{ ok: boolean; content: string }> {
     if (signal?.aborted) throw new AbortError("文件读取已取消。");
 
+    // 1. 参数虽然通常已由注册表校验，但工具可以被独立调用，所以仍守住自己的输入边界。
+    // 这里只接受 {path:string}，不接受模型指定编码、根目录或其他额外配置。
     if (
       typeof args !== "object" || args === null || Array.isArray(args) ||
       Object.keys(args).length !== 1 || !("path" in args) || typeof args.path !== "string"
@@ -80,16 +84,21 @@ export class ReadFileTool implements Tool {
       return failure("invalid_arguments", "参数必须恰好包含字符串 path。");
     }
 
+    // 2. 同时拒绝当前平台和 Windows 格式的绝对路径，避免换个平台就改变输入含义。
+    // trim 只判断空白，不修改路径；NUL 不能交给底层文件 API。
     const input = args.path;
     if (!input.trim() || input.includes("\0") || isAbsolute(input) || win32.isAbsolute(input)) {
       return failure("invalid_path", "只允许非空的工作区相对路径。");
     }
 
+    // 3. resolve 规范化 .. 等词法路径，再检查是否位于工作区内；此时尚未解析符号链接。
     const root = resolve(this.workspaceRoot);
     const target = resolve(root, input);
     if (!isWithin(root, target)) return failure("outside_workspace", "文件路径超出工作区。");
 
     try {
+      // 4. 根和目标都解析真实路径，防止工作区内的链接实际指向区外。
+      // await 不代表文件操作支持即时取消，完成后仍要重新检查 turn 的取消信号。
       const realRoot = await realpath(root);
       const realTarget = await realpath(target);
       if (signal?.aborted) throw new AbortError("文件读取已取消。");
@@ -98,6 +107,7 @@ export class ReadFileTool implements Tool {
         return failure("outside_workspace", "符号链接目标超出工作区。");
       }
 
+      // 5. 先 stat 再读，提前拒绝目录/特殊文件和已超限文件，避免无意义的打开与读取。
       const info = await stat(realTarget);
       if (!info.isFile()) return failure("not_regular_file", "目标不是普通文件。");
       if (info.size > MAX_BYTES) return failure("file_too_large", "文件超过 64 KiB 上限。");
@@ -106,6 +116,8 @@ export class ReadFileTool implements Tool {
       // 不跟随打开时被替换的末端符号链接；再检查实际打开的句柄，缩小检查/读取间的竞态。
       const handle = await open(realTarget, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
+        // 路径 stat 与 open 之间文件可能被替换，因此复核实际打开的句柄。
+        // O_NONBLOCK 避免某些特殊文件打开时阻塞；是否普通文件仍以这个检查为准。
         const opened = await handle.stat();
         if (!opened.isFile()) return failure("not_regular_file", "目标不是普通文件。");
         if (opened.size > MAX_BYTES) return failure("file_too_large", "文件超过 64 KiB 上限。");
@@ -116,26 +128,36 @@ export class ReadFileTool implements Tool {
         while (used < buffer.length) {
           if (signal?.aborted) throw new AbortError("文件读取已取消。");
 
+          // 一次 read 不保证填满缓冲区：从 used 位置继续写，最多读剩余容量。
+          // 最后的 null 使用句柄当前文件位置；bytesRead=0 才说明已到 EOF。
           const { bytesRead } = await handle.read(buffer, used, buffer.length - used, null);
           if (!bytesRead) break;
           used += bytesRead;
         }
 
+        // 6. 读取后的检查捕捉 stat 后增长的文件；多读的第 65537 字节只用于发现超限，
+        // 不能把前 65536 字节静默截断后作为成功结果交给模型。
         if (signal?.aborted) throw new AbortError("文件读取已取消。");
         if (used > MAX_BYTES) return failure("file_too_large", "文件超过 64 KiB 上限。");
 
         try {
+          // 7. 只解码真正读到的字节，不能把未使用的缓冲区尾部零值当作文件内容。
+          // fatal 拒绝坏 UTF-8；ignoreBOM:true 将 BOM 作为原文保留，不悄悄删去文件字符。
           return { ok: true, content: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, used)) };
         } catch {
           return failure("invalid_utf8", "文件不是有效 UTF-8 文本。");
         }
       } finally {
+        // 内层任何 return/throw 都会关闭句柄，包括超限、编码错误和取消路径。
         await handle.close();
       }
     } catch (error) {
+      // 8. 取消是整个 turn 的停止原因，继续抛出；其他常见文件错误变成可恢复工具结果。
       if (signal?.aborted || error instanceof AbortError) throw new AbortError("文件读取已取消。");
 
       const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+
+      // 只读取稳定错误码决定分类，不拼接底层 error.message，避免把绝对路径等信息回传模型。
       if (code === "ENOENT" || code === "ENOTDIR") return failure("file_not_found", "文件不存在。");
       if (code === "EACCES" || code === "EPERM") return failure("permission_denied", "没有读取文件的权限。");
       return failure("read_failed", "无法读取文件。");

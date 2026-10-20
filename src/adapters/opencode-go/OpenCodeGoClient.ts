@@ -368,6 +368,7 @@ export class OpenCodeGoClient implements LlmClient {
       signal?.removeEventListener("abort", onAbort);
     }
   }
+
   /**
    * 发起一次 SSE 请求并逐步交付业务事件，供 runTurnStream 驱动一轮模型响应。
    * request 包含完整历史和可选工具；不修改输入，按流式契约使用 stream:true 与独立路由 UUID。
@@ -379,11 +380,14 @@ export class OpenCodeGoClient implements LlmClient {
    * 本方法只发网络请求，不打印、不执行工具、不保存跨轮历史。
    */
   async *stream(request: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmStreamEvent> {
+    // 1. 每次请求独占控制器：外部 turn 取消和本请求超时都汇入它，fetch 只观察它的 signal。
+    // abortKind 单独保留业务原因，因为底层 fetch/reader 抛出的取消异常不保证具有统一形状。
     const controller = new AbortController();
     let abortKind: "timeout" | "caller" | undefined;
 
     /** 超时和外部信号共用的取消入口；只记首次原因，无返回值，并停止本次 fetch/读取。 */
     const abort = (kind: "timeout" | "caller") => {
+      // 保留首次原因，例如用户先取消后定时器才到期，最终仍应报“取消”而不是“超时”。
       if (controller.signal.aborted) return;
       abortKind = kind;
       controller.abort();
@@ -391,14 +395,21 @@ export class OpenCodeGoClient implements LlmClient {
 
     /** 外部 abort 事件转发到本次控制器；finally 用此引用移除监听。 */
     const onAbort = () => abort("caller");
+
+    // 监听只接收未来事件，所以登记后还要检查调用前是否已经取消。
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) onAbort();
 
     // 单次请求总期限包含连接、读取与收尾，不因收到响应头或首个片段而重置。
     const timer = setTimeout(() => abort("timeout"), this.config.timeoutMs);
+
+    // reader 取得前也可能失败，因此允许 undefined，finally 再按是否存在决定释放。
+    // ended 只记录 message_end；网络 EOF/[DONE] 与逻辑消息结束是不同的状态。
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let status: number | undefined;
     let ended = false;
+
+    // 只保存规范化用量的值，不保存整份 provider chunk；同一请求重复统计不重复发事件。
     const seenUsage = new Set<string>();
 
     /**
@@ -410,10 +421,13 @@ export class OpenCodeGoClient implements LlmClient {
       const events: LlmStreamEvent[] = [];
       for (const event of parseStreamChunk(data)) {
         if (event.type === "usage") {
+          // parseStreamChunk 按固定字段顺序构造 usage，因此可用序列化后的值做去重键。
+          // 统计可位于 message_end 后，不能与普通内容一起被 ended 检查拒绝。
           const key = JSON.stringify(event.usage);
           if (seenUsage.has(key)) continue;
           seenUsage.add(key);
         } else {
+          // 一次响应只允许一条逻辑消息；结束后再出现文字、工具片段或重复 end 都是协议错误。
           if (ended) throw new ResponseError("message end 后出现新的消息内容或重复收尾。");
           if (event.type === "message_end") ended = true;
         }
@@ -423,7 +437,11 @@ export class OpenCodeGoClient implements LlmClient {
     };
 
     try {
+      // 2. 预取消时直接失败，不能仍向服务端发送一次可能计费的模型请求。
       controller.signal.throwIfAborted();
+
+      // 内部 Message 经 toWireMessage 映射后才进入 HTTP body；每次请求重新生成路由 UUID，
+      // 由调用方显式提供历史，不依赖服务端凭路由头自动恢复上下文。
       const response = await fetch(`${this.config.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
         method: "POST",
         headers: {
@@ -434,6 +452,8 @@ export class OpenCodeGoClient implements LlmClient {
         body: JSON.stringify({
           model: request.model,
           messages: request.messages.map(toWireMessage),
+
+          // 没有已注册工具时省略整个字段，不能把空 tools 数组发送给服务端。
           ...(request.tools?.length ? {
             tools: request.tools.map((tool) => ({ type: "function", function: tool })),
           } : {}),
@@ -442,30 +462,49 @@ export class OpenCodeGoClient implements LlmClient {
         signal: controller.signal,
         redirect: "error",
       });
+
+      // 3. fetch 完成只说明响应头已到达；HTTP 非 2xx 要走限长脱敏摘要，不能当 SSE 解析。
       status = response.status;
       if (!response.ok) {
         const summary = await readErrorSummary(response, this.config.apiKey);
         throw new RequestError("http", `模型请求失败（HTTP ${status}）${summary ? `：${summary}` : "。"}`, status, summary);
       }
       if (!response.body) throw new ResponseError("流式响应没有响应体。");
+
+      // 4. reader 提供原始字节，parser 将字节逐步变成完整 data 帧。
+      // 这两个对象只属于本次请求，避免上一轮的半行/半个字符污染下一轮。
       reader = response.body.getReader();
       const parser = new SseParser();
+
       while (true) {
         let part: ReadableStreamReadResult<Uint8Array>;
         try {
+          // 一次 read 可以是半个事件或多个事件；await 只等待下一块，不等待整个回答。
           part = await reader.read();
         } catch {
+          // 优先让取消/超时进入外层统一分类；非取消的连接中断才按逻辑收尾状态判断。
+          // 已有 message_end 时允许直接断开；之前断开则不能把半截工具意图当作完整请求。
           controller.signal.throwIfAborted();
           if (ended) break;
           throw new ResponseError("流式连接在 message end 前中断。");
         }
+
+        // read 恰好完成时也可能已经取消，因此交付本块事件前再检查一次。
         controller.signal.throwIfAborted();
+
+        // done 表示字节 EOF：flush decoder 并检查半截事件；未 done 则继续增量解码。
+        // frames 可能为空，parser 会自行保留尚不完整的尾部，等下一块补齐。
         const frames = part.done ? parser.finish() : parser.push(part.value);
         for (const data of frames) {
+          // 5. [DONE] 是传输标记，不是 JSON，也不是“模型已完整回答”的替代依据。
+          // 只有先收到 message_end 才能正常 return；return 仍然会进入 finally 清理。
           if (data === "[DONE]") {
             if (!ended) throw new ResponseError("只收到 [DONE]，缺少 message end。");
             return;
           }
+
+          // 一帧可能转换为多个事件。yield 逐个交给 core 并暂停本 generator，
+          // core 处理完后请求下一项，才从 yield 之后继续；它不是另起一个线程执行。
           for (const event of eventsFrom(data)) {
             controller.signal.throwIfAborted();
             yield event;
@@ -473,20 +512,29 @@ export class OpenCodeGoClient implements LlmClient {
         }
         if (part.done) break;
       }
+
+      // EOF 没有 [DONE] 仍可成功，但必须已经收到 message_end；纯文字片段不够。
       if (!ended) throw new ResponseError("流式响应缺少 message end。");
     } catch (error) {
+      // 6. 先按自有取消状态分类，再保留已分类错误，最后把其他底层异常统一成安全网络错误。
+      // 不输出 fetch 原始异常，以免 URL、认证信息或 provider 内容进入 CLI。
       if (abortKind === "caller") throw new AbortError("模型请求已取消。");
       if (abortKind === "timeout") throw new RequestError("timeout", `模型请求超时（${this.config.timeoutMs} ms）。`, status);
       if (error instanceof RequestError || error instanceof ResponseError) throw error;
       throw new RequestError("network", "模型流式请求网络失败。", status);
     } finally {
+      // 7. 正常结束、抛错和消费者提前 break 都要解除定时器/监听，不能仅依赖 GC。
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
       // cancel 主动停止剩余 body；清理失败不能遮盖原来的协议/取消错误。
       if (reader) {
         await reader.cancel().catch(() => undefined);
+
+        // cancel 停止剩余 body，releaseLock 解除独占 reader 的锁，两者职责不同。
         reader.releaseLock();
       }
+
+      // 同时终止本次底层请求，覆盖消费者提前关闭 generator 的路径；不是取消外部 turn。
       controller.abort();
     }
   }

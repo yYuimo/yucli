@@ -20,6 +20,8 @@ export async function displayTurn(
   prompt: string,
   signal: AbortSignal,
 ): Promise<StreamTurnResult> {
+  // 只记录是否写过文字和最后一个片段是否以换行结束，不另存一份完整回答。
+  // wrote=false 时出错应只写 stderr，不能凭空往 stdout 添加空行。
   let wrote = false;
   let newline = true;
 
@@ -28,11 +30,18 @@ export async function displayTurn(
     if (!text) return;
     process.stdout.write(text);
     wrote = true;
+
+    // 只看最后一片的结尾；前面的片段即使换过行，也不保证当前屏幕位置仍在新行。
     newline = text.endsWith("\n");
   };
+
   try {
+    // return await 让本函数真正等到 turn 成功或失败后才执行 finally。
+    // 若直接 return Promise，finally 会提前运行，那时后续文字还没有写出来。
     return await runTurnStream(client, registry, model, history, prompt, onText, {}, signal);
   } finally {
+    // 已输出的片段保留；仅在需要时补一行，让下一条错误/REPL 提示从新行开始。
+    // 这里不 catch，原异常仍会交给 CLI/REPL；成功结果也原样返回，不再重复打印 finalText。
     if (wrote && !newline) process.stdout.write("\n");
   }
 }
@@ -43,10 +52,14 @@ export async function displayTurn(
  * 未分类异常不回显原始 message/stack；已分类错误使用各层保证的安全摘要。
  */
 export function reportError(error: unknown): number {
+  // 使用运行时存在的错误类区分来源；interface 编译后消失，不能用于 instanceof。
   if (error instanceof ConfigError) {
     process.stderr.write(`配置错误：${error.message}\n`);
     return 3;
   }
+
+  // 这些错误均由下层整理为安全说明。单次模式用返回值设置退出码，
+  // REPL 则只使用显示副作用，保留进程继续接受下一轮输入。
   if (
     error instanceof RequestError || error instanceof ResponseError ||
     error instanceof AbortError || error instanceof AgentLoopError
@@ -54,6 +67,8 @@ export function reportError(error: unknown): number {
     process.stderr.write(`${error.message}\n`);
     return 4;
   }
+
+  // 未分类异常没有经过安全摘要处理，不直接输出 message/stack，避免泄露内部信息。
   process.stderr.write("程序发生未预期错误。\n");
   return 1;
 }

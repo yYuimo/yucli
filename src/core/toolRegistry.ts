@@ -12,6 +12,8 @@ import type { Tool, ToolCall, ToolDefinition, ToolRegistry, ToolResult } from ".
  * 空白和越界路径在文件工具中作为可恢复错误处理；这里不读文件、不执行工具，不回显参数。
  */
 export function parseToolArguments(argumentsJson: string): { path: string } {
+  // 1. JSON 语法合法与业务结构合法是两件事。先解析成 unknown，
+  // 即使结果是 null、数组或数字，也必须经过下面的对象/字段检查才能使用。
   let args: unknown;
   try {
     args = JSON.parse(argumentsJson) as unknown;
@@ -19,6 +21,8 @@ export function parseToolArguments(argumentsJson: string): { path: string } {
     throw new AgentLoopError("protocol_error", "工具参数不是合法 JSON。");
   }
 
+  // 2. 按短路顺序先排除非对象/null/数组，再查看字段数量、path 是否存在及其类型。
+  // “恰好一个字段”会拒绝额外参数；这里只检查字符串形状，不判断路径存在或是否越界。
   if (
     typeof args !== "object" || args === null || Array.isArray(args) ||
     Object.keys(args).length !== 1 || !("path" in args) || typeof args.path !== "string"
@@ -26,6 +30,7 @@ export function parseToolArguments(argumentsJson: string): { path: string } {
     throw new AgentLoopError("protocol_error", "工具参数必须恰好包含字符串 path。");
   }
 
+  // 3. 返回只含已验证字段的新对象，不把任意模型属性直接转交给文件工具。
   return { path: args.path };
 }
 
@@ -41,12 +46,15 @@ export function parseToolArguments(argumentsJson: string): { path: string } {
  * 这里只检查结构，不检查工具是否注册或文件是否可读；不修改 calls 和参数原文。
  */
 export function validateToolBatch(calls: readonly ToolCall[], maxCalls: number): void {
+  // 先拒绝整批形状/数量错误，避免只遍历并执行前几个“看起来合法”的调用。
   if (!Array.isArray(calls) || calls.length > maxCalls) {
     throw new AgentLoopError("protocol_error", "工具调用批次数量非法。");
   }
 
+  // Set 只记录当前批次已见 ID，不是全会话去重；不同模型响应可各自带调用 ID。
   const ids = new Set<string>();
   for (const call of calls) {
+    // 非空判断用 trim，但不改变原始 ID/名称；结果配对必须沿用模型给出的原值。
     if (
       !call || typeof call.id !== "string" || !call.id.trim() || ids.has(call.id) ||
       typeof call.name !== "string" || !call.name.trim() || typeof call.argumentsJson !== "string"
@@ -55,6 +63,9 @@ export function validateToolBatch(calls: readonly ToolCall[], maxCalls: number):
     }
 
     ids.add(call.id);
+
+    // 预检只解析/校验参数，不读文件、不调用 execute。后面任何一项失败时，
+    // 前面已经校验通过的项也只是“通过检查”，整批仍然没有执行任何工具。
     parseToolArguments(call.argumentsJson);
   }
 }
@@ -74,6 +85,7 @@ export class RegisteredTools implements ToolRegistry {
    * 构造后得到注册表实例；工具对象本身共享，不做深拷贝，不执行工具或读取文件。
    */
   constructor(private readonly tools: readonly Tool[]) {
+    // 复制数组以隔离注册顺序；工具实例本身仍共享，不深拷贝其方法、配置或工作区。
     this.tools = [...tools];
   }
 
@@ -86,6 +98,7 @@ export class RegisteredTools implements ToolRegistry {
    * 本方法不执行工具、不读取文件，也不发起模型请求。
    */
   definitions(): readonly ToolDefinition[] {
+    // 只提取给模型看的说明，不能把 execute 函数或文件工具保存的根目录发给模型。
     return this.tools.map((tool) => tool.definition);
   }
 
@@ -102,9 +115,12 @@ export class RegisteredTools implements ToolRegistry {
    * 只把安全摘要交给上层；文件读取发生在具体工具中，本注册表不接触 Node 文件 API。
    */
   async execute(call: ToolCall, signal?: AbortSignal): Promise<ToolResult> {
+    // 1. 即使循环刚做过整批检查，独立调用注册表也必须安全；这里复核当前一项。
     validateToolBatch([call], 1);
     if (signal?.aborted) throw new AbortError("工具调用已取消。");
 
+    // 2. 名称匹配到的是已注册实例，不是动态加载模型指定的模块。
+    // 非空但未知的名称属于可恢复执行错误，返回配对结果，让模型看到原因后继续回答。
     const tool = this.tools.find((candidate) => candidate.definition.name === call.name);
     if (!tool) {
       return {
@@ -114,11 +130,16 @@ export class RegisteredTools implements ToolRegistry {
     }
 
     try {
+      // 3. 从原始 JSON 得到已校验的参数对象后才执行实际工具，并把同一取消信号继续传下去。
+      // await 期间可能发生取消，所以工具返回后还要检查，不能把取消后的读取结果当作成功。
       const output = await tool.execute(parseToolArguments(call.argumentsJson), signal);
       if (signal?.aborted) throw new AbortError("工具调用已取消。");
 
+      // 4. 工具只返回 ok/content；注册表补上调用 ID 和名称，形成可回传的 ToolResult。
       return { toolCallId: call.id, name: call.name, ...output };
     } catch (error) {
+      // 取消必须继续向上抛，不能伪装成普通文件错误回传模型。
+      // 其他未被工具转为 ok:false 的内部异常，以固定摘要停止循环，不泄露底层内容。
       if (signal?.aborted || error instanceof AbortError) throw new AbortError("工具调用已取消。");
       throw new AgentLoopError("protocol_error", "工具执行发生内部错误，本次命令已停止。");
     }
@@ -137,11 +158,18 @@ export async function executeToolBatch(
   signal?: AbortSignal,
 ): Promise<ToolResult[]> {
   const results: ToolResult[] = [];
+
+  // for...of 内 await 一个完成后才进入下一项；不能改用 map + Promise.all 并发执行。
+  // 调用方已经完成全批预检，此处负责执行顺序与取消边界，不在执行途中逐项决定批次是否合法。
   for (const call of calls) {
     if (signal?.aborted) throw new AbortError("工具循环已取消。");
     const result = await registry.execute(call, signal);
+
+    // 即使底层文件操作无法被立即抢占，也要在返回后阻止继续追加结果/开始下一项。
     if (signal?.aborted) throw new AbortError("工具循环已取消。");
     results.push(result);
   }
+
+  // 只在整批执行完成时交付；中途异常会直接抛出，调用方拿不到部分成功数组。
   return results;
 }

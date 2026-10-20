@@ -36,6 +36,7 @@ export async function agentLoop(
   // 两种循环共用额度校验；Partial 允许调用方只覆盖一个选项。
   const { maxModelCalls, maxToolCallsPerResponse: maxToolCalls } = resolveLoopLimits(options);
 
+  // 历史只属于本次调用，从 user 原文开始；模型调用和工具结果按顺序追加，不写全局状态。
   const messages: Message[] = [{ role: "user", content: prompt }];
   const toolResults: ToolResult[] = [];
   const tools = registry.definitions();
@@ -45,6 +46,8 @@ export async function agentLoop(
 
     // 为每轮创建数组快照，避免下一轮 push 改变之前请求的消息数量。
     const response = await client.complete({ model, messages: [...messages], tools }, signal);
+
+    // 网络 Promise 完成不保证 turn 尚未取消，使用返回结果前再次检查。
     if (signal?.aborted) throw new AbortError("模型循环已取消。");
 
     if (response.finishReason === "length") {
@@ -57,6 +60,7 @@ export async function agentLoop(
     // 全批校验在 messages.push 和任何 execute 之前完成，不能先做合法的第一项。
     validateToolBatch(calls, maxToolCalls);
 
+    // 没有工具才判断最终文本；有工具即使同时带文字，也必须继续往返而不能提前成功。
     if (!calls.length) {
       if (message.role !== "assistant" || typeof message.content !== "string" || !message.content.trim()) {
         throw new ResponseError("模型未返回最终文本或工具调用。");
@@ -74,6 +78,7 @@ export async function agentLoop(
       throw new AgentLoopError("protocol_error", "工具调用必须来自 assistant 消息。");
     }
 
+    // 先保存模型提出的完整调用，再追加相应工具结果，下一次请求才能正确理解每项结果来源。
     messages.push(message);
 
     // 共用顺序执行器；整批执行成功后才追加完整的工具结果组。
@@ -88,5 +93,6 @@ export async function agentLoop(
     }
   }
 
+  // 防御性出口；额度耗尽时不返回半成品结果，也不会悄悄发起第 9 次请求。
   throw new AgentLoopError("loop_limit", "已达到模型调用次数上限。");
 }
