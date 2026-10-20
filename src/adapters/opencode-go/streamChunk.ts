@@ -11,8 +11,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * 校验并规范化一份 SSE 用量对象，供普通消息帧和 usage-only 帧共用。
+ * value 来自尚未验证的 JSON；返回只含 inputTokens/outputTokens 的新 LlmUsage 对象。
+ * 对象字段可缺失（不等于 0），存在的计数必须是非负安全整数；非法对象或计数抛 ResponseError。
+ * 本函数不保存状态、不做去重；去重由拥有整次请求状态的 OpenCodeGoClient 负责。
+ */
+function parseStreamUsage(value: unknown): LlmUsage {
+  // 1. usage-only 的 null/数组等不是有效统计；普通中间帧的 null 由调用方在进入这里前忽略。
+  if (!isRecord(value)) throw new ResponseError("流式 usage 必须是对象。");
+  const usage: LlmUsage = {};
+
+  // 2. 两种帧共用固定映射顺序，使等值统计不受外部 JSON 字段顺序影响。
+  // as const 保留精确字段名，让 usage[target] 只能写入这两个内部统计属性。
+  for (const [source, target] of [
+    ["prompt_tokens", "inputTokens"], ["completion_tokens", "outputTokens"],
+  ] as const) {
+    const count = value[source];
+    if (count !== undefined) {
+      // 缺失字段不赋值；存在时不接受负数、小数、字符串或超出精确整数范围的数值。
+      if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
+        throw new ResponseError("流式 token 用量必须是非负安全整数。");
+      }
+      usage[target] = count;
+    }
+  }
+  return usage;
+}
+
+/**
  * 将一个完整 SSE data JSON 转成有序业务事件，由客户端逐帧调用。
- * 输入尚不可信；先验证 choice/delta/字段类型，再产出文本、工具、结束和用量事件。
+ * 输入尚不可信；先区分普通消息帧与空 choices 的统计帧，再验证对应字段并产出事件。
  * 不拼参数、不执行工具；非法外层字段和 length 抛 ResponseError，不回显原始内容。
  * 去重 usage 以及 message_end 的前后顺序由每请求客户端状态检查。
  */
@@ -26,9 +54,20 @@ export function parseStreamChunk(data: string): LlmStreamEvent[] {
     throw new ResponseError("流式响应不是合法 JSON。");
   }
 
-  // 2. 本项目只处理第一条候选回答。先检查外层对象/choices 数组，再检查 choice/delta，
-  // 避免对 null、数组或缺失字段直接取属性；缺 choice 的帧按当前契约拒绝。
-  const choice = isRecord(value) && Array.isArray(value.choices) ? value.choices[0] as unknown : undefined;
+  // 2. 先验证公共外层，再按 choices 是否为空分类。不能直接要求 choices[0].delta，
+  // 因为服务在 finish 后、[DONE] 前可能用 {choices:[],usage:{...}} 单独上报统计。
+  if (!isRecord(value) || !Array.isArray(value.choices)) {
+    throw new ResponseError("流式响应需要 choices 数组。");
+  }
+  if (value.choices.length === 0) {
+    // 空 choices 只有携带合法统计时才被接受；此分支不会伪造文本或 message_end。
+    // 若整条流缺少真正的 message_end，外层客户端依然会在 [DONE]/EOF 时拒绝成功。
+    if (value.usage === undefined) throw new ResponseError("空 choices 的流式响应需要 usage。");
+    return [{ type: "usage", usage: parseStreamUsage(value.usage) }];
+  }
+
+  // 普通消息帧仍只处理第一条候选回答；有 usage 也不能掩盖 choice/delta 的形状错误。
+  const choice = value.choices[0] as unknown;
   if (!isRecord(choice) || !isRecord(choice.delta)) {
     throw new ResponseError("流式响应需要 choice 和 delta 对象。");
   }
@@ -87,27 +126,9 @@ export function parseStreamChunk(data: string): LlmStreamEvent[] {
 
   // 6. 用量与回答内容分开处理。忽略未知字段，所以 reasoning/thinking 不会出现在事件中。
   // SSE 的中间帧可用 null 表示统计尚未可用；它不是一份空用量对象。
-  if (isRecord(value) && value.usage !== undefined && value.usage !== null) {
-    if (!isRecord(value.usage)) throw new ResponseError("流式 usage 必须是对象。");
-    const usage: LlmUsage = {};
-
-    // 用二元组维护“服务端字段 → 内部字段”的映射；as const 保留精确字段名，
-    // 让 usage[target] 只可能写入 inputTokens/outputTokens，而非任意属性。
-    for (const [source, target] of [
-      ["prompt_tokens", "inputTokens"], ["completion_tokens", "outputTokens"],
-    ] as const) {
-      const count = value.usage[source];
-      if (count !== undefined) {
-        // 缺失与 0 不同：缺失不赋值；存在则必须是非负安全整数，不能接受小数/字符串。
-        if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) {
-          throw new ResponseError("流式 token 用量必须是非负安全整数。");
-        }
-        usage[target] = count;
-      }
-    }
-
-    // 是否与之前的统计重复，必须由拥有整次请求状态的客户端判断；本函数不保存跨帧状态。
-    events.push({ type: "usage", usage });
+  if (value.usage !== undefined && value.usage !== null) {
+    // 与 usage-only 使用完全相同的字段校验与规范化，不在解析单帧时决定是否重复。
+    events.push({ type: "usage", usage: parseStreamUsage(value.usage) });
   }
   return events;
 }

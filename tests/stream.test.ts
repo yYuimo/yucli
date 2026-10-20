@@ -97,8 +97,51 @@ describe("真实 adapter SSE 解析与资源", () => {
   });
 
   it.each([
+    { label: "usage-only 首次提供统计", finishUsage: undefined, tail: [{ prompt_tokens: 2, completion_tokens: 3 }],
+      expected: [{ inputTokens: 2, outputTokens: 3 }] },
+    { label: "finish 与 usage-only 等值去重", finishUsage: { prompt_tokens: 2, completion_tokens: 3 },
+      tail: [{ completion_tokens: 3, prompt_tokens: 2 }], expected: [{ inputTokens: 2, outputTokens: 3 }] },
+    { label: "两个 usage-only 不同值分别发出", finishUsage: undefined,
+      tail: [{ prompt_tokens: 2, completion_tokens: 3 }, { prompt_tokens: 2, completion_tokens: 4 }],
+      expected: [{ inputTokens: 2, outputTokens: 3 }, { inputTokens: 2, outputTokens: 4 }] },
+  ])("$label：事件正确且 turn 完整成功", async ({ finishUsage, tail, expected }) => {
+    respond = (res) => writeSse(res, [
+      sseFrame(streamChunk({ content: "ok" }, "stop", finishUsage)),
+      ...tail.map((usage) => sseFrame({ choices: [], usage })),
+      sseFrame("[DONE]"),
+    ]);
+    expect(await collect()).toEqual([
+      { type: "text_delta", text: "ok" }, { type: "message_end", finishReason: "stop" },
+      ...expected.map((usage) => ({ type: "usage", usage })),
+    ]);
+    const result = await runTurnStream(client(), registry().tools, "test", [], "hi", vi.fn());
+    expect(result).toMatchObject({ finalText: "ok", modelCalls: 1, toolResults: [], stopKind: "final_text" });
+    expect(result.appendedMessages).toEqual([{ role: "user", content: "hi" }, { role: "assistant", content: "ok" }]);
+  });
+
+  it.each([
+    { choices: [] }, { choices: [], usage: null }, { choices: [], usage: [] }, { choices: [], usage: "bad" },
+    { choices: [], usage: { prompt_tokens: -1 } }, { choices: [], usage: { completion_tokens: "3" } },
+    { choices: [], usage: { completion_tokens: 1.5 } },
+    { usage: { prompt_tokens: 2 } }, { choices: null, usage: { prompt_tokens: 2 } },
+    { choices: [{ delta: null }], usage: { prompt_tokens: 2 } },
+  ])("统计帧仍严格校验 choices/usage %#", async (invalid) => {
+    respond = (res) => writeSse(res, [sseFrame(streamChunk({ content: "ok" }, "stop")), sseFrame(invalid), sseFrame("[DONE]")]);
+    await expect(collect()).rejects.toBeInstanceOf(ResponseError);
+  });
+
+  it.each(["missing-end", "blank-final", "length"])("usage-only 不掩盖 %s 错误且不执行工具", async (kind) => {
+    const frames = kind === "blank-final" ? [sseFrame(streamChunk({ content: " " }, "stop"))]
+      : [sseFrame(toolDelta()), ...(kind === "length" ? [sseFrame(streamChunk({}, "length"))] : [])];
+    respond = (res) => writeSse(res, [...frames, sseFrame({ choices: [], usage: { completion_tokens: 3 } }), sseFrame("[DONE]")]);
+    const ctx = registry();
+    await expect(runTurnStream(client(), ctx.tools, "test", [], "hi", vi.fn())).rejects.toBeInstanceOf(ResponseError);
+    expect(ctx.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
     'data: invalid\n\n', sseFrame("[DONE]"), sseFrame(streamChunk({ content: "partial" })),
-    sseFrame({ choices: [] }), sseFrame({ choices: [{ delta: null }] }),
+    sseFrame({ choices: [{ delta: null }] }),
     sseFrame({ choices: [{ delta: {}, finish_reason: 3 }] }),
     sseFrame(streamChunk({ tool_calls: [{ index: -1 }] })),
     sseFrame(streamChunk({ tool_calls: [{ index: 0.5 }] })),

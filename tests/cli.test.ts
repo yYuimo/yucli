@@ -38,9 +38,9 @@ describe.each(["source", "built"])("CLI %s 子进程接线与退出码", (mode) 
       } else if (messages[0]?.content === "truncated") {
         res.end(completionSse(toolCompletion(undefined, "length")));
       } else if (messages[0]?.content === "read" && hits === 1) {
-        res.end(completionSse(toolCompletion()));
+        res.end(completionSse(toolCompletion(), { prompt_tokens: 2, completion_tokens: 3 }));
       } else {
-        res.end(completionSse(completion("CLI 回答")));
+        res.end(completionSse(completion("CLI 回答"), { prompt_tokens: 2, completion_tokens: 3 }));
       }
     });
   });

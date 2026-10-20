@@ -59,13 +59,17 @@ export function streamChunk(delta: object = {}, finishReason: string | null = nu
   return { choices: [{ delta, finish_reason: finishReason }], ...(usage ? { usage } : {}) };
 }
 
-export function completionSse(value: ReturnType<typeof completion> | ReturnType<typeof toolCompletion>) {
+export function completionSse(
+  value: ReturnType<typeof completion> | ReturnType<typeof toolCompletion>,
+  usage?: object,
+) {
   const choice = value.choices[0]!;
   const message = choice.message;
   const delta = { ...message, ...("tool_calls" in message ? {
     tool_calls: message.tool_calls.map((call, index) => ({ ...call, index })),
   } : {}) };
-  return sseFrame(streamChunk(delta, "finish_reason" in choice ? choice.finish_reason : "stop")) + sseFrame("[DONE]");
+  return sseFrame(streamChunk(delta, "finish_reason" in choice ? choice.finish_reason : "stop", usage)) +
+    (usage ? sseFrame({ choices: [], usage }) : "") + sseFrame("[DONE]");
 }
 
 export async function writeSse(

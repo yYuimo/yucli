@@ -27,8 +27,8 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       if (prompt === "hang") res.write(sseFrame(streamChunk({ content: "partial" })));
       else if (prompt === "fail") res.end(sseFrame(streamChunk({ content: "partial" })));
-      else if (prompt === "read" && body.messages.at(-1)?.role === "user") res.end(completionSse(toolCompletion()));
-      else res.end(completionSse(completion("ok")));
+      else if (prompt === "read" && body.messages.at(-1)?.role === "user") res.end(completionSse(toolCompletion(), { prompt_tokens: 2, completion_tokens: 3 }));
+      else res.end(completionSse(completion("ok"), { prompt_tokens: 2, completion_tokens: 3 }));
     });
   });
   afterEach(async () => {
