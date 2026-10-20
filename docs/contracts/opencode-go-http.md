@@ -304,6 +304,16 @@ CLI 最后只向 stdout 输出回答文本，退出码为 0。用量统计保留
 
 每个 SSE `data` JSON 的 `choices[0].delta.content` 转成文本事件；`delta.tool_calls[*]` 按 `index` 转成工具调用 delta；最后一个 choice 的 `finish_reason` 转成 message end。`[DONE]` 只结束传输，不能替代缺失的 message end。`finish_reason: "length"`、非法 JSON、半截 UTF-8、缺少 message end 或 message end 前连接中断均抛 `ResponseError`，不执行工具；message end 到达后即使没有 `[DONE]` 也按成功收尾。
 
+2026-10-19 抓包与 CLI 复现确认，服务可在 finish 帧后、[DONE] 前额外发送 usage-only 帧（数值为示例）：
+
+```text
+data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":18}}
+
+data: [DONE]
+```
+
+这是合法统计帧，不要求 choices[0]/delta；只校验 usage 对象并产生独立事件。若与 finish 帧的规范化用量等值，seenUsage 去重不再发出；不同值分别发出。空 choices 且没有 usage 仍拒绝，非空 choices 仍必须有 delta 对象，message_end/[DONE]/length 的原校验不变。usage-only 帧不能使缺少 message_end 的流成功。
+
 阶段 03 的多轮请求仍按阶段 02 规则每次 `complete()`/`stream()` 生成独立 `x-opencode-session`；真实联调需要确认服务支持连续流式工具往返。
 
 ## 阶段 02 工具消息完整映射示例
@@ -358,4 +368,4 @@ adapter 转换为 `message.toolCalls: [{id,name,argumentsJson}]`，null content 
 - [stream.test.ts](../../tests/stream.test.ts)：按字节/间隔 SSE、事件顺序、UTF-8、usage、终止、资源清理、交错工具和 8/4 上限。
 - [repl.test.ts](../../tests/repl.test.ts)：源码与产物子进程的历史提交、裁剪、命令、EOF 和三种取消。
 - SSE 中间帧 `usage:null` 视为未提供统计；对象用量始终独立发事件，等值去重；complete 仍拒绝 null usage。
-- 真实服务结果及偶发不合规帧的安全拒绝记录见[阶段 03 实际结果](../specs/phase-03-repl-streaming.md#实际结果)与 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。
+- 真实服务结果及 usage-only 兼容缺陷的修复记录见[阶段 03 实际结果](../specs/phase-03-repl-streaming.md#实际结果)与 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。

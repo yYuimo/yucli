@@ -38,6 +38,6 @@
 - 单次流式 read_file 往返：2 次 HTTP 200，第二次角色为 user/assistant/tool；1 项 read_file 调用与 tool 结果 ID 配对，2 个路由 UUID 独立；11 个 tool_call_delta、105 个 text_delta、2 个 message_end、2 个独立 usage；finish reason 依次 tool_calls、stop。约 6.511 秒，退出 0，stderr 为空。
 - 成功四次请求的 UUID 均不同，均观测到 [DONE]、对象 usage 和 reasoning 字段。reasoning 不渲染；usage 只作为独立事件，中间帧 usage:null 视为未提供统计。
 
-上述成功之前共有 4 次失败 HTTP 200 尝试：3 次因初版误拒 usage:null，修复并补回归；1 次工具流在 message end 后遇到不合规 choice/delta 帧，整批工具未执行，退出 4。诊断性重跑使用相同生产实现完成了上述工具往返，异常未复现；未放宽缺 choice/delta 的拒绝规则、未加入自动重试。累计 8 次真实请求，详情见阶段 03 实际结果。
+上述成功之前共有 4 次失败 HTTP 200 尝试：3 次因初版误拒 usage:null，修复并补回归；1 次工具流在 message end 后被客户端误拒，整批工具未执行，退出 4。当时记为“不合规 choice/delta 帧、重跑未复现”，现已由用户的抓包与稳定复现确认为合法 usage-only 帧的客户端兼容缺陷，修复记录见阶段 03 规格；未加入自动重试。累计 8 次真实请求，详情见阶段 03 实际结果。
 
-当前结果支持继续逐请求生成 UUID，不改成进程/turn 级共享路由头；偶发协议不合规仍按契约失败，不保证所有提供方帧形状长期兼容。观测仅保留元数据，不保存凭证、文件正文、完整响应或模型回答。
+当前结果支持继续逐请求生成 UUID，不改成进程/turn 级共享路由头；usage-only 缺陷属于客户端帧分类问题，不改变路由 UUID 决策；其余协议错误仍按契约失败。观测仅保留元数据，不保存凭证、文件正文、完整响应或模型回答。

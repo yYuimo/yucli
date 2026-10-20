@@ -48,7 +48,13 @@ type LlmStreamEvent =
 
 ## OpenAI 兼容 chunk 映射
 
-adapter 从 `choices[0].delta` 转换：
+adapter 先按帧类型分支，不能要求每帧都有 `choices[0].delta`：
+
+- `choices` 为非空数组：第一条 choice 必须含 delta 对象，按下表转换内容、工具和 finish reason。
+- `choices` 为空数组且存在合法 usage 对象：这是合法的 usage-only 统计帧，只转换为独立 usage 事件，不要求 choice/delta，也不产生 message_end。
+- `choices` 为空且没有 usage，或 choices 缺失/不是数组：仍为 ResponseError。统计帧的 usage 必须按对象及 token 字段规则校验，不能用 null、数组或错误类型伪装统计。
+
+非空 choices 的映射：
 
 | 外部字段 | 内部事件 |
 | --- | --- |
@@ -60,7 +66,7 @@ adapter 从 `choices[0].delta` 转换：
 | `choices[0].finish_reason` | `message_end.finishReason` |
 | `usage`（若服务端提供） | 独立的 `usage` 事件 |
 
-未知 delta 字段忽略；缺少 choice、delta 形状错误、index 非非负整数或 finish reason 类型错误时拒绝流。
+未知 delta 字段忽略；非空 choices 的 choice/delta 形状错误、index 非非负整数或 finish reason 类型错误时拒绝流。usage-only 帧不能替代 message_end；只有统计和 [DONE] 而无 message_end 仍是协议错误。finish 帧与 usage-only 帧中的等值 usage 只发一次，不同值分别发出。
 
 ## 工具调用拼装
 
