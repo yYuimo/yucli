@@ -323,7 +323,7 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 
 | 字段 | 作用 | 本草图的约定 |
 | --- | --- | --- |
-| `seq` | 确定记录顺序，帮助检查缺失、重复或倒退 | header 后从 `1` 开始递增；校验失败如何处理待讨论 |
+| `seq` | 确定记录顺序，帮助检查缺失、重复或倒退 | header 后从 `1` 开始连续递增；重复、缺口或倒退的处置见 9.3 校验表 |
 | `type` | 说明这行属于哪种记录 | 本轮只展示 `message` 和 `turn_end` |
 | `timestamp` | 记录创建时间，便于展示与诊断 | 顺序仍由 `seq` 表达，不能依赖系统时钟排序 |
 | `turnId` | 把同一次用户提问的相关记录关联起来 | `turn-1` 的消息和结束记录使用相同值 |
@@ -447,7 +447,7 @@ const message: ToolMessage = {
 
 恢复器另行保留 `ok` 和 `callMessageSeq` 用于本地结果展示、诊断和配对。随后当前 HTTP adapter 再转换为 `{role:"tool", tool_call_id, content}`；不把 ok 或 callMessageSeq 加进模型请求，也不因恢复工具消息自动再次执行工具。
 
-一个完整工具往返的结构检查应能确认：引用的是同一 turn 中更早的 assistant 记录；其中存在匹配的 ToolCall.id；工具名一致；每项调用有且仅有一个对应结果；结果按消息和工具执行顺序出现。缺失、重复或中断时的事件字段和恢复处置留待后续设计。
+一个完整工具往返的结构检查应能确认：引用的是同一 turn 中更早的 assistant 记录；其中存在匹配的 ToolCall.id；工具名一致；每项调用有且仅有一个对应结果；结果按消息和工具执行顺序出现。缺失、重复或中断时的事件字段、合法组合和恢复处置见 9.3。
 
 #### 当前代码能提供哪些保存输入
 
@@ -490,13 +490,17 @@ const message: ToolMessage = {
 | turn 状态 | 依据 | 是否新增专门记录 |
 | --- | --- | --- |
 | 已接受 / 运行中 | user 消息已被接受，当前进程持有该 turn，尚未产生结束事件 | user 的 `message` 同时表达 turn 起点，本候选方案不重复写 turn_start；运行中是内存状态 |
-| `success` | 获得完整最终回答，调用与结果结构完整，正常结束 | 写 `turn_end`，payload.outcome 为 success |
+| `success` | 获得非空白的完整最终 assistant 回答，调用与结果结构完整，正常结束 | 写 `turn_end`，payload.outcome 为 success |
 | `failed` | 模型请求、协议、额度或不可恢复内部错误导致停止 | 写 `turn_end(failed)` 及结构化 error |
 | `cancelled` | 当前进程观察到调用方取消并停止继续执行 | 写 `turn_end(cancelled)` 及取消原因 |
 | `timeout` | 已定义的执行期限首先到达 | 写 `turn_end(timeout)` 及超时来源；当前可直接映射的期限是既有模型请求超时 |
 | `interrupted` | 恢复时发现有 user，但没有可确认的 turn_end | 只在内存推导，不在恢复时自动追加 turn_end(interrupted) |
 
-会话保存本身另有 `pending / saved / failed` 状态，保存在当前进程的存储协调状态中。模型生成了回答并不代表保存成功；`saved` 只能在约定的持久化确认点完成后报告。不能靠再写一个“已保存”事件来证明该事件本身一定保存成功。具体 append、flush、fsync 和崩溃保证在后续小节细化。
+会话保存本身另有 `pending / saved / failed` 状态，保存在当前进程的存储协调状态中。模型生成了回答并不代表保存成功；`saved` 只能在约定的持久化确认点完成后报告。不能靠再写一个“已保存”事件来证明该事件本身一定保存成功。具体 append、flush、fsync 和崩溃保证见 9.4。
+
+这里的最终回答要求 assistant 没有非空 toolCalls，且 content 是字符串并满足 `content.trim().length > 0`；trim 仅用于检查，保存时保留原文。空字符串、纯空白或缺失 content 均不能成为成功的最终回答；有合法 toolCalls 时可以没有文本，成功工具结果的 content 也可以为空，例如空文件。
+
+这项限制**当前已经存在**：`StreamAssembler.finish()` 经 `runTurnStream` 调用时会拒绝无工具的空白响应，非流式循环也有对应检查。阶段 04 需要保持原行为，把异常映射为 `turn_end(failed)` 的 `model/invalid_response`，并让恢复校验执行同一规则；不新增 `empty_response` 分类，也不把无效最终响应保存成合法 assistant 消息。来源：[流式响应校验](../../src/core/streamAssembler.ts)、[既有空白响应测试](../../tests/stream.test.ts)、[非流式循环](../../src/core/agentLoop.ts)。
 
 #### 工具状态如何由事件得到
 
@@ -505,16 +509,22 @@ const message: ToolMessage = {
 | 工具状态 | 证据 | 含义 |
 | --- | --- | --- |
 | 已请求 | assistant 消息中有完整、经结构校验的 ToolCall | 模型提出调用，尚不能说明工具已经执行 |
-| 分派开始 / 进行中 | 对应 `tool_start`，尚无终止结果 | 本地进入这项调用的分派阶段；包括工具名称匹配，未保证实际 execute 已发生 |
+| 分派开始 / 进行中 | 当前进程正在处理该调用，对应 `tool_start`，尚无终止结果 | 交给注册表分派的开始；包含名称查找，不保证匹配成功，也不保证实际 execute 已发生 |
 | 已成功 | 对应 `tool_result` 且 ok:true | 已取得完整成功结果，保存实际返回内容 |
 | 可恢复工具错误 | 对应 `tool_result` 且 ok:false | 正常返回了文件不存在等错误，模型仍可据此回答 |
 | 分派失败、取消或超时 | 对应 `tool_end`，outcome 为 failed/cancelled/timeout | 调用异常停止，没有可交付的正常 ToolResult；不凭此断言外部操作没有发生 |
-| 未开始 | 健康、有序的事件交付下，turn 已正常终止，调用只有请求、没有 tool_start | 后续调用没有被分派；不伪造取消结果或 ok:false |
-| 中断 / 结果未知 | 恢复时没有工具终止记录；尤其存在 tool_start 却没有结果 | 只能根据已保存证据描述状态，不判成普通失败，也不自动重新执行 |
+| `not_started`（未开始） | 存在有效 turn_end，调用没有 tool_start，且顺序执行与保存确认规则能证明未分派 | 可出现在 failed/cancelled/timeout turn 的剩余调用中；success 要求全部有结果，因此不允许此状态 |
+| `unknown`（结果未知） | 恢复时没有工具终止记录，且满足“缺少 turn_end”或“已有 tool_start”任一条件 | 缺少 turn_end 时，只有请求也保守归为 unknown；有 start 但没有终止记录时，即使 turn 已失败、取消或超时也仍为 unknown |
 
 `tool_start` 表达的是开始分派的意图和阶段边界。即使先保存它再执行，也存在“保存后、调用前”崩溃窗口；工具完成后也可能在结果保存前崩溃。因此，已见 start 不证明工具执行过，没有 result 也不证明工具没有完成。只读 read_file 也不通过重新读取来冒充原执行结果。
 
-“未开始”的判断依赖执行前事件的保存确认和顺序保证；若日志尾部可能丢失、写入失败或前缀损坏，证据不足的调用应保留为未知，不能作强保证。当前模型请求有超时；工具 timeout 只有在另行定义工具执行期限后才能产生，不因复用枚举值就宣称 Node 文件调用可被抢占取消。
+本轮采用方案 A：先确认保存 tool_start，再进入注册表查找名称和分派。未知名称的合法序列是 `assistant.toolCalls → tool_start → tool_result(ok:false)`，与当前 RegisteredTools 返回 `[unknown_tool]` 结果的行为一致；名称与原 ToolCall 匹配即可，不要求名称存在于当前注册表。拒绝“先查名称，未知工具只有 result 没有 start”的例外路径。
+
+状态推导先看已保存的 tool_result/tool_end，再判断尚未终止的调用；整个 turn 为 interrupted，不会把其中已知成功或已知异常的工具重新标为 unknown。`not_started` 的判断依赖有效终止记录及 9.4 的执行前保存确认；语义损坏的文件直接拒绝恢复，不能先跳过坏记录再声称调用未开始。
+
+例如一批有 A、B、C，A 已返回结果，B 开始后被取消并记录 tool_end，随后 turn_end(cancelled)：A 保留真实结果，B 为 cancelled，C 为 not_started。若缺少 turn_end，则 A、B 的已知终止状态保留，C 保守归为 unknown；若 B 连 tool_end 也没有，则 B 同样为 unknown。
+
+当前模型请求有超时；工具 timeout 只有在另行定义工具执行期限后才能产生，不因复用枚举值就宣称 Node 文件调用可被抢占取消。
 
 #### 事件划分与新增字段
 
@@ -527,7 +537,7 @@ const message: ToolMessage = {
 | `tool_end` | `{callMessageSeq,toolCallId,name,outcome,error}`，outcome 为 failed/cancelled/timeout | 否，不伪造普通工具结果 |
 | `turn_end` | `{outcome,error?}`，outcome 为 success/failed/cancelled/timeout | 否，决定整组历史是否可提交 |
 
-一次正常分派以 `tool_result` 或异常 `tool_end` 收尾，二者互斥；同一 turn 正常只写一条 turn_end。取消与超时竞态由协调层串行确定并保留首先确认的终止原因，不能分别再写两个终止事件。只有在尚无已交付正常结果时，才写 tool_end；若已取得并交付 ToolResult 后发生取消，保留真实 tool_result，并由 turn_end 表达整次 turn 的取消。
+一次正常分派以 `tool_result` 或异常 `tool_end` 收尾，二者互斥；同一 turn 最多写一条 turn_end，且之后不再追加属于该 turn 的记录。取消与超时竞态由协调层串行确定并保留首先确认的终止原因，不能分别再写两个终止事件。只有在尚无已交付正常结果时，才写 tool_end；若已取得并交付 ToolResult 后发生取消，保留真实 tool_result，并由 turn_end 表达整次 turn 的取消。
 
 新增 error 是持久化用的安全诊断对象，不直接 JSON.stringify 原始 Error：
 
@@ -549,7 +559,7 @@ success 的 turn_end 不带 error；failed/cancelled/timeout 的 turn_end 与异
 1. 接受输入，创建 turnId，交付并保存 user 消息；成功返回值中的 user 不再重复写入。
 2. 模型响应完整收尾，通过响应结构校验和整批参数预检后，交付 assistant 消息；即使其中有文字，也以 toolCalls 判断是否需要工具。不把未通过结构校验的调用伪装成合法 ToolCall 记录，预检失败时不开始任何分派。
 3. 保持每批 4 项与每 turn 8 次模型上限。最后一次模型机会仍请求工具时，可以保留已校验的完整请求事实，再按额度规则终止，不能执行工具。
-4. 每项实际分派前检查取消与额度，交付 tool_start；等待该前置事件达到约定的保存确认点，再次检查取消，然后进入注册表分派。core 使用业务关联信息，JSONL 的 seq 与 callMessageSeq 由存储转换方生成。
+4. 每项实际分派前检查取消与额度，交付 tool_start；等待该前置事件达到 9.4 的保存确认点，再次检查取消，然后进入注册表进行名称查找和分派。未知名称也已经有 start，随后交付 ok:false 结果；若再次检查时已取消，则不进入注册表，按已知原因收尾。core 使用业务关联信息，JSONL 的 seq 与 callMessageSeq 由存储转换方生成。
 5. 每取得一项完整 ToolResult，就交付含 ok 的结果事实，外层保存 tool_result；保持逐项顺序，不等整批或整个 turn 成功后才交付。普通可恢复错误也走这一条。新接口应将“取得完整结果”和“下一步取消检查”分开，避免结果已得到却因后续取消而丢掉已知事实；检查取消后不再开始下一项工具或模型请求。
 6. 当前项没有正常结果而因取消、超时或异常停止时，交付对应 tool_end；再用 turn_end 关闭整次 turn。尚未分派的剩余调用由事件证据推导，不为它们生成假结果。
 7. 正常得到最终回答后交付 turn_end(success)。只有完整消息组、正常结果配对和成功终止记录达到约定保存确认点后，才向 REPL 提交这组模型历史。
@@ -600,11 +610,42 @@ core 可通过 contracts 定义的有序业务事件接口交付消息、开始�
 
 #### 保存失败和恢复边界
 
-保存失败时，当前进程报告明确的存储错误，将会话标为未保存，停止开始新的模型/工具操作，并触发当前 turn 的取消与可取消资源清理；不承诺把故障本身再写进同一个故障文件，也不保证已开始的外部操作可被撤回。已写入的前缀、正在完成的文件操作和已显示的文本分别处理，不把内存中的完成状态当作可靠落盘证据。自动重试、已写前缀确认、坏尾行后的继续追加和退出策略在后续小节设计，不盲目重发相同 seq。
+保存失败时，当前进程报告明确的存储错误，将会话标为未保存，停止开始新的模型/工具操作，并触发当前 turn 的取消与可取消资源清理；不承诺把故障本身再写进同一个故障文件，也不保证已开始的外部操作可被撤回。已写入的前缀、正在完成的文件操作和已显示的文本分别处理，不把内存中的完成状态当作可靠落盘证据。9.4 给出保存确认、故障后停止追加和禁止盲目重试的候选规则；独占打开、坏尾行修复与退出流程在后续落盘管理讨论中细化。
 
 恢复建议继续采用完整 turn 提交边界：只有具有有效 turn_end(success)、完整最终回答以及全部调用/结果配对的 turn 才进入下一次模型上下文。可恢复工具错误的 ok:false 是正常结果，仍可属于成功 turn；异常 tool_end 则没有正常结果，不能靠合成消息把该 turn 变成 success。
 
 failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistant/tool 事实和异常记录保留作日志与可展示历史，整组排除出模型上下文。已有明确失败或取消原因时保留原分类，不统统改成 interrupted。重复恢复同一有效前缀得到同一状态；恢复本身不修改文件。新输入开始新的 turn，不继续旧的未完成执行。
+
+#### 合法组合与恢复校验表
+
+以下是 v1 候选格式的约束，写入前与恢复时都需要校验。表中的“拒绝”统一指**拒绝将整个会话文件恢复为可继续执行的会话**；不能丢弃损坏 turn 后继续投影其他 turn。诊断工具仍可只读展示出错位置，但不得把不完整解释当作健康历史提交模型。
+
+| 规则 | 违反时 |
+| --- | --- |
+| header 必须是第一个物理行，且整个文件只出现一次；formatVersion 必须受支持 | 拒绝；后续 session_meta 不能充当新文件的起点 |
+| 每行是符合对应 schema 的对象；必填字段、消息/调用/错误字段类型合法，type 为已知类型 | 拒绝；v1 未定义可忽略事件，不能静默跳过未知 type |
+| seq 是从 1 开始的连续正安全整数；timestamp 仅作时间信息，不参与排序 | 重复、缺口、倒退或类型错误拒绝；不通过重排或重编号修复 |
+| 每个 turn 恰有一个 user 起点，且是该 turn 第一条记录；turnId 的记录连续，开始新 turn 后不能返回旧 turn | 多余 user、无 user 的事件或跨 turn 交错拒绝；v1 不支持 steering 或并发 turn |
+| 一个 turn 最多一个 turn_end，且是**属于该 turn**的最后一条记录 | 重复结束或后续任意同 turn 记录拒绝；后续新 turn 合法 |
+| assistant.toolCalls 沿用完整批次结构校验，同批 ID 唯一，保持数组顺序 | 拒绝；非法调用不因尚未执行就变成合法记录 |
+| tool_start/tool_result/tool_end 的 callMessageSeq 是更早的正安全整数，指向同 turn 的 assistant，且其中存在 toolCallId 与 name 同时匹配的调用 | 引用缺失、指向其他角色/turn/未来记录或名称不一致均拒绝 |
+| 在同一文件及 turn 中，工具配对键严格为 `(callMessageSeq, toolCallId)` | 跨批次允许复用 ID；实现只按全局 toolCallId 配对不符合契约 |
+| 每个调用最多一个 tool_start；tool_result/tool_end 必须有前置 tool_start | 重复 start 或无 start 的终止记录拒绝，未知名称也无例外 |
+| 每个调用最多一个终止记录，tool_result 与 tool_end 互斥 | 同时出现或任一重复均拒绝；不以最后一条覆盖前一条 |
+| tool_result.ok 必须是布尔值，content 必须是字符串；tool_end.outcome 只能是 failed/cancelled/timeout | 类型或枚举错误拒绝；空字符串工具结果合法 |
+| 工具按原批次顺序分派，前项 tool_result 后才可开始后项；一旦出现 tool_end 或悬空 start，不再分派后项 | 越序、重叠分派或异常后继续调用拒绝；与 v1 顺序执行及遇异常停止的行为一致 |
+| 下一条 assistant 只在上一批所有调用均有 tool_result 后出现；无调用的最终 assistant 后不再追加本 turn 的业务消息 | 拒绝；失败时可以没有最终 assistant，但不能绕过未完成批次继续模型往返 |
+| turn_end.outcome 只能是 success/failed/cancelled/timeout；success 不带 error，其余必须带有效 error | 拒绝；cancelled 对应 cancellation，timeout 对应 timeout，failed 使用失败来源分类 |
+| 每条 tool_end 必须带与其 outcome 对应的有效 error | 缺失、类型或分类不匹配拒绝；可恢复工具错误仍用 tool_result(ok:false) |
+| turn_end(success) 要求全部 call 都有 tool_start 与 tool_result，无 tool_end，最后一条业务消息是非空白且无调用的最终 assistant | 缺结果、悬空 start、只有调用没有最终回答、空白最终回答等均拒绝 |
+| failed/cancelled/timeout 中，允许剩余调用没有 start，也允许已有 start 没有终止记录 | 前者依据顺序证据为 not_started，后者为 unknown；不因此把 turn 改成 success |
+| 没有 turn_end 的有效执行前缀可以保留；开始新的 user turn 后不再补写旧 turn | 原 turn 推导为 interrupted；已知工具终止状态保留，尚未终止的调用为 unknown；不追加修复性 turn_end |
+
+“没有结束事件”与“已经结束但不符合其 outcome 条件”不同。前者可以是正常写入顺序留下的崩溃前缀；后者属于语义损坏。例如 success 缺 result，即使刚好出现在文件末尾，也必须拒绝，不能改成 interrupted 来规避校验。只有 header、尚无 turn 的文件可表示空会话；header 缺失或不完整不能恢复。
+
+尾部坏行的例外建议限定为：前缀全部有效，最后一个**未以换行结束**的物理行能判定为 JSON 值或 UTF-8 字节序列尚未写完时，只读取此前完整前缀并报告尾部字节位置。明确非法的语法/字节、中间坏行、以换行结束的坏行、空白记录，以及能够解析为 JSON 但 schema/语义非法的尾行均拒绝；不跳过后面的记录来拼接历史。完整 JSON 即使缺少末尾换行，也先执行全部校验，不能用“未换行”掩盖语义损坏。恢复读取不改原文件；继续追加前必须由写入端在独占条件下处理尾部，不能直接把新 JSON 接在残片后面。
+
+拒绝时至少报告文件路径、物理行号/字节位置、可解析的 seq、turnId、调用引用和具体原因，例如“第 7 行 seq=6：tool_result 缺少前置 tool_start”。不静默跳过，不为报错输出完整用户文本、工具参数或文件内容。
 
 #### 阶段 04 的实现范围与验收要求
 
@@ -613,8 +654,72 @@ failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistan
 - 取消或超时发生在工具之间时，保留前项真实结果、停止后项；发生在进行中的工具时，记录已知终止原因并保留结果未知的语义。
 - 验证进程崩溃留下 user-only、tool_start-only 和“一个结果完整、后一项未完成”的前缀，恢复不重复执行，不把半截历史提交模型。
 - 验证工具 ok:false 后模型正常解释仍可成功，以及工具完成后模型失败仍保留工具事实。
-- 验证同批多个调用、跨批复用 ID、重复终止事件、缺失引用和 success 却缺工具结果等结构边界；格式损坏的整体处置规则在后续恢复校验设计中明确。
+- 按校验表验证同批多个调用、跨批复用 ID、重复终止事件、缺失引用、越序分派和 success 却缺工具结果等边界；语义损坏拒绝整个文件，末尾未完成写入单独处理。
+- 保持既有空白最终回答拒绝行为，增加错误落盘映射与恢复侧空白最终回答校验；空工具结果仍然合法。验证 not_started/unknown 的证据区别及 interrupted turn 内已完成结果不被覆盖。
 - 注入 append/保存确认失败，验证不开始后续外部操作，不误报保存成功；新行为和错误分类需同步 contracts、core、bootstrap、文档与相应测试。
+
+### 9.4 保存确认点与写入顺序
+
+讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选策略，待评审；尚未实现**。
+
+本节补充 9.3 状态判断所依赖的写入保证。如果只规定有哪些事件，却不规定何时等保存完成，就可能在工具已经执行后丢失调用请求，也可能在日志未保存时向用户报告成功。
+
+#### “确认保存”具体确认什么
+
+三个层次需要区分：
+
+| 完成层次 | 能确认的事实 | 是否作为本候选策略的保存确认点 |
+| --- | --- | --- |
+| 已接受进内存队列 | 当前进程记住了要写什么 | 否，进程退出可能全部丢失 |
+| 完整写入，且应用缓冲已 flush | JSON 和末尾换行已交给操作系统；短写已处理 | 否，不能据此宣称已经完成文件同步 |
+| 完整写入、排空应用缓冲，再完成文件同步 | 对截至该 seq 的全部已写前缀执行 fsync，例如 Node FileHandle.sync()，并成功返回 | 是，作为 v1 的默认推荐 |
+
+建议先使用简单的串行写入器：一次写完整 UTF-8 JSON 加换行，处理短写，必要时排空应用缓冲，执行文件同步，再向调用方确认截至哪个 seq 保存成功。直接使用 FileHandle 时不虚构独立的 flush API。后续事件不能越过未确认事件；无需为了队列、后台线程或批量优化引入额外框架。工具/模型操作本来按顺序执行，先用每个业务屏障一次同步换取清晰语义；若测出同步成本明显，再讨论合并，但不能把后续有副作用的步骤提前到屏障之前。
+
+本策略以同一文件同一时刻只有一个写者为前提。进程内串行写入不等于跨进程排他；会话的独占打开与冲突处理在后续存储管理讨论中确定，不能仅靠 append 模式保证这些因果约束。
+
+新文件必须先保存并同步 header，再接受 user；文件首次创建还需要在支持的平台同步父目录，保证目录项的持久化。新建多级目录时同样需要考虑各级目录项；目录、权限和平台支持在后续存储管理讨论中落定。文件 fsync 不等于新路径一定可在断电后找回，也不承诺所有硬件/文件系统上的绝对不丢失；不能把不支持的同步悄悄当作成功。这里选择的保证强于“进程收到 write 回调”，不把已接受队列或普通 flush 称为耐久保存。
+
+#### 哪些步骤必须等待确认
+
+| 当前事实 | 确认保存后才允许的下一步 |
+| --- | --- |
+| 新文件的 header 与必要的目录创建 | 接受该会话的 user 输入 |
+| user 消息 | 发起本 turn 第一次模型请求 |
+| 含 toolCalls 的完整 assistant 消息 | 写本批第一项 tool_start；不能先分派工具再补调用记录 |
+| 当前项 tool_start | 再检查取消/额度，通过后才进入注册表名称查找与分派 |
+| 当前项 tool_result | 开始下一项工具；整批结果齐全后才可发起下一次模型请求 |
+| 当前项 tool_end | 写本 turn 的非成功 turn_end；不再开始下一项工具或模型请求 |
+| 无调用、非空白的完整最终 assistant | 写 turn_end(success)；若此时已观察到取消，则按协调层确定的终止原因收尾 |
+| turn_end(success) | 向 REPL 报告本 turn 成功且已保存，并提交完整模型历史 |
+| turn_end(failed/cancelled/timeout) | 报告本 turn 已按对应原因结束且日志已保存，允许接受下一次输入 |
+
+表中“保存”都使用上一表的确认点。tool_end 之后的下一步只有非成功 turn_end，不能把“结果/终止记录确认后才进入下一步”理解为异常后也能继续执行。模型 HTTP 失败等没有工具终止事件的路径，也必须等待对应 turn_end 确认后才允许下一次输入。
+
+流式文字可以在完整 assistant 与 turn_end 保存之前已经显示；屏幕有文字不代表 turn 成功或历史已提交。若最终保存失败，REPL 应明确报告未保存，不能仅凭文本生成结束就显示成功；本候选方案不要求把已经输出的文字撤回。
+
+取消可能发生在任意等待点。准备继续执行时，确认返回后仍应检查取消，防止保存等待期间收到的取消被忽略；已经取得的完整结果先交付并保存，再检查是否继续，避免把已知结果丢掉。协调层在交付 turn_end 前检查并固定唯一 outcome；交付后、保存确认期间新到的取消不能改写它或追加第二个 turn_end，保存成功后按已固定的结果报告。终止事件的保存使用独立且有界的收尾机制，不沿用已 aborted 的模型/工具 signal；若收尾也失败，按存储失败报告，不能假装取消日志已保存。具体存储等待上限与退出处理在后续规格中确定。
+
+#### 保存失败与不确定窗口
+
+写入、flush 或 sync 失败时，调用方只知道“没有收到成功确认”，不能断言该记录一定未写入。写入器进入故障状态，拒绝后续追加；协调层停止新的模型/工具操作、尝试清理当前资源，并报告最后已确认 seq 和失败位置。不能用同一 seq 盲目追加重试，也不能在残缺尾行后继续写；当前格式没有定义 eventId 去重或 exactly-once 语义。
+
+以后重新打开文件时，按 9.3 校验实际有效前缀。完整合法但当时未获确认的记录可以存在于文件中；有合法 turn_end 时按文件证据恢复，没有时推导 interrupted，不能凭上次内存里“应该成功了”补写结果。普通恢复读取保持只读；继续写入所需的独占、尾部处理和同步必须在开启新执行前完成。
+
+工具执行与文件同步无法组成一个原子事务：tool_start 确认后、分派前可以崩溃，工具完成后、tool_result 确认前也可以崩溃。因此这套顺序用于限制不确定窗口、保存可验证的因果关系，不提供工具恰好执行一次的保证，也不改变 unknown 调用禁止自动重跑的规则。
+
+#### 参考实现带来的取舍与阶段影响
+
+- DSH 的 storage-contract 校验存储事件并拒绝未知的必需事件，assertContiguous 校验追加批次连续性。借鉴其显式契约与错误诊断；本报告的 turn/tool 组合表仍是 yucli 自己的候选规则。
+- Codex RolloutRecorder.flush() 通过写入队列发送屏障并等待确认，适合参考“排队不等于保存完成”的接口语义；当前快照 recorder 的 write_pending_once/write_line 调用的是文件 flush，未见 sync_all/sync_data，不能据此声称其确认等同 fsync。其读取器会计数并跳过解析错误，yucli 不直接采用这一宽容策略。
+- Pi 使用同步 writeFileSync/appendFileSync；同步调用返回不等于显式 fsync。其读取器也会跳过坏行，不能作为本候选严格恢复策略的依据。
+- ZCode hydrator 区分 completed/error 与未完成工具，但会为未完成项合成中断结果；yucli 延续 9.3 的选择，保存已知事实，未成功 turn 整组不进模型，不靠合成结果补齐成功历史。
+
+源码依据：[DSH 存储契约](../../../references/dsh/packages/session/session-persistence/src/storage-contract.ts)、[Codex 写入确认与读取](../../../references/codex/codex-rs/rollout/src/recorder.rs)、[Pi 会话读写](../../../references/pi/packages/coding-agent/src/core/session-manager.ts)、[ZCode 历史恢复](../../../references/zcode/apps/zcode-cli/packages/core/src/agent/session-history-hydrator.ts)。
+
+阶段 04 若采用本策略，需在 contracts 定义可等待的业务事实交付及保存失败传播，在 core 的模型/工具边界等待它，在存储 adapter 实现有序完整写入与确认，在 bootstrap/REPL 区分执行结果、保存结果和历史提交。JSONL seq、文件句柄与同步细节仍由存储层负责；既有文件尚不存在，无历史数据迁移，既有消息和正常工具结果语义保持不变。
+
+验收应注入延迟和失败，验证 user、assistant、start、result/end、turn_end 的确认屏障均不能被下一步越过；特别检查 tool_start 确认前 execute 不发生，turn_end 确认前 REPL 不提交成功历史，确认丢失不盲目重试。再验证取消发生在等待中、结果返回后及终止保存中时，事实保留与停止边界一致。进程强制终止可以验证有效前缀恢复；它不能替代实际断电测试，也不能证明硬件级耐久性。
 
 ## 10. 本阶段建议的评审问题
 
