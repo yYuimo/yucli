@@ -343,7 +343,7 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 
 讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选设计，尚未确认**。
 
-本节对照现有类型和实际转换代码，讨论工具往返怎样落在 9.1 的 JSONL 结构中。重点是保存完整调用和已交付的执行结果；取消、崩溃、模型/保存错误的事件字段与落盘时机继续留待后续讨论。
+本节对照现有类型和实际转换代码，讨论工具往返怎样落在 9.1 的 JSONL 结构中。重点是保存完整调用和已交付的执行结果；生命周期和异常记录在 9.3 继续讨论，具体落盘可靠性机制在后续小节展开。
 
 #### 现有四个类型分别表示什么
 
@@ -393,7 +393,8 @@ Tool.execute 返回 {ok, content}
 | --- | --- | --- |
 | user/system 文本、assistant 文本及调用列表 | `type: "message"`，payload 保存对应消息 | 工具请求仍属于 assistant 的一次响应；同时出现的文字和多个调用保持在同一条消息中 |
 | 已交付的工具结果 | `type: "tool_result"`，payload 保存完整 ToolResult 与调用消息引用 | 保留 ok、名称和内容，恢复时可生成 ToolMessage |
-| turn 结束 | 沿用 9.1 的 `type: "turn_end"` | 评价整次提问的结果；完整 outcome 和错误字段后续讨论 |
+| 工具分派开始或异常终止 | 9.3 的 `tool_start` / `tool_end` | 补足请求到结果之间的生命周期，正常结果仍只存一次 |
+| turn 结束 | 沿用 9.1 的 `type: "turn_end"` | 评价整次提问的结果；生命周期与异常字段见 9.3 |
 
 本轮建议不另建重复的 `tool_call` 记录；完整调用已在 `assistant.toolCalls` 中。同一结果只写一条 `tool_result`，不再写一条 `type: "message"` / `role: "tool"` 复制内容，避免恢复时出现双份工具结果。
 
@@ -409,23 +410,24 @@ Tool.execute 返回 {ok, content}
 {"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
 {"seq":1,"type":"message","timestamp":"2026-10-26T02:00:01.000Z","turnId":"turn-1","payload":{"role":"user","content":"总结 README.md"}}
 {"seq":2,"type":"message","timestamp":"2026-10-26T02:00:02.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"我先读取文件。","toolCalls":[{"id":"call-1","name":"read_file","argumentsJson":"{\"path\":\"README.md\"}"}]}}
-{"seq":3,"type":"tool_result","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file","ok":true,"content":"# yucli\n一个终端 Agent 项目。\n"}}
-{"seq":4,"type":"message","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"README 介绍了一个终端 Agent 项目。"}}
-{"seq":5,"type":"turn_end","timestamp":"2026-10-26T02:00:05.000Z","turnId":"turn-1","payload":{"outcome":"success"}}
+{"seq":3,"type":"tool_start","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file"}}
+{"seq":4,"type":"tool_result","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file","ok":true,"content":"# yucli\n一个终端 Agent 项目。\n"}}
+{"seq":5,"type":"message","timestamp":"2026-10-26T02:00:05.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"README 介绍了一个终端 Agent 项目。"}}
+{"seq":6,"type":"turn_end","timestamp":"2026-10-26T02:00:06.000Z","turnId":"turn-1","payload":{"outcome":"success"}}
 ```
 
-这里 `seq: 2` 保存模型的调用，`seq: 3` 保存本地执行结果；`callMessageSeq: 2` 和 `toolCallId: "call-1"` 把结果定位到该 assistant 消息中的具体调用。`seq: 4` 是最终回答，`seq: 5` 才表示整个 turn 成功结束。
+这里 `seq: 2` 保存模型的调用，`seq: 3` 是 9.3 提议的分派开始标记，`seq: 4` 保存本地执行结果；`callMessageSeq: 2` 和 `toolCallId: "call-1"` 把结果定位到该 assistant 消息中的具体调用。`seq: 5` 是最终回答，`seq: 6` 才表示整个 turn 成功结束。
 
 `argumentsJson` 在磁盘上看起来包含转义引号，是因为外层 JSON 保存了一个 JSON 字符串。读取 JSONL 后，该字段仍是 `{"path":"README.md"}` 的字符串。恢复器可解析它进行结构校验，再保留原字符串重建 assistant 调用；这一步不触发工具执行，也不把字符串直接当对象访问。
 
-如果文件不存在，只需将上述文件中 `seq: 3` 和 `seq: 4` 的事件替换为：
+如果文件不存在，只需将上述文件中 `seq: 4` 和 `seq: 5` 的事件替换为：
 
 ```jsonl
-{"seq":3,"type":"tool_result","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file","ok":false,"content":"[file_not_found] 文件不存在。"}}
-{"seq":4,"type":"message","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"README.md 不存在，暂时无法根据文件内容总结。"}}
+{"seq":4,"type":"tool_result","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file","ok":false,"content":"[file_not_found] 文件不存在。"}}
+{"seq":5,"type":"message","timestamp":"2026-10-26T02:00:05.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"README.md 不存在，暂时无法根据文件内容总结。"}}
 ```
 
-这是同一示例文件的两行替换片段，header 和其他事件不变。工具结果是 `ok: false`，而模型随后正常解释了原因，因此这个示例仍以 `turn_end` / `outcome: "success"` 结束。整次 turn 执行失败时如何记录，继续在下一轮讨论。
+这是同一示例文件的两行替换片段，header 和其他事件不变。工具结果是 `ok: false`，而模型随后正常解释了原因，因此这个示例仍以 `turn_end` / `outcome: "success"` 结束。整次 turn 执行失败时的记录见 9.3。
 
 #### 如何恢复为现有 ToolMessage
 
@@ -453,7 +455,7 @@ const message: ToolMessage = {
 
 最小接入路径可以顺序遍历 appendedMessages，遇到 tool 消息时消费下一项 toolResults，检查 ID、工具名和 content 一致，再生成一条 tool_result 并补入对应 assistant 记录的 seq。按批次和顺序配对，不依赖调用 ID 在整个 turn 中唯一。这说明现有成功返回值具备保存所需的数据，不表示阶段 04 必须继续依靠两份数组配对；是否重构交付方式见下文。持久化 schema 仍应有独立运行时校验和 formatVersion；代码类型后续变化不能静默改变已写文件的解释。
 
-当前异常出口不交付部分 `StreamTurnResult`，`executeToolBatch` 也不返回半批结果。因此本节尚不能承诺崩溃前每个工具动作都已记录；如果以后需要中途保存，需要另外设计 core 的事件交付与保存时机。本次仅修改调研记录，不改变现有类型或代码行为。
+当前异常出口不交付部分 `StreamTurnResult`，`executeToolBatch` 也不返回半批结果，因此现有实现不能承诺保存崩溃前的每个工具动作。9.3 拟将中间事实保存纳入阶段 04，需要调整 core 的事件交付与保存边界。本次仅修改调研记录，不改变现有类型或代码行为。
 
 #### 既有代码调整评估
 
@@ -464,16 +466,155 @@ const message: ToolMessage = {
 | `ToolCall`、`ToolResult`、`ToolMessage` | 完整调用和结果字段已具备，模型消息不含 ok | 目前可保留其职责划分；保存 ToolResult.ok，生成模型消息时省略，无需为持久化给 ToolMessage 增加 ok |
 | `core/agentLoop.ts`、`core/runTurnStream.ts` 中的结果转消息逻辑 | 两处分别把 ToolResult 转成 ToolMessage，恢复逻辑也需要同一映射 | 推荐提取 core 的纯转换函数，供运行与恢复共用，集中保持 ID、名称和 content；属于可维护性重构，不改变对外行为 |
 | `StreamTurnResult` 与 `runTurnStream` 的交付方式 | appendedMessages 和 toolResults 是两份视图，保存时需重新关联；只消费消息视图会丢 ok | 推荐评估用有序的完整业务事实作为明确来源，再派生消息历史和诊断结果，减少存储层重新配对；现有数组也可作为派生视图保留。不是让 9.2 成立的硬性前提，具体接口待设计 |
-| `executeToolBatch`、`runTurnStream` 的中途交付 | 批次和 turn 失败时不交付已有结果，外层无法保存已完成的中间工具事实 | 若后续要求保存中断前的调用/结果，则必须调整交付逻辑，例如提供结构化业务事件；保留整批预检、顺序执行和取消检查，不能为记录结果而执行原本不应执行的工具 |
+| `executeToolBatch`、`runTurnStream` 的中途交付 | 批次和 turn 失败时不交付已有结果，外层无法保存已完成的中间工具事实 | 按 9.3 在阶段 04 保存中断前的调用/结果，需要调整交付逻辑，例如提供结构化业务事件；保留整批预检、顺序执行和取消检查，不能为记录结果而执行原本不应执行的工具 |
 | `callMessageSeq` 与调用身份 | 现有工具 ID 只保证批次内唯一，文件引用属于新的存储数据 | 当前候选方案可由持久化记录创建方补入引用，无需改写模型给出的 ID；如果后续设计引入稳定的内部调用身份，允许替换本候选字段并同步示例与恢复校验 |
 
 若引入结构化业务事件，事件应携带完整 ToolResult 等业务事实，由外层协调保存；core 不直接读取或写入 JSONL，也不依赖文件行号或具体存储实现。事件交付后的等待、保存失败传播和取消顺序需要在后续保存边界设计中明确，不能只增加一个回调就宣称可靠落盘。
 
-模型上下文的提交与执行事实的保存应分别定义：未来即使记录了某项中间工具结果，仍可以保持失败 turn 不提交半截模型历史的行为。该方向是推荐评估的重构方案，不预先确定失败 turn 的最终恢复策略。
+模型上下文的提交与执行事实的保存应分别定义：即使记录了某项中间工具结果，仍可以保持失败 turn 不提交半截模型历史的行为。交付接口是推荐评估的重构方案，具体恢复投影的候选规则见 9.3。
 
-对应验证应覆盖：原有 ok:true/false、空文件和未知工具结果的转换保持一致；文件恢复生成的 ToolMessage 不包含 ok 或存储引用；多批次复用调用 ID 时配对正确。若采用中途事件交付，还需验证“第一项工具完成、第二项取消”和“工具完成、后续模型失败”的事实交付与历史提交边界。形成阶段规格后再把确认的重构与这些验证要求纳入任务。
+对应验证应覆盖：原有 ok:true/false、空文件和未知工具结果的转换保持一致；文件恢复生成的 ToolMessage 不包含 ok 或存储引用；多批次复用调用 ID 时配对正确。落实 9.3 的中途事实交付时，还需验证“第一项工具完成、第二项取消”和“工具完成、后续模型失败”的事实交付与历史提交边界。形成阶段规格后再把确认的重构与这些验证要求纳入任务。
 
 源码依据：[消息类型](../../src/contracts/message.ts)、[工具类型](../../src/contracts/tool.ts)、[结果生成与异常](../../src/core/toolRegistry.ts)、[流式 turn 的两份结果视图](../../src/core/runTurnStream.ts)、[HTTP 消息映射](../../src/adapters/opencode-go/OpenCodeGoClient.ts)。
+
+### 9.3 数据结构讨论（三）：turn 与工具的生命周期和状态记录
+
+讨论日期：2026-10-26（Asia/Shanghai）。状态：**阶段 04 的候选设计，待逐项评审**。
+
+本轮讨论将恢复必需的 turn 和工具状态记录纳入阶段 04：既保存完整成功的问答，也保存中断前已经交付的完整业务事实。自动重跑、复杂重试、并发工具和逐 token 持久化留到后续需求出现时设计。以下事件和错误字段为拟议的持久化格式，不表示现有源码已经具备这些能力。
+
+#### turn 状态与保存状态分别表达
+
+一个 turn 从用户输入被接受开始，到成功、失败、取消或超时结束。同一进程内正在运行的 turn 与恢复时发现的旧 turn 必须区分；恢复不继续旧网络请求或工具执行。
+
+| turn 状态 | 依据 | 是否新增专门记录 |
+| --- | --- | --- |
+| 已接受 / 运行中 | user 消息已被接受，当前进程持有该 turn，尚未产生结束事件 | user 的 `message` 同时表达 turn 起点，本候选方案不重复写 turn_start；运行中是内存状态 |
+| `success` | 获得完整最终回答，调用与结果结构完整，正常结束 | 写 `turn_end`，payload.outcome 为 success |
+| `failed` | 模型请求、协议、额度或不可恢复内部错误导致停止 | 写 `turn_end(failed)` 及结构化 error |
+| `cancelled` | 当前进程观察到调用方取消并停止继续执行 | 写 `turn_end(cancelled)` 及取消原因 |
+| `timeout` | 已定义的执行期限首先到达 | 写 `turn_end(timeout)` 及超时来源；当前可直接映射的期限是既有模型请求超时 |
+| `interrupted` | 恢复时发现有 user，但没有可确认的 turn_end | 只在内存推导，不在恢复时自动追加 turn_end(interrupted) |
+
+会话保存本身另有 `pending / saved / failed` 状态，保存在当前进程的存储协调状态中。模型生成了回答并不代表保存成功；`saved` 只能在约定的持久化确认点完成后报告。不能靠再写一个“已保存”事件来证明该事件本身一定保存成功。具体 append、flush、fsync 和崩溃保证在后续小节细化。
+
+#### 工具状态如何由事件得到
+
+工具调用沿用 9.2 的 `(sessionId, turnId, callMessageSeq, toolCallId)` 关联，调用本身保存在 assistant.toolCalls 中。
+
+| 工具状态 | 证据 | 含义 |
+| --- | --- | --- |
+| 已请求 | assistant 消息中有完整、经结构校验的 ToolCall | 模型提出调用，尚不能说明工具已经执行 |
+| 分派开始 / 进行中 | 对应 `tool_start`，尚无终止结果 | 本地进入这项调用的分派阶段；包括工具名称匹配，未保证实际 execute 已发生 |
+| 已成功 | 对应 `tool_result` 且 ok:true | 已取得完整成功结果，保存实际返回内容 |
+| 可恢复工具错误 | 对应 `tool_result` 且 ok:false | 正常返回了文件不存在等错误，模型仍可据此回答 |
+| 分派失败、取消或超时 | 对应 `tool_end`，outcome 为 failed/cancelled/timeout | 调用异常停止，没有可交付的正常 ToolResult；不凭此断言外部操作没有发生 |
+| 未开始 | 健康、有序的事件交付下，turn 已正常终止，调用只有请求、没有 tool_start | 后续调用没有被分派；不伪造取消结果或 ok:false |
+| 中断 / 结果未知 | 恢复时没有工具终止记录；尤其存在 tool_start 却没有结果 | 只能根据已保存证据描述状态，不判成普通失败，也不自动重新执行 |
+
+`tool_start` 表达的是开始分派的意图和阶段边界。即使先保存它再执行，也存在“保存后、调用前”崩溃窗口；工具完成后也可能在结果保存前崩溃。因此，已见 start 不证明工具执行过，没有 result 也不证明工具没有完成。只读 read_file 也不通过重新读取来冒充原执行结果。
+
+“未开始”的判断依赖执行前事件的保存确认和顺序保证；若日志尾部可能丢失、写入失败或前缀损坏，证据不足的调用应保留为未知，不能作强保证。当前模型请求有超时；工具 timeout 只有在另行定义工具执行期限后才能产生，不因复用枚举值就宣称 Node 文件调用可被抢占取消。
+
+#### 事件划分与新增字段
+
+| type | payload 的候选结构 | 是否成为模型消息 |
+| --- | --- | --- |
+| `message` / user | 沿用 `{role:"user",content}` | 按 turn 的恢复资格决定 |
+| `message` / assistant | 沿用完整文字和 toolCalls；不保存未校验的流式调用片段 | 按 turn 的恢复资格决定 |
+| `tool_start` | `{callMessageSeq,toolCallId,name}` | 否，仅用于恢复和诊断 |
+| `tool_result` | 沿用 `{callMessageSeq,toolCallId,name,ok,content}` | 由此派生 ToolMessage，省略 ok 和存储引用 |
+| `tool_end` | `{callMessageSeq,toolCallId,name,outcome,error}`，outcome 为 failed/cancelled/timeout | 否，不伪造普通工具结果 |
+| `turn_end` | `{outcome,error?}`，outcome 为 success/failed/cancelled/timeout | 否，决定整组历史是否可提交 |
+
+一次正常分派以 `tool_result` 或异常 `tool_end` 收尾，二者互斥；同一 turn 正常只写一条 turn_end。取消与超时竞态由协调层串行确定并保留首先确认的终止原因，不能分别再写两个终止事件。只有在尚无已交付正常结果时，才写 tool_end；若已取得并交付 ToolResult 后发生取消，保留真实 tool_result，并由 turn_end 表达整次 turn 的取消。
+
+新增 error 是持久化用的安全诊断对象，不直接 JSON.stringify 原始 Error：
+
+| error 字段 | 候选含义 |
+| --- | --- |
+| `category` | model、tool、protocol、limit、cancellation、timeout 或 internal |
+| `code` | 稳定机器码，如 network、http、invalid_response、protocol_error、loop_limit、user_interrupt、request_timeout、tool_execution_failed |
+| `message` | 经过整理和脱敏的用户可读摘要，不包含堆栈或原始异常 |
+| `httpStatus?` | 已知模型 HTTP 状态时可保存整数状态码，不保存认证头或完整响应体 |
+
+success 的 turn_end 不带 error；failed/cancelled/timeout 的 turn_end 与异常 tool_end 带对应 error。工具的可恢复错误继续使用 ToolResult.ok:false 和安全 content，不从 content 前缀反推结构化错误码。若以后需要文件错误的细分类，应让工具结果显式交付，不能把自然语言当作错误协议。
+
+映射现有错误时，RequestError 的 network/http 归 model，timeout 归 timeout；ResponseError 归 model/invalid_response；额度耗尽归 limit，调用参数或批次结构非法归 protocol，用户取消归 cancellation。当前 RegisteredTools 把不可恢复工具异常包装成 protocol_error，会丢失“工具内部执行失败”的分类；阶段 04 应调整此处的错误类型或显式来源，使它可归 tool/tool_execution_failed。启动阶段的配置或参数错误发生在接受 turn 之前，仍直接报告，不凭空创建用户 turn。
+
+#### 交付顺序与旧代码需要的调整
+
+本节推荐的顺序为：
+
+1. 接受输入，创建 turnId，交付并保存 user 消息；成功返回值中的 user 不再重复写入。
+2. 模型响应完整收尾，通过响应结构校验和整批参数预检后，交付 assistant 消息；即使其中有文字，也以 toolCalls 判断是否需要工具。不把未通过结构校验的调用伪装成合法 ToolCall 记录，预检失败时不开始任何分派。
+3. 保持每批 4 项与每 turn 8 次模型上限。最后一次模型机会仍请求工具时，可以保留已校验的完整请求事实，再按额度规则终止，不能执行工具。
+4. 每项实际分派前检查取消与额度，交付 tool_start；等待该前置事件达到约定的保存确认点，再次检查取消，然后进入注册表分派。core 使用业务关联信息，JSONL 的 seq 与 callMessageSeq 由存储转换方生成。
+5. 每取得一项完整 ToolResult，就交付含 ok 的结果事实，外层保存 tool_result；保持逐项顺序，不等整批或整个 turn 成功后才交付。普通可恢复错误也走这一条。新接口应将“取得完整结果”和“下一步取消检查”分开，避免结果已得到却因后续取消而丢掉已知事实；检查取消后不再开始下一项工具或模型请求。
+6. 当前项没有正常结果而因取消、超时或异常停止时，交付对应 tool_end；再用 turn_end 关闭整次 turn。尚未分派的剩余调用由事件证据推导，不为它们生成假结果。
+7. 正常得到最终回答后交付 turn_end(success)。只有完整消息组、正常结果配对和成功终止记录达到约定保存确认点后，才向 REPL 提交这组模型历史。
+
+这要求修改 `runTurnStream` 的成功返回值交付模式，并调整 `executeToolBatch` / RegisteredTools 的逐项交付与错误分类；只在外层 catch 中保存错误，或只遍历成功返回的两个数组，无法满足本节的中间事实保存目标。`ToolResult` 与 `ToolMessage` 的职责仍可保留，统一转换函数可供运行与恢复共用。
+
+core 可通过 contracts 定义的有序业务事件接口交付消息、开始、完整结果和终止事实；外层协调事件保存与错误报告，不让 core import 文件 adapter。保存回调若返回 Promise，必须明确等待它，不能以未等待的后台 append 冒充已保存。具体事件接口和保存确认机制应在后续规格中细化，而非直接将 JSONL 对象塞进核心循环。
+
+收到取消后仍需要尝试记录终止原因；保存收尾不能直接复用已经 aborted 的模型/工具 signal，否则可能永远写不出终止事件。收尾等待应有边界，具体关闭与存储超时策略留到落盘可靠性设计。工具和服务端操作是否真正停止仍受各自能力限制。
+
+#### 完整示例：第一项工具完成，第二项被取消
+
+```jsonl
+{"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
+{"seq":1,"type":"message","timestamp":"2026-10-26T02:00:01.000Z","turnId":"turn-1","payload":{"role":"user","content":"读取 a.md 和 b.md 并总结"}}
+{"seq":2,"type":"message","timestamp":"2026-10-26T02:00:02.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"我会依次读取两个文件。","toolCalls":[{"id":"call-a","name":"read_file","argumentsJson":"{\"path\":\"a.md\"}"},{"id":"call-b","name":"read_file","argumentsJson":"{\"path\":\"b.md\"}"}]}}
+{"seq":3,"type":"tool_start","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-a","name":"read_file"}}
+{"seq":4,"type":"tool_result","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-a","name":"read_file","ok":true,"content":"文件 A 的内容。"}}
+{"seq":5,"type":"tool_start","timestamp":"2026-10-26T02:00:05.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-b","name":"read_file"}}
+{"seq":6,"type":"tool_end","timestamp":"2026-10-26T02:00:06.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-b","name":"read_file","outcome":"cancelled","error":{"category":"cancellation","code":"user_interrupt","message":"用户取消了本次执行。"}}}
+{"seq":7,"type":"turn_end","timestamp":"2026-10-26T02:00:07.000Z","turnId":"turn-1","payload":{"outcome":"cancelled","error":{"category":"cancellation","code":"user_interrupt","message":"用户取消了本次执行。"}}}
+```
+
+这里 call-a 的成功结果仍然保存；call-b 的分派被取消，没有把取消包装成 ok:false。没有最终 assistant 回答，整个 turn 为 cancelled，以上记录供恢复展示与诊断，整组不进入后续模型上下文。
+
+如果同一进程在写完第二项的 tool_start 后崩溃，文件可能仅剩以下有效前缀：
+
+```jsonl
+{"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
+{"seq":1,"type":"message","timestamp":"2026-10-26T02:00:01.000Z","turnId":"turn-1","payload":{"role":"user","content":"读取 a.md 和 b.md 并总结"}}
+{"seq":2,"type":"message","timestamp":"2026-10-26T02:00:02.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"我会依次读取两个文件。","toolCalls":[{"id":"call-a","name":"read_file","argumentsJson":"{\"path\":\"a.md\"}"},{"id":"call-b","name":"read_file","argumentsJson":"{\"path\":\"b.md\"}"}]}}
+{"seq":3,"type":"tool_start","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-a","name":"read_file"}}
+{"seq":4,"type":"tool_result","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-a","name":"read_file","ok":true,"content":"文件 A 的内容。"}}
+{"seq":5,"type":"tool_start","timestamp":"2026-10-26T02:00:05.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-b","name":"read_file"}}
+```
+
+恢复时能确认 call-a 有正常结果，call-b 的结果未知，整个 turn 在内存标为 interrupted。不追加修复性 turn_end，不合成 tool message 填补未知结果，不自动重跑任一工具；需要重试时由用户重新提交输入并创建新的 turnId。
+
+#### 完整示例：模型 HTTP 失败
+
+```jsonl
+{"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
+{"seq":1,"type":"message","timestamp":"2026-10-26T02:00:01.000Z","turnId":"turn-1","payload":{"role":"user","content":"你好"}}
+{"seq":2,"type":"turn_end","timestamp":"2026-10-26T02:00:02.000Z","turnId":"turn-1","payload":{"outcome":"failed","error":{"category":"model","code":"http","message":"模型请求失败。","httpStatus":503}}}
+```
+
+模型请求已失败，因此没有伪造 assistant 或工具结果。若模型请求超时，turn_end 使用 timeout，error.category 使用 timeout，code 使用 request_timeout；取消则使用 cancelled 与 cancellation/user_interrupt。
+
+#### 保存失败和恢复边界
+
+保存失败时，当前进程报告明确的存储错误，将会话标为未保存，停止开始新的模型/工具操作，并触发当前 turn 的取消与可取消资源清理；不承诺把故障本身再写进同一个故障文件，也不保证已开始的外部操作可被撤回。已写入的前缀、正在完成的文件操作和已显示的文本分别处理，不把内存中的完成状态当作可靠落盘证据。自动重试、已写前缀确认、坏尾行后的继续追加和退出策略在后续小节设计，不盲目重发相同 seq。
+
+恢复建议继续采用完整 turn 提交边界：只有具有有效 turn_end(success)、完整最终回答以及全部调用/结果配对的 turn 才进入下一次模型上下文。可恢复工具错误的 ok:false 是正常结果，仍可属于成功 turn；异常 tool_end 则没有正常结果，不能靠合成消息把该 turn 变成 success。
+
+failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistant/tool 事实和异常记录保留作日志与可展示历史，整组排除出模型上下文。已有明确失败或取消原因时保留原分类，不统统改成 interrupted。重复恢复同一有效前缀得到同一状态；恢复本身不修改文件。新输入开始新的 turn，不继续旧的未完成执行。
+
+#### 阶段 04 的实现范围与验收要求
+
+- 交付并保存基本生命周期事件，保留已完成的中间工具结果；不等待整个 turn 成功后才保存所有工具事实。
+- 保持整批预检、顺序执行、取消边界和调用额度；不增加自动重跑或并发执行。
+- 取消或超时发生在工具之间时，保留前项真实结果、停止后项；发生在进行中的工具时，记录已知终止原因并保留结果未知的语义。
+- 验证进程崩溃留下 user-only、tool_start-only 和“一个结果完整、后一项未完成”的前缀，恢复不重复执行，不把半截历史提交模型。
+- 验证工具 ok:false 后模型正常解释仍可成功，以及工具完成后模型失败仍保留工具事实。
+- 验证同批多个调用、跨批复用 ID、重复终止事件、缺失引用和 success 却缺工具结果等结构边界；格式损坏的整体处置规则在后续恢复校验设计中明确。
+- 注入 append/保存确认失败，验证不开始后续外部操作，不误报保存成功；新行为和错误分类需同步 contracts、core、bootstrap、文档与相应测试。
 
 ## 10. 本阶段建议的评审问题
 
