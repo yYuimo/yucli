@@ -12,6 +12,10 @@
 
 讨论重置：2026-10-26（Asia/Shanghai）。按用户要求清空第 9 章正文，逐步讨论 yucli 的数据结构与选型；数据结构包括实际 JSONL 文件的 header、逐行记录、字段及完整文件示例。其他章节保留参考项目调研与此前的初步判断，其中对 yucli 的取舍均待重新讨论确认。
 
+生命周期讨论：2026-10-26（Asia/Shanghai）。补写 9.3 的 turn/tool 事件、错误与恢复校验，9.4 的保存确认屏障，以及 9.5 的文件、写者与关闭边界。
+
+闭环评审修订：2026-10-26（Asia/Shanghai）。补齐列表状态、运行配置差异与模式/错误边界；新增 9.6 字节扫描和备份修复算法、9.7 有序业务事件接口，并记录隔离锁验证的实际结果与平台限制。
+
 本报告只用于技术选型评审。本次没有修改 `src/`、没有创建阶段规格、接口契约或 ADR，也没有开始阶段 04 实现。
 
 ## 1. 调研范围和资料状态
@@ -272,7 +276,7 @@ OpenCode history reader 以最新 completed compaction 为边界：
 
 讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选草图，尚未确认**。
 
-本节从实际文件内容出发，逐项讨论字段和记录的含义；确认后再整理成规格。本轮只展示一个成功的普通问答，工具往返、失败 turn、目录布局和写入可靠性在后续讨论中补充。
+本节从实际文件内容出发说明外层结构；普通问答是入门示例，完整候选格式还包括 9.2–9.3 的工具与终止事件、9.5 的运行配置摘要、9.6 的恢复扫描，以及 9.7 的业务交付接口。各节均为调研候选，确认后再整理成阶段规格。
 
 #### 为什么选择带类型的记录
 
@@ -287,9 +291,9 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 
 推荐第二种，原因是一次用户提问可能包含多次模型调用和工具往返，也可能中断；持久化需要表达这些消息属于哪次提问，以及执行是否已经结束。采用这种记录形态不要求同时引入事件总线或数据库投影系统。
 
-#### 一个最小完整文件的候选示例
+#### 一个无工具普通问答的完整 JSONL 示例
 
-以下四行构成一个可逐行解析的 JSONL 示例；示例 ID 是便于阅读的占位值，实际 ID 的生成规则尚待讨论。示例时间使用 UTC ISO 8601 格式。
+以下四行是无工具问答的完整业务记录，使用 UTC ISO 8601 时间与便于阅读的占位 ID；真实 ID 生成见 9.5。为突出外层结构，本节及后续已有示例省略可选的 runtimeProfile；9.5 补充其格式，新写入器必须记录，缺失时读取器只能报告历史配置未知。
 
 ```jsonl
 {"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
@@ -305,7 +309,7 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 3. 第三行记录模型回答，同样属于 `turn-1`。
 4. 第四行记录该 turn 已成功结束。它是执行状态，不是要发给模型的一条聊天消息。
 
-这里一个 turn 指一次用户提问及其后续执行；一次 turn 可以包含多次模型请求。示例中的两条 message 采用完整消息粒度；流式片段如何拼装、何时 append 和何时 fsync 需要后续分别讨论。
+这里一个 turn 指一次用户提问及其后续执行，可以包含多次模型请求。示例采用完整消息粒度；工具事件见 9.2–9.3，保存时机与同步屏障见 9.4。
 
 #### header 与后续记录的字段
 
@@ -315,19 +319,20 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 | --- | --- | --- |
 | `type` | 告诉读取器这是会话头 | 值为 `session_meta`，只出现在第一行 |
 | `formatVersion` | 确定整个文件按哪一版格式解释 | 示例为 `1`；本草图放在 header，后续行不重复 |
-| `sessionId` | 标识会话，供定位和恢复使用 | 跨进程保持；生成规则待讨论 |
+| `sessionId` | 标识会话，供定位和恢复使用 | 跨进程保持；9.5 推荐使用 UUID v4 |
 | `createdAt` | 会话创建时间 | 示例用 UTC ISO 8601 字符串 |
-| `cwd` | 创建会话时的工作目录 | 示例保存绝对路径；恢复后的目录匹配规则待讨论 |
+| `cwd` | 创建会话时的工作目录 | 保存 realpath 绝对路径；恢复时按 9.5 与当前目录相等比较 |
 
 后续记录的候选公共字段：
 
 | 字段 | 作用 | 本草图的约定 |
 | --- | --- | --- |
 | `seq` | 确定记录顺序，帮助检查缺失、重复或倒退 | header 后从 `1` 开始连续递增；重复、缺口或倒退的处置见 9.3 校验表 |
-| `type` | 说明这行属于哪种记录 | 本轮只展示 `message` 和 `turn_end` |
+| `type` | 说明这行属于哪种记录 | message、tool_start、tool_result、tool_end、turn_end；本节示例只用其中两种 |
 | `timestamp` | 记录创建时间，便于展示与诊断 | 顺序仍由 `seq` 表达，不能依赖系统时钟排序 |
 | `turnId` | 把同一次用户提问的相关记录关联起来 | `turn-1` 的消息和结束记录使用相同值 |
 | `payload` | 保存该类型的业务数据 | `message` 保存消息对象，`turn_end` 保存执行结果 |
+| `runtimeProfile?` | 接受 turn 时的配置摘要 | 仅 user 记录使用；读取允许缺失并标未知，新写入要求提供，见 9.5 |
 
 `type` 和 `payload.role` 分别回答“这是一条什么记录”和“消息是谁发出的”。例如 `type: "message"` 的 payload 可以是 user 或 assistant 消息；`type: "turn_end"` 的 payload 没有消息角色。该分工可以沿用现有 `Message` 的 `role`、`content` 字段，再由存储外层补充顺序、时间和 turn 归属。
 
@@ -335,9 +340,9 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 
 读取第一行恢复会话基本信息，再按顺序解释后续记录：`message` 提供消息内容，`turn_end` 提供 turn 完成边界。恢复器据此构造模型所需的 `Message[]`，header 和结束记录各自用于元数据与状态处理。
 
-本轮不预设“文件里出现的每条 message 都进入下次模型请求”。失败、中断或消息组不完整时怎样投影，需在后续讨论中明确。
+恢复投影遵循 9.3：只有完整成功 turn 进入下一次模型上下文，失败和中断记录仅供展示/诊断。9.6 具体化扫描与续写准备，9.7 具体化运行时交付及历史提交。
 
-本轮待讨论：是否采用“会话头 + 带类型的记录”这一外层结构，是否使用 `type: "message"` 包装现有消息，以及上述字段是否都有必要。工具往返的具体 JSONL 候选格式见 9.2；外层字段和工具记录均仍在讨论中。`eventId`、消息 ID、`parentId` 等附加字段需结合各自用途逐项评估。
+本章当前候选采用“会话头 + 带类型的记录”，工具往返见 9.2，合法组合见 9.3。v1 不引入 eventId 去重或 parentId 分支；9.7 的 assistantId 是 turn 内临时业务身份，不新增磁盘消息 ID。
 
 ### 9.2 数据结构讨论（二）：工具调用与结果的持久化
 
@@ -469,7 +474,7 @@ const message: ToolMessage = {
 | `executeToolBatch`、`runTurnStream` 的中途交付 | 批次和 turn 失败时不交付已有结果，外层无法保存已完成的中间工具事实 | 按 9.3 在阶段 04 保存中断前的调用/结果，需要调整交付逻辑，例如提供结构化业务事件；保留整批预检、顺序执行和取消检查，不能为记录结果而执行原本不应执行的工具 |
 | `callMessageSeq` 与调用身份 | 现有工具 ID 只保证批次内唯一，文件引用属于新的存储数据 | 当前候选方案可由持久化记录创建方补入引用，无需改写模型给出的 ID；如果后续设计引入稳定的内部调用身份，允许替换本候选字段并同步示例与恢复校验 |
 
-若引入结构化业务事件，事件应携带完整 ToolResult 等业务事实，由外层协调保存；core 不直接读取或写入 JSONL，也不依赖文件行号或具体存储实现。事件交付后的等待、保存失败传播和取消顺序需要在后续保存边界设计中明确，不能只增加一个回调就宣称可靠落盘。
+若引入结构化业务事件，事件应携带完整 ToolResult 等业务事实，由外层协调保存；core 不直接读取或写入 JSONL，也不依赖文件行号或具体存储实现。事件等待与保存失败传播见 9.4、9.7，取消顺序见 9.3–9.4；不能只增加一个回调就宣称可靠落盘。
 
 模型上下文的提交与执行事实的保存应分别定义：即使记录了某项中间工具结果，仍可以保持失败 turn 不提交半截模型历史的行为。交付接口是推荐评估的重构方案，具体恢复投影的候选规则见 9.3。
 
@@ -556,17 +561,17 @@ success 的 turn_end 不带 error；failed/cancelled/timeout 的 turn_end 与异
 
 本节推荐的顺序为：
 
-1. 接受输入，创建 turnId，交付并保存 user 消息；成功返回值中的 user 不再重复写入。
+1. 外层协调方接受输入，创建 turnId，交付并保存唯一 user 消息；core 返回值中的 user 不再重复写入。
 2. 模型响应完整收尾，通过响应结构校验和整批参数预检后，交付 assistant 消息；即使其中有文字，也以 toolCalls 判断是否需要工具。不把未通过结构校验的调用伪装成合法 ToolCall 记录，预检失败时不开始任何分派。
 3. 保持每批 4 项与每 turn 8 次模型上限。最后一次模型机会仍请求工具时，可以保留已校验的完整请求事实，再按额度规则终止，不能执行工具。
 4. 每项实际分派前检查取消与额度，交付 tool_start；等待该前置事件达到 9.4 的保存确认点，再次检查取消，然后进入注册表进行名称查找和分派。未知名称也已经有 start，随后交付 ok:false 结果；若再次检查时已取消，则不进入注册表，按已知原因收尾。core 使用业务关联信息，JSONL 的 seq 与 callMessageSeq 由存储转换方生成。
 5. 每取得一项完整 ToolResult，就交付含 ok 的结果事实，外层保存 tool_result；保持逐项顺序，不等整批或整个 turn 成功后才交付。普通可恢复错误也走这一条。新接口应将“取得完整结果”和“下一步取消检查”分开，避免结果已得到却因后续取消而丢掉已知事实；检查取消后不再开始下一项工具或模型请求。
 6. 当前项没有正常结果而因取消、超时或异常停止时，交付对应 tool_end；再用 turn_end 关闭整次 turn。尚未分派的剩余调用由事件证据推导，不为它们生成假结果。
-7. 正常得到最终回答后交付 turn_end(success)。只有完整消息组、正常结果配对和成功终止记录达到约定保存确认点后，才向 REPL 提交这组模型历史。
+7. core 正常交付最终回答后返回临时成功结果，协调方固定 outcome 并唯一交付 turn_end。只有完整消息组、正常结果配对和 turn_end(success) 都达到保存确认点后，才向 REPL 提交这组模型历史，具体接口见 9.7。
 
 这要求修改 `runTurnStream` 的成功返回值交付模式，并调整 `executeToolBatch` / RegisteredTools 的逐项交付与错误分类；只在外层 catch 中保存错误，或只遍历成功返回的两个数组，无法满足本节的中间事实保存目标。`ToolResult` 与 `ToolMessage` 的职责仍可保留，统一转换函数可供运行与恢复共用。
 
-core 可通过 contracts 定义的有序业务事件接口交付消息、开始、完整结果和终止事实；外层协调事件保存与错误报告，不让 core import 文件 adapter。保存回调若返回 Promise，必须明确等待它，不能以未等待的后台 append 冒充已保存。具体事件接口和保存确认机制应在后续规格中细化，而非直接将 JSONL 对象塞进核心循环。
+9.7 具体化 contracts 中的 CoreTurnFact/TurnFactSink：core 顺序交付 assistant、工具开始/结果/异常事实并等待确认；外层协调方唯一负责 user 和 turn_end。保存失败原样传播，不让 core import 文件 adapter，不将 JSONL 对象或文件 seq 塞进核心循环。
 
 收到取消后仍需要尝试记录终止原因；保存收尾不能直接复用已经 aborted 的模型/工具 signal，否则可能永远写不出终止事件。收尾等待应有边界，具体关闭与存储超时策略留到落盘可靠性设计。工具和服务端操作是否真正停止仍受各自能力限制。
 
@@ -610,7 +615,7 @@ core 可通过 contracts 定义的有序业务事件接口交付消息、开始�
 
 #### 保存失败和恢复边界
 
-保存失败时，当前进程报告明确的存储错误，将会话标为未保存，停止开始新的模型/工具操作，并触发当前 turn 的取消与可取消资源清理；不承诺把故障本身再写进同一个故障文件，也不保证已开始的外部操作可被撤回。已写入的前缀、正在完成的文件操作和已显示的文本分别处理，不把内存中的完成状态当作可靠落盘证据。9.4 给出保存确认、故障后停止追加和禁止盲目重试的候选规则；独占打开、坏尾行修复与退出流程在后续落盘管理讨论中细化。
+保存失败时，当前进程报告明确的存储错误，将会话标为未保存，停止开始新的模型/工具操作，并触发当前 turn 的取消与可取消资源清理；不承诺把故障本身再写进同一个故障文件，也不保证已开始的外部操作可被撤回。已写入的前缀、正在完成的文件操作和已显示的文本分别处理，不把内存中的完成状态当作可靠落盘证据。9.4 给出保存确认、故障后停止追加和禁止盲目重试规则；独占打开与退出分类见 9.5，坏尾行的字节边界和修复见 9.6。
 
 恢复建议继续采用完整 turn 提交边界：只有具有有效 turn_end(success)、完整最终回答以及全部调用/结果配对的 turn 才进入下一次模型上下文。可恢复工具错误的 ok:false 是正常结果，仍可属于成功 turn；异常 tool_end 则没有正常结果，不能靠合成消息把该 turn 变成 success。
 
@@ -624,6 +629,7 @@ failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistan
 | --- | --- |
 | header 必须是第一个物理行，且整个文件只出现一次；formatVersion 必须受支持 | 拒绝；后续 session_meta 不能充当新文件的起点 |
 | 每行是符合对应 schema 的对象；必填字段、消息/调用/错误字段类型合法，type 为已知类型 | 拒绝；v1 未定义可忽略事件，不能静默跳过未知 type |
+| user 上存在 runtimeProfile 时，必须符合 9.5 的 version=1 摘要 schema；缺失仅表示历史配置未知 | 非法字段拒绝，摘要版本不支持则按 unsupported 拒绝；不能忽略损坏摘要后声称配置一致 |
 | seq 是从 1 开始的连续正安全整数；timestamp 仅作时间信息，不参与排序 | 重复、缺口、倒退或类型错误拒绝；不通过重排或重编号修复 |
 | 每个 turn 恰有一个 user 起点，且是该 turn 第一条记录；turnId 的记录连续，开始新 turn 后不能返回旧 turn | 多余 user、无 user 的事件或跨 turn 交错拒绝；v1 不支持 steering 或并发 turn |
 | 一个 turn 最多一个 turn_end，且是**属于该 turn**的最后一条记录 | 重复结束或后续任意同 turn 记录拒绝；后续新 turn 合法 |
@@ -676,9 +682,9 @@ failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistan
 
 建议先使用简单的串行写入器：一次写完整 UTF-8 JSON 加换行，处理短写，必要时排空应用缓冲，执行文件同步，再向调用方确认截至哪个 seq 保存成功。直接使用 FileHandle 时不虚构独立的 flush API。后续事件不能越过未确认事件；无需为了队列、后台线程或批量优化引入额外框架。工具/模型操作本来按顺序执行，先用每个业务屏障一次同步换取清晰语义；若测出同步成本明显，再讨论合并，但不能把后续有副作用的步骤提前到屏障之前。
 
-本策略以同一文件同一时刻只有一个写者为前提。进程内串行写入不等于跨进程排他；会话的独占打开与冲突处理在后续存储管理讨论中确定，不能仅靠 append 模式保证这些因果约束。
+本策略以同一文件同一时刻只有一个写者为前提。进程内串行写入不等于跨进程排他；独占打开、冲突处理及锁候选验证见 9.5，不能仅靠 append 模式保证这些因果约束。
 
-新文件必须先保存并同步 header，再接受 user；文件首次创建还需要在支持的平台同步父目录，保证目录项的持久化。新建多级目录时同样需要考虑各级目录项；目录、权限和平台支持在后续存储管理讨论中落定。文件 fsync 不等于新路径一定可在断电后找回，也不承诺所有硬件/文件系统上的绝对不丢失；不能把不支持的同步悄悄当作成功。这里选择的保证强于“进程收到 write 回调”，不把已接受队列或普通 flush 称为耐久保存。
+新文件必须先保存并同步 header，再接受 user；文件首次创建还需要在支持的平台同步父目录，保证目录项的持久化。新建多级目录时同样需要考虑各级目录项；目录、权限和已验证平台范围见 9.5。文件 fsync 不等于新路径一定可在断电后找回，也不承诺所有硬件/文件系统上的绝对不丢失；不能把不支持的同步悄悄当作成功。这里选择的保证强于“进程收到 write 回调”，不把已接受队列或普通 flush 称为耐久保存。
 
 #### 哪些步骤必须等待确认
 
@@ -725,7 +731,7 @@ failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistan
 
 讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选设计，供评审；未修改实现**。
 
-本节围绕“在一个项目中开始对话，退出后再选择同一会话继续”确定文件归属、创建、独占打开和关闭的候选规则。9.1–9.4 继续约束文件格式、执行事实和保存确认；本节补足这些保证成立所需要的资源生命周期。恢复后的消息投影、坏尾部修复算法和具体命令形式在后续小节继续设计。
+本节围绕“在一个项目中开始对话，退出后选择同一会话继续”讨论文件、列表、运行配置和资源生命周期。消息投影规则已由 9.3 定义；9.6 给出扫描/尾部修复的具体流程，9.7 给出 core/storage 的交付接口，均在本报告中可连续阅读。
 
 #### 当前项目的起点与参考取舍
 
@@ -748,8 +754,9 @@ failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistan
 ~/.yucli/
 ├── sessions/
 │   └── 2026-10-26T02-00-00-000Z_9f7088b6-7ca6-4fd0-955a-68f05f9ca2ea.jsonl
-└── locks/
-    └── 9f7088b6-7ca6-4fd0-955a-68f05f9ca2ea.lock
+├── locks/
+│   └── 9f7088b6-7ca6-4fd0-955a-68f05f9ca2ea.lock
+└── recovery/                    # 仅首次修复时创建，保留原件与修复清单
 ```
 
 sessions 下只存会话 JSONL，锁单独放在 locks 下，不按项目或日期再建子目录。选择和过滤会话依赖 header.cwd；文件名不承担项目识别。v1 暂无 SQLite 索引或额外会话元数据 sidecar，列表展示与排序从 header 和日志取得；mtime 只能作文件变化线索，不能充当会话身份或事件顺序。
@@ -757,7 +764,7 @@ sessions 下只存会话 JSONL，锁单独放在 locks 下，不按项目或日�
 | 项目 | 推荐默认值与约束 | 理由或备选 |
 | --- | --- | --- |
 | 存储位置 | `~/.yucli/sessions/<timestamp>_<sessionId>.jsonl` | 集中保存，避免项目内日志混入 Git；项目 `.yucli/` 更便于随项目整理，但容易跟随仓库复制，本阶段不采用 |
-| 应用根定位 | adapter 使用 homedir，bootstrap 可注入独立存储根供测试 | 存储位置不从模型配置或项目 .env 隐式改变；面向用户的目录覆盖参数后续交互设计再决定 |
+| 应用根定位 | adapter 使用 homedir，bootstrap 可注入独立存储根供测试 | 存储位置不从模型配置或项目 .env 隐式改变；v1 不提供用户目录覆盖参数，测试使用显式注入 |
 | sessionId | 新会话使用完整 UUID v4，推荐由 Node randomUUID 生成，写入 header 后保持不变 | 无需新增 UUID 库；时间戳供阅读，UUID 负责区分同毫秒创建的会话 |
 | turnId | 每次接受普通用户输入生成新的 UUID v4；取消后的重试也生成新值 | 由应用协调方创建，经业务接口传给 core；core 不 import node:crypto |
 | 文件名时间 | 使用创建时的 UTC ISO 时间，将 `:` 和 `.` 替换为 `-`；与 header.createdAt 来自同一次取值 | 恢复继续追加原文件，不改名、不重新生成 createdAt；校验和排序仍以 header 为准 |
@@ -793,13 +800,63 @@ header 与 user 不是一个原子事务。崩溃发生在二者之间，可能�
 | 原子 mkdir/独占创建占位锁 | 可仅用 Node 标准库，但崩溃会遗留占位；自动接管还需要解决进程身份和删除竞态 | 无原生依赖的备选；若采用，v1 应冲突即拒绝、由操作者确认所有写者退出后清理，不能承诺自动崩溃接管 |
 | 心跳加超时回收 | 长暂停或繁忙进程可能被误判死亡，恢复运行后形成双写 | 本阶段不采用；“超过 N 秒”不构成写者已退出的证据 |
 
-锁适配器只负责取得和释放所有权，放在 adapters 中。可评估 fs-ext 这类提供 flock 的薄原生绑定，但**尚未验证它在当前 Node 24.14.0/目标平台的安装与行为**，不据此宣称依赖选型完成。形成阶段规格前，应先做安装、两进程互斥、强制终止持有者后再取得锁的验证，再固定包与版本；本轮不安装依赖。若验证失败，应回到上述备选作显式取舍，不静默改成无锁或直接复制 DSH 的原生工程。
+锁适配器放在 adapters 中，推荐候选固定为 **fs-ext@2.1.1**。2026-10-26 已在独立临时目录使用官方 Node **24.14.0**、**darwin arm64** 安装并编译成功；项目 package.json、锁文件和 node_modules 未增加该依赖。官方 Node 包 SHA256 已按同源 SHASUMS256.txt 核对；主机默认 Node 26 没有用于本探针。
+
+| 隔离验证项 | 实际结果 |
+| --- | --- |
+| 两个独立 Node 进程锁定同一稳定文件 | 后到者得到 EAGAIN/EWOULDBLOCK；不同会话锁互不阻塞 |
+| flock 回调式异步 exnb | 持有者存在时拒绝；另一文件成功取得，不使用阻塞式 ex 等待 |
+| 以只读句柄短暂取得 shnb | 能观察现有独占写者；空闲时能取得并关闭，不修改锁文件内容 |
+| SIGSTOP 暂停持有者 | 仍然互斥，不因暂停而抢占 |
+| 描述符关闭、进程保持存活 | 锁释放，后继可取得 |
+| SIGKILL 强制终止持有者 | 等待进程退出后立即可重新取得，无过期计时；锁文件仍存在，dev/ino 未变 |
+| 同进程独立描述符重复申请 | 后到者冲突，仍需应用句柄登记防止误用 |
+| 当前测试文件系统的目录 fsync | Node 24 调用成功；这不等于已经验证断电耐久性 |
+
+复验流程为：隔离 npm 包目录安装精确版本，用 process.execPath 启动持锁子进程，以 IPC 确认已持有后测试竞争，再分别关闭描述符、暂停/恢复和强制终止子进程；每一步等待明确结果后断言。测试仅使用临时锁文件，不调用模型或项目存储实现。**Linux、Windows、其他 Node 版本及 CI 构建环境未验证**；当前证据支持 Mac 候选选型，不能扩展为所有目标平台保证。将来声明支持 Linux 前必须补同类验证；安装/加载或行为验证失败是规格或发布的阻断条件，不能自动回退 mkdir、无锁或改变自动接管语义。上述备选仅供显式重新选型。
 
 采用推荐方案时，所有写入方统一锁定 `locks/<sessionId>.lock`。锁文件正常释放后仍保留，**文件存在不代表仍有活动写者**；不按 PID、mtime 或文件年龄自动删除。保持同一锁文件 inode，取得锁后复核路径仍对应所持句柄；不能一边持有旧 inode 的锁，一边删除并重建同名锁文件。这样不需要为正常删除锁文件再引入 Codex 式全局协调锁。
 
 写者从打开可写会话起持锁，覆盖 REPL 等待输入、整个 turn、保存和关闭；不能每个 turn 结束就释放锁，却保留可能已经过期的内存历史。单进程内部也只允许一个可写句柄，同一会话的事件仍按 9.4 串行写入。锁冲突立即报告会话正被占用，不忙等、不强制抢占；锁服务不可用也明确失败。此锁约束遵守同一协议的 yucli 写者，不约束外部编辑器，并且不承诺 NFS 等共享文件系统上的相同语义。
 
-只读列举和诊断不取得写入权、不修复正文，读到的活跃文件末尾可能尚未完成；它们只能展示已观察到的有效前缀，不能据此开始继续执行。用于恢复执行的历史必须在取得写入权后从文件重新验证，不能直接使用列表或预览缓存。
+只读列举和诊断不打开可写会话、不修复正文；可对已有锁文件以只读句柄短暂申请 shnb 探测占用，随后立即关闭，不创建、删除或写入锁文件。本进程已经持有的会话直接查句柄登记。探测只描述当时状态，可能短暂与新写者竞争；用于恢复执行的历史始终要在正式取得独占写入权后重新读取，不能复用列表缓存或把探测成功当成写入许可。
+
+#### 列表字段、状态与恢复入口
+
+推荐 `yucli --sessions` 默认只列 header.cwd 等于当前 realpath 的会话；`--sessions --all` 是全局**只读列表**，其他 cwd 的记录标为“仅预览，需切换到原目录”，不能直接继续执行。损坏 header 导致 cwd 无法判定的文件不混入当前项目列表，汇总报告其数量，并在全局诊断列表中展示原因。
+
+每行至少需要以下数据；字段属于内存读模型，不另存索引或回写正文：
+
+| 字段 | 来源与规则 |
+| --- | --- |
+| sessionId、cwd、createdAt | 已校验的 header；短 ID 仅作显示，选择时歧义必须拒绝 |
+| lastActivityAt、lastSeq、turnCount、lastTurnOutcome | 最近一条有效记录的 timestamp、seq、user 起点数量及最近 turn 的 outcome/推导中断状态；header-only 时间回退 createdAt，outcome 为空 |
+| preview | 首条 user 的单行限长摘要，例如最多 80 个 Unicode 码点；不默认展示工具原文 |
+| writerState | busy / available / unknown。分别表示探测到独占持有者、当时可取共享探测锁、无法可靠判断；锁文件不存在也记 unknown，不能凭此断言空闲 |
+| logState | complete / interrupted / torn_tail / missing_lf / empty / corrupt / unsupported；来自 9.3 与 9.6 扫描，而非 writerState |
+| observedAt、changing | 固定初始字节上限读取；前后 stat 变化或并发观察不稳定时标 changing，只展示已观察前缀，不标为完整快照 |
+| resumability | yes / no / check_on_open，并附原因；其他 cwd、损坏、不支持或 busy 时 no，状态未知或变化时 check_on_open，最终以 openWrite 校验为准 |
+
+logState 优先显示 corrupt/unsupported，其次是 torn_tail/missing_lf/empty；没有物理尾部问题时再区分 complete/interrupted，lastTurnOutcome 另行保留。writerState 和 logState 独立展示，例如 `busy · interrupted · 仅已观察前缀`；写者可能只是闲置持锁，不能把 interrupted 直接解释为进程崩溃。available 也只表示当次探测时刻，不能保证用户选择后仍然空闲。读到完整行也不能证明写者已经收到 fsync 确认；列表不展示“已耐久保存”的推断。
+
+排序使用有效 lastActivityAt 降序，再按 createdAt 降序、sessionId 字典序打破并列；时间戳只影响列表展示，日志解释仍严格依 seq。默认隐藏 header-only 空会话，报告“已隐藏 N 个空会话”；全局诊断列表可见其 empty 状态。mtime 不决定排序，损坏/不支持条目单列，不按猜测时间插入正常列表。
+
+候选入口固定为：`yucli` 新 REPL、`yucli --resume <sessionId>` 恢复 REPL、`yucli --sessions [--all]` 只读列举，以及闲置 REPL 的 `/resume <sessionId>` 切换。列表无需模型密钥；恢复仍需当前模型配置。`--prompt` 与 `--resume`/`--sessions` 不可组合，返回用法错误 2；不因恢复失败而悄悄新建会话。REPL 里选择当前会话是无操作，切换其他会话时先准备候选，成功后才关闭旧会话并替换历史。
+
+#### 运行配置摘要与差异提示
+
+仅使用当前配置而不记录过去配置，无法发现“A 模型生成的历史由 B 继续”。推荐在**每条 user 记录的外层**增加 runtimeProfile，表示接受该 turn 时的有效运行配置；不塞进 Message.content，不每行重复，也不自动恢复历史配置。读取时允许缺失并标记未知，新写入器必须提供。每 turn 记录能避免只在 header 保存初始模型、恢复换模后仍反复和最初模型比较的问题。
+
+| runtimeProfile 字段 | 含义 |
+| --- | --- |
+| version:1、provider、model | 摘要版本、提供方标识和模型名 |
+| endpointHash | 对规范化、无凭证的 base URL 计算 SHA-256，不保存认证头或密钥 |
+| systemPromptHash | 对实际 system 消息序列的稳定 JSON 编码计算 SHA-256；当前无 system 消息时对空数组计算 |
+| toolsHash | 对有序工具定义、显式工具行为版本及实际工具策略稳定编码后计算 SHA-256；不能仅哈希工具名称，也不能宣称能自动检测未标版本的代码变化 |
+
+稳定编码递归按键排序、保留数组顺序，UTF-8 编码后输出 `sha256:<64位小写十六进制>`。摘要由协调方根据本次实际请求配置生成，经记录转换层注入 user envelope；core 不读取 .env、不计算文件路径或摘要。模型密钥、原始凭证及工具执行数据均不进入该摘要输入。9.1 示例省略该可选字段仍可读取，但不能据此宣称配置一致。
+
+恢复时比较“即将进入上下文的最近成功 turn”的摘要与当前摘要；没有成功 turn 时回退最近 user 摘要。模型/提供方不同则提示旧值与当前值，其他指纹不同则提示对应配置已变化；上下文内存在缺失摘要时说明“历史配置未完整记录，无法全部核对”。提示在恢复完成后、首次新请求前向 stderr 显示一次，无需确认，不阻止继续；不回显提示词或凭证，不将提示当成模型消息。接受新问题仍使用当前环境，并写入新摘要。已有历史可能由多种配置生成，比较提示不声称复现过去运行环境。
 
 #### 打开旧会话与 cwd 归属
 
@@ -811,12 +868,12 @@ header 与 user 不是一个原子事务。崩溃发生在二者之间，可能�
 从用户选择定位受管会话
   → 取得该 sessionId 的写入权
   → 重新打开正文并完整校验 header、seq、事件和 cwd
-  → 若有合法未完成尾部，交给后续 9.6 的写入准备流程处理并同步
+  → 按 9.6 的字节边界备份、修复并同步未完成尾部
   → 从有效文件重建历史、最后 seq 和工具状态
   → 开始新的 turn，继续在原文件追加
 ```
 
-未通过格式或 cwd 检查时释放本次资源，正文不改动，不发模型请求，不自动创建一份同名新会话。resume 不能使用 `a+` 将不存在的目标意外创建为空文件。发现尾部需要处理，也必须在规则确定且处理成功后才能进入可写状态；不能先写新 user 再回头修复。具体截断、保全尾部与无末尾换行的处理在 9.6 设计。
+未通过格式或 cwd 检查时释放本次资源，正文不改动，不发模型请求，不自动创建一份同名新会话。resume 使用不创建文件的 r+ 打开既有正文，不能用 a+ 将不存在的目标意外创建为空文件。尾部修复必须完成 9.6 的备份与同步后才能写新 user；读预览不修复原件。
 
 恢复后保留 sessionId、createdAt 和原文件名；新 turnId 重新生成，seq 从有效记录的最后值加 1，header-only 会话从 1 开始。旧 turn 缺少 turn_end 时仍按 9.3 推导 interrupted，不补写旧终止记录；接下来的 user 属于新的 turn。read_file 的根目录与该规范化 cwd 一致；当前 .env 和模型配置仍来自启动环境，不依据历史内容自动切换目录或加载其他项目的凭证。
 
@@ -849,18 +906,34 @@ header 与 user 不是一个原子事务。崩溃发生在二者之间，可能�
 
 关闭由持有会话的应用协调方负责，存储 adapter 持有正文句柄、锁句柄和最后确认 seq；core 不操作这些资源。close 必须可重复等待，第一次就禁止新 append，完成已开始的文件操作、必要同步和正文关闭后再释放锁；即使关闭报错，也应在没有未决写入后尝试释放资源，并保留失败报告。存储等待超时不等于底层 I/O 已取消，不能因为计时器到期就释放锁，让后继写者与仍在完成的旧操作竞争；挂起操作的退出策略需在规格中给出可验证的界限。
 
-推荐新增稳定的存储错误类型，由 bootstrap 统一映射为退出码 **5**；已有参数 2、配置 3、模型/Agent 4 继续保留。REPL 原先 catch 后无条件继续输入的逻辑要区分存储故障。正常关闭保留既有退出语义；若保存/关闭失败，最终报告存储失败，不能返回成功 0 或用闲置中断 130 掩盖未保存状态。退出码是候选外部行为变更，形成规格时同步 CLI 契约与集成测试。
+推荐新增稳定的 SessionAccessError 与 PersistenceError，使用不同 code 表达访问拒绝和保存故障；退出码 5 统一表示会话操作未完成，**不等于所有此类错误都已丢失数据**。错误携带安全的 operation、code、message，必要时带 lastConfirmedSeq、文件行/字节位置；不以原始 Error.message 回显用户内容。
+
+| 错误/场景 | CLI 与 REPL 行为 |
+| --- | --- |
+| session_busy：候选会话锁冲突 | `--resume` 启动失败退出 5，说明“未取得写入权，未修改正文”；REPL `/resume` 保留健康旧会话与历史，显示原因后允许重新选择/重试，不把旧写者标为故障 |
+| not_found、cwd_mismatch、unsupported、corrupt：候选不可打开 | 启动恢复退出 5；交互选择失败保留旧会话。语义损坏仍拒绝整个候选文件，不能跳过坏 turn |
+| lock_unavailable：原生库加载/内核调用不可用 | 独立错误码，区别于 busy；启动退出 5，REPL 禁止进入新的持久化执行并收尾退出，不降级无锁 |
+| write_failed、sync_failed、repair_failed、ownership_lost、close_failed | PersistenceError；停止新执行，等待未决 I/O 与清理后退出 5。repair_failed 也不能继续发模型请求，即使截断实际上已完成 |
+| 普通模型/工具失败、取消、超时 | 终止记录保存成功时仍按阶段 03 处理；REPL 可继续，普通单次模式返回 4 |
+
+访问冲突不是“当前会话保存失败”，所以不应一律结束交互 REPL；真正存储故障也不能被宽泛 catch 后继续。已有用法 2、配置 3 保留。正常关闭保留 0/130 等语义；保存/关闭失败优先报告 5。模式范围也应明确出现在帮助与规格中：**v1 自动持久化只覆盖 REPL，包括显式恢复；普通 --prompt 不持久化，且不能与恢复参数组合**。
+
+#### 累积产物、备份与删除的明确边界
+
+header-only 空会话、创建失败留下的产物、永久锁文件与修复备份都会累积，这是 v1 的已知限制。正常列表隐藏空会话但报告数量；locks 下文件数量不表示活动写者数量，不能作为“僵尸进程”指标。9.6 仅为实际修复创建 recovery 备份，完整健康文件恢复不产生备份。
+
+v1 不提供自动保留期限、删除/归档命令、锁文件垃圾回收或备份自动恢复；这些属于明确非目标。手动清理必须在所有相关写者退出后操作：删除正文不会删除 recovery 原件，应按备份清单中的 sessionId 一并决定保留或删除；稳定锁文件可保留。若确需删除锁文件，必须保证没有持有者及并发打开者，不能在运行中 unlink。损坏正文和备份默认保留，不自动“修复”语义损坏。将来引入删除或归档功能必须设计独占协调、正文与备份处理、目录同步及中途失败恢复，不能仅追加一个 rm；本阶段不预设其实现。
 
 #### 既有代码调整、兼容影响与验收
 
 | 位置 | 现状及限制 | 候选变化 |
 | --- | --- | --- |
-| bootstrap/cli.ts | 只组装模型与只读工具，两种模式都没有会话资源 | 组装存储 adapter 与会话协调对象，区分 REPL 持久化和普通单次模式；保留 help/version/参数错误在文件副作用前结束 |
+| bootstrap/cli.ts | 只组装模型与只读工具，两种模式都没有会话资源 | 组装存储与协调对象，分开列表、恢复和单次模式；列表不加载模型密钥，保留 help/version/参数错误在文件副作用前结束 |
 | bootstrap/repl.ts | turns 从空数组开始，`/clear` 只替换数组，所有 turn 异常后都继续 | 接收恢复的有效历史与会话能力；clear 关闭旧会话、下次输入惰性创建；存储故障终止循环；finally 覆盖会话关闭 |
 | bootstrap/output.ts | displayTurn 兼顾调用 core 与输出，reportError 没有存储分类 | 文字显示与会话协调分工需显式化，增加安全存储错误输出/退出映射，保持 stdout 只输出原有用户内容 |
-| core/runTurnStream.ts 与 contracts | 当前仅完整成功返回，core 不依赖 Node；还没有可等待的保存事实交付 | 沿 9.3–9.4 设计有序交付与等待，接收业务身份，不引入路径/句柄/文件 seq 依赖；具体事件接口后续设计 |
-| 新存储 adapter 与存储配置 | 当前只有模型 RuntimeConfig，没有会话文件管理 | 分离模型凭证配置与存储根/权限/锁策略；文件、UUID/时钟和锁能力在外层组合，便于临时目录测试，不把 API key 写进 header |
-| CLI/REPL 契约与架构文档 | 描述阶段 03 的纯内存行为 | 采用候选方案后，在阶段 04 规格中固定模式范围、cwd、clear、退出码和资源归属，再同步契约、架构与必要 ADR；本轮不改 accepted 契约 |
+| core/runTurnStream.ts 与 contracts | 当前仅完整成功返回，core 不依赖 Node；还没有可等待的保存事实交付 | 按 9.7 的 CoreTurnFact/TurnFactSink 交付并等待；协调方唯一负责 user/turn_end；core 不依赖文件 seq |
+| 新存储 adapter 与存储配置 | 当前只有模型 RuntimeConfig，没有会话文件管理 | 分离存储配置，新增 runtimeProfile 摘要、扫描/备份修复及业务引用映射；UUID/时钟/锁在外层组合，便于临时目录验证，不保存模型密钥 |
+| CLI/REPL 契约与架构文档 | 描述阶段 03 的纯内存行为 | 阶段 04 规格固定模式、列表状态、配置提示、锁/修复错误、clear 和提交边界，再同步契约、架构及必要 ADR；本轮不改 accepted 契约 |
 
 目前没有 yucli 会话文件需要迁移；进程内消息和工具结果的含义沿用 9.2。与阶段 03 相比，REPL 默认持久化、clear 切换会话、存储故障退出是需要公开说明并验证的变化。原有单次模式、模型请求路由与正常取消行为不因存储实现而隐式改变。
 
@@ -871,11 +944,170 @@ header 与 user 不是一个原子事务。崩溃发生在二者之间，可能�
 - 两个独立进程同时打开同一会话，最多一个可写，另一个明确冲突；不同会话互不阻塞；idle 写者仍持锁。强制终止持有者后可重新取得锁，锁文件保留不阻止接管；暂停但未退出的写者不能被超时抢占。
 - 同 cwd 的新进程恢复后，真实适配器发出的请求含有效旧历史和新输入；不同 cwd、父子目录或不同 worktree 拒绝恢复。同一真实目录的符号链接入口遵循规范化规则；不自动重跑旧工具。
 - clear 后新请求不带旧历史，新 sessionId 与文件独立；显式再打开旧会话仍能看到原记录；20-turn 内存窗口不裁剪磁盘原文。
+- 默认列表只含同 cwd，global 列表的其他 cwd 只能预览；空会话计数、排序并列、busy/unknown/changing 与尾部状态独立显示，探测之后发生的竞争仍由正式 openWrite 拒绝。
+- 模型、端点、system 或工具摘要变化时只提示一次并使用当前配置；缺摘要明确未知；新 user 保存新摘要，原历史保持不变，提示不进入模型消息。
+- `--resume` 锁冲突退出 5，REPL 切换冲突保留旧历史并允许重试；锁不可用与 repair_failed 为独立原因，禁止无锁降级；普通 --prompt 不创建文件，与恢复组合返回 2。
 - 在创建、header/user 确认、追加、关闭和锁阶段注入失败，不发起被屏障阻止的外部操作，不继续消费后续 REPL 问题，不误报成功。关闭重入、EOF、活动取消和闲置中断时无句柄/锁泄漏，保存失败与退出码优先级一致。
 
-本轮只验证文档结构、链接和示例，不把上述未来验收写成已通过，也不通过调用真实模型来验证文档变更。
+本轮验证文档及隔离目录中的锁候选；9.5 的锁验证结果单独列明。以上应用级验收仍待实现，不能将依赖探针通过写成 yucli 持久化已实现。
 
 源码依据：[CLI](../../src/bootstrap/cli.ts)、[REPL](../../src/bootstrap/repl.ts)、[输出与退出分类](../../src/bootstrap/output.ts)、[配置读取](../../src/adapters/config/loadConfig.ts)、[提供方请求路由](../../src/adapters/opencode-go/OpenCodeGoClient.ts)、[四层依赖约束](../../tests/architecture.test.ts)、[Pi 会话创建与写入](../../../references/pi/packages/coding-agent/src/core/session-manager.ts)、[DSH 会话句柄](../../../references/dsh/packages/session/session-persistence/src/handle.ts)、[DSH 内核锁](../../../references/dsh/packages/session/session-persistence-jsonl/src/lease.ts)、[Codex 写者锁](../../../references/codex/codex-rs/rollout/src/writer_lock.rs)、[ZCode runtime 接入](../../../references/zcode/apps/zcode-cli/docs/design/v2/session-persistence.md)。
+
+### 9.6 字节扫描、只读恢复与尾部修复
+
+讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选算法，未实现**。9.3 的投影与拒绝粒度继续适用，本节将“可忽略未完成尾行”具体化为可执行的扫描与写入准备步骤。
+
+#### 扫描必须给出字节位置和分类
+
+读取器在打开的普通文件句柄上取得初始大小 S，只读取 `[0,S)`，按字节 0x0A 划分物理行，用严格 UTF-8 解码，不用 JavaScript 字符串 length 推算文件偏移。每个换行结束的行都必须依次通过 JSON、schema 与 9.3 语义校验；不跳过空行或中间坏行。header 无效时直接拒绝，没有可恢复空会话。
+
+扫描结果至少包含 source 的 dev/ino、observedSizeBytes、validEndBytes、lastLfEndBytes、lastSeq、tailKind 和首个诊断位置。validEndBytes 是可解释的有效字节范围的**右开边界**，不是完整成功 turn 的边界；业务投影再按 9.3 选择成功 turn。
+
+| 最后部分 | 只读结果及边界 | 可写准备 |
+| --- | --- | --- |
+| 全部行有效且有末尾 LF | tailKind=none，validEndBytes=S | 不改正文，不创建修复备份 |
+| 无 LF 的最后一行是完整合法记录 | missing_lf，validEndBytes=S，保留该记录并计入 lastSeq | 保留原字节，在偏移 S 补一个 LF，再同步；不能删掉这条记录 |
+| 最后一行无 LF，且确为尚未完成的 JSON/UTF-8 前缀 | incomplete，validEndBytes=P，其中 P 是上一条有效行 LF 后的字节位置；记录残片范围 `[P,S)` | 先保全原件，再 truncate(P)，同步并重验 |
+| 完整 JSON 但 schema/引用/seq/outcome 不合法 | corrupt；整个文件不可恢复执行，即使错误恰在 EOF | 不截断、不补事件；只读报告原因 |
+| 明确非法语法/UTF-8、中间坏行或换行结束的坏行 | corrupt；整个文件拒绝 | 不以尾部策略跳过或拼接历史 |
+
+例如 `{"seq":6,` 可以继续补成合法 JSON 对象，是未完成前缀；`{"seq":6,}` 已有非法语法，不能仅因缺 LF 就忽略。`{"seq":6}` 是完整 JSON，但缺少事件必填字段，属于 schema 损坏。success 缺结果、无 start 的 result 均是语义损坏，不能降为 interrupted。无法分类时采取拒绝，不能猜测。
+
+实现需要一个与严格 UTF-8 解码配合的 JSON 前缀识别器，输出 complete/incomplete/invalid：跟踪对象/数组、键值阶段、字符串转义、Unicode 转义、数字与字面量；只有“存在合法后缀能补成一个 JSON 对象”才算 incomplete。不能匹配不同 Node 版本的 JSON.parse 错误文字，也不能只判断括号数、引号数或最后一个字符。完整值仍交给 JSON.parse 和 schema/语义校验，前缀识别器不替代业务校验。
+
+只读打开不改文件，返回有效前缀及尾部诊断。对活跃写者的列表读取，扫描边界 S 可能正好切在一次追加中；标注 busy/changing 和“仅已观察前缀”，不把这次观察当成可写恢复结果。写恢复取得独占后必须重新读取并分类，旧偏移、mtime 或列表缓存都不能授权截断。
+
+#### 修改前保全原件，修改后确认同步
+
+推荐在需要 truncate 或补 LF 时保留**完整原文件快照**，从而同时保留有效前缀和残片；只保留尾部更省空间，但恢复时依赖前缀仍在，本阶段优先完整原件。普通健康恢复没有备份副作用。
+
+写恢复在持锁状态下依次执行：
+
+1. 以 r+ 打开既有正文，复核路径/句柄身份、权限、cwd、格式和固定范围内全部记录；得到 S、P/validEndBytes、lastSeq 及源 SHA-256。未通过则只释放资源，不修改正文。
+2. 在 `~/.yucli/recovery/<sessionId>/` 下用唯一时间戳和 UUID、wx 创建 `.jsonl.bak` 原件及 `.repair.json` 清单，目录 0700、文件 0600；复制恰好 `[0,S)` 并核对字节数和摘要，不用读取字符串后重新序列化代替字节复制。
+3. 对备份与清单分别 fsync，再同步 recovery 下必要目录项。两者成功之前**绝不修改原件**。备份失败可能留下未完成产物，保留作诊断；没有完整清单及匹配摘要时不能当成可自动还原的备份。
+4. 在修改前再次核对来源身份、大小及摘要仍相符。若被替换或变化，停止并报告，不使用旧边界。该检查依赖所有 yucli 写者遵守同一锁协议，不宣称能隔离不遵守协议的外部编辑器。
+5. incomplete 时对同一正文句柄执行 truncate(P)；missing_lf 时只在偏移 S 写入一个 LF。立即对正文 fsync，再读取并重验实际文件为连续、换行完整的有效日志；不更新原有 JSON 内容或补写旧 turn_end。
+6. 上述步骤全部确认后，才把句柄标为可写，并允许以 `lastSeq + 1` 追加新的 user。只读扫描里的有效终止事实不因修复而改变；成功 turn 才进入模型，旧未完成 turn 仍是 interrupted。
+
+清单最少包含 version、sessionId、sourceBasename、createdAt、action、originalSizeBytes、validEndBytes、lastSeq 和 sourceSha256。以下字节数来自本报告 9.3 的崩溃前缀（最后 seq=5，保留末尾 LF），再追加 29 个 ASCII 字节 `{"seq":6,"type":"tool_result"`；不含运行配置摘要的教学例子仍按原字节计数：
+
+```json
+{"version":1,"sessionId":"session-demo","sourceBasename":"example.jsonl","createdAt":"2026-10-26T02:00:00.000Z","action":"truncate_tail","originalSizeBytes":1158,"validEndBytes":1129,"lastSeq":5,"sourceSha256":"5b2bd4ab47d68aae3868d921ba36112c45b74acaca03036303e45c8b24f08c07"}
+```
+
+这个例子只读保留 `[0,1129)`，备份完整 `[0,1158)`，写恢复截到 1129 并 fsync，新 user 的 seq 为 6。UTF-8 中文已按字节计入，不能用可见字符数代替。若只是合法最后记录少 LF，action 为 append_lf、validEndBytes=S，修复后大小是 S+1，lastSeq 不变。
+
+修复不是整文件原子事务：崩溃可能发生在备份完成前、truncate 后或正文 sync 后。下次仍检查实际文件，不能仅凭清单就自动回滚或重放；完整合法原件不再重复备份，已有备份永久保留直到离线清理。备份自动恢复、语义损坏修复、档案轮换和备份保留期限均不在 v1 范围。
+
+#### 失败时能否继续、何时释放锁
+
+读取或备份失败时不执行截断；truncate/补 LF/sync/重验失败时视为正文结果不确定，抛 repair_failed，**不写新 user、不发模型请求、不继续该 REPL**。先禁止新操作，等待已发出的文件操作全部结束，再关闭正文及备份句柄，最后释放锁并退出 5；可以释放锁，不等于宣称修复已成功。若 I/O 仍未决，等待超时也不能提前释放锁，需按明确的进程收尾策略结束，让进程真正退出后由内核释放。
+
+下次打开按实际字节重新校验：可能是原残片仍在、已经截好但上次未收到确认，或仍不能恢复；不盲目重试同一写入。新建路径的目录确认仍按 9.4；原件仅原位 truncate/补 LF 时，正文 fsync 是必要步骤，不虚构需要替换正文目录项的操作。
+
+对应验收要覆盖 UTF-8 多字节截断、字符串/转义/数字的未完成与非法前缀、完整非法尾事件、缺 LF 的合法记录、只读不变、备份失败零修改、各修复步骤失败及二次打开；边界和 SHA 使用实际字节断言，不只测试最终 Message[]。
+
+### 9.7 core/storage 的有序业务接口与历史提交
+
+讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选接口，未修改 contracts 或源码**。本节将 9.3–9.4 的等待和关联规则具体化，仍由阶段规格评审后再实现。
+
+#### 业务事实的形状和唯一所有者
+
+推荐 coordinator 创建 user、选择唯一 turn_end；core 只交付已经校验的 assistant 和工具事实。这样业务异常和存储异常的收尾不会各自写一条结束事件。接口示意使用现有 TextMessage、AssistantMessage、ToolResult；SafeError 对应 9.3 的安全错误对象：
+
+```ts
+type SafeError = {
+  category: "model" | "tool" | "protocol" | "limit" | "cancellation" | "timeout" | "internal";
+  code: string;
+  message: string;
+  httpStatus?: number;
+};
+
+type FailureEnd = { outcome: "failed" | "cancelled" | "timeout"; error: SafeError };
+type TurnEnd = { outcome: "success"; error?: never } | FailureEnd;
+
+// 仅在本 turn 内关联已校验响应；不等于文件 seq 或模型给出的 toolCallId。
+type CallRef = { assistantId: string; toolCallId: string; name: string };
+
+type CoreTurnFact = { turnId: string } & (
+  | { type: "assistant"; assistantId: string; message: AssistantMessage }
+  | { type: "tool_start"; call: CallRef }
+  | { type: "tool_result"; call: CallRef; result: ToolResult }
+  | { type: "tool_end"; call: CallRef; end: FailureEnd }
+);
+
+type TurnFact = CoreTurnFact | ({ turnId: string } & (
+  | { type: "user"; message: TextMessage & { role: "user" } }
+  | { type: "turn_end"; end: TurnEnd }
+));
+
+// coordinator 为持久化运行注入；解析、顺序与所有权校验失败都应拒绝 Promise。
+interface TurnFactSink {
+  record(fact: CoreTurnFact): Promise<void>;
+}
+
+// runTurnStream 增加可选执行上下文参数；普通 --prompt 不传此对象。
+interface TurnExecutionContext {
+  turnId: string;
+  facts: TurnFactSink;
+}
+
+// adapter 实现；timestamp、seq、runtimeProfile 与引用转换在这里完成。
+interface SessionWriter {
+  appendDurable(fact: TurnFact): Promise<{ confirmedSeq: number }>;
+  close(): Promise<void>;
+}
+```
+
+type 是 TypeScript 判别联合，运行时 JSON 仍需校验。core 每次交付前已完成流收尾、整批参数预检与结果结构检查；adapter 校验并快照传入数据，避免等待期间被修改。user 的 runtimeProfile 由协调方在准备 SessionWriter 时注入当前配置上下文，adapter 只负责放入 envelope，不自行读取模型配置；timestamp 由注入时钟在创建记录时取值。接口不携带原始 Error、SSE delta、文件句柄或 API key。
+
+本节的 callback 是有序、可等待的**业务事实边界**，不是任意监听器：同一 turn 不并发 record，不允许 fire-and-forget；Promise 拒绝必须停止后续副作用，保存与普通展示监听器不能混为一个可忽略错误的事件总线。
+
+#### assistantId 怎样变成 callMessageSeq
+
+core 对每个有效 assistant 响应生成 turn 内递增的 `a1`、`a2` 等临时 assistantId，包括最终无调用响应。它只区分业务响应，不推测文件位置；相同 ID 可以出现在另一 turn。磁盘仍只保存 9.1–9.3 的字段，不新增 assistantId。
+
+adapter 持有 `(turnId, assistantId) → 已确认 assistant seq` 映射。保存 assistant 时分配 seq，完整写入并同步成功后才登记映射；tool_start/result/end 用同 turn 的 CallRef 查询，再验证该响应中的 ID、name 和结果字段一致，转换成 callMessageSeq。未知引用或重复 assistantId 是契约错误，不能猜测“最近一个 assistant”。
+
+| 业务事实 | 磁盘转换 |
+| --- | --- |
+| turn-X 的 a1，seq=2，含 call-1 | 登记 `(turn-X,a1) → 2` |
+| a1/call-1 的 start、result，seq=3/4 | payload.callMessageSeq=2 |
+| 同 turn 的 a2，seq=5，再次含 call-1 | 独立登记 `(turn-X,a2) → 5` |
+| a2/call-1 的 start、result，seq=6/7 | payload.callMessageSeq=5，不会与 a1 的结果串配 |
+
+只允许先保存调用消息再保存 start，正常结果仍只保存一份。已确认 turn_end 后释放该 turn 临时映射；打开旧文件时依据磁盘引用校验和投影，不需要重建旧的 a1/a2，因为不会继续旧执行。sync 失败时不登记本次映射，writer 进入故障状态；文件里可能已存在完整记录，后续只能重新打开校验，不能在原 writer 上重试相同 seq。
+
+#### await、错误传播与 REPL 提交
+
+持久化路径的调用顺序为：
+
+```text
+coordinator: await writer.appendDurable(user)
+  → core: await sink.record(assistant)
+  → core: await sink.record(tool_start)，再检查取消，进入注册表
+  → core: await sink.record(tool_result 或 tool_end)
+  → 正常工具结果齐全才继续模型；最终 assistant 确认后 core 返回临时结果
+  → coordinator: 固定唯一 outcome，await writer.appendDurable(turn_end)
+  → 仅 success 的确认成功后，返回“可提交历史”的结果给 REPL
+```
+
+sink 的桥接实现是 `async record(fact) { await writer.appendDurable(fact); }`，故 confirmedSeq 不进入 core。appendDurable 正常返回表示该记录及之前前缀完成 9.4 确认；排队成功或 write 回调不满足接口。等待返回后、继续外部操作前检查取消，已经取得的完整 ToolResult 则先保存，避免把已知结果丢掉。
+
+普通模型/工具错误由 core 保留已交付事实后向上抛；协调方映射 failed/cancelled/timeout 并保存唯一 turn_end，再报告原业务原因。取消在终止选择前参与 outcome 决定，选择后不追加第二个 turn_end。终止写入使用独立收尾上下文，不复用已取消 signal。
+
+PersistenceError 必须原样穿过 core 和注册表，不能被包装成 protocol_error、普通 tool_result(ok:false) 或取消。writer 对非法本地引用或顺序等契约违规也以 PersistenceError(contract_violation) 拒绝，写入前校验失败不追加非法记录，但当前执行仍须停止；这与模型输入的协议错误不同。保存 await 应放在工具 execute 的业务异常 catch 之外，避免记录保存失败又触发 tool_end 的递归保存。协调方发现 PersistenceError 或 writer 已故障时不再尝试向该 writer 写 turn_end，只清理并以 5 退出；不能把故障本身“保证写回”故障文件。
+
+core 的 StreamTurnResult 仍是**临时业务成功结果**，不是历史提交凭证。REPL 只消费协调方在 turn_end(success) 确认后交付的结果，再将完整 appendedMessages 作为一组加入最近 20 个成功 turn；返回值里的 user/tool 消息不再次落盘。失败、取消或终止保存失败时不提交。恢复与实时运行使用同一 ToolResult→ToolMessage 转换，磁盘事实和显示/模型视图保持分离。
+
+普通 --prompt 路径不注入持久化 sink，继续由 core 的临时成功结果完成单次输出；它没有“已保存”凭证，也不能因不持久化而绕过原有工具校验/取消边界。该显式模式选择与存储失败后的降级不同。
+
+对应实现需修改 runTurnStream、executeToolBatch/RegisteredTools 的逐项交付与取消检查，新增 coordinator、contracts 接口及 adapter 转换；保留现有返回视图以减少兼容变化，但不得继续依靠整批成功数组作为唯一事实来源。验收应通过延迟/拒绝每个 appendDurable 检查副作用屏障、两个批次复用 ID、非法本地引用、普通异常与存储异常分类、取消竞态，以及 turn_end 确认之前 REPL 历史不变。
+
+参考依据仍是 9.2 的现有业务类型、9.3–9.4 的状态与确认约束，以及 DSH 对 append 接受和 flush 耐久边界的区分；不照搬其可后台缓存的 append 语义，本候选直接将业务写接口命名为 appendDurable，减少误用。
+
+本轮已在临时文件中提取本节类型声明，引用当前 message/tool 类型并用项目 TypeScript 的 strict、noEmit 校验通过；这只验证候选声明能与现有类型组合，不代表运行时顺序、保存或错误传播已经实现。JSONL 示例、9.6 的字节数/摘要、本地链接与 git diff 检查均已复核，未重跑业务测试或真实模型请求。
 
 ## 10. 本阶段建议的评审问题
 
