@@ -337,7 +337,125 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 
 本轮不预设“文件里出现的每条 message 都进入下次模型请求”。失败、中断或消息组不完整时怎样投影，需在后续讨论中明确。
 
-本轮待讨论：是否采用“会话头 + 带类型的记录”这一外层结构，是否使用 `type: "message"` 包装现有消息，以及上述字段是否都有必要。下一步再用一个 `read_file` 往返示例，讨论工具调用与工具结果怎样落在具体 JSONL 行中。`eventId`、消息 ID、`parentId` 等附加字段需结合各自用途逐项评估。
+本轮待讨论：是否采用“会话头 + 带类型的记录”这一外层结构，是否使用 `type: "message"` 包装现有消息，以及上述字段是否都有必要。工具往返的具体 JSONL 候选格式见 9.2；外层字段和工具记录均仍在讨论中。`eventId`、消息 ID、`parentId` 等附加字段需结合各自用途逐项评估。
+
+### 9.2 数据结构讨论（二）：工具调用与结果的持久化
+
+讨论日期：2026-10-26（Asia/Shanghai）。状态：**候选设计，尚未确认**。
+
+本节对照现有类型和实际转换代码，讨论工具往返怎样落在 9.1 的 JSONL 结构中。重点是保存完整调用和已交付的执行结果；取消、崩溃、模型/保存错误的事件字段与落盘时机继续留待后续讨论。
+
+#### 现有四个类型分别表示什么
+
+`Message` 是 `TextMessage | AssistantMessage | ToolMessage` 的联合，用于模型历史；它本身没有统一的运行状态字段。`ToolCall` 是 assistant 提出的调用数据；`ToolResult` 是本地注册表交付的执行结果；`ToolMessage` 是根据该结果生成的模型历史消息。
+
+不能按“在运行时创建”就把字段归为无需保存。这里要区分两类状态：已经发生的结果事实，例如 `ok`；正在执行时使用的临时控制状态，例如 AbortController、文件句柄或未完成的流式参数缓冲。
+
+| 现有类型与字段 | 含义及来源 | 持久化建议 |
+| --- | --- | --- |
+| `TextMessage.role` / `content` | user/system 文本及角色；当前 CLI 不自动创建 system 消息 | 保存实际存在的消息，保留文本原文 |
+| `AssistantMessage.role` / `content?` | 模型角色及可选文字；有工具调用时也可以同时有文字 | 保存；保留可选语义和原文，不把含调用的文本误当最终回答 |
+| `AssistantMessage.toolCalls?` | 模型提出的完整有序调用列表 | 随该条 assistant 消息保存，保持顺序 |
+| `ToolCall.id` | 模型给出的调用 ID；同一批内非空且唯一 | 保存原值，结果配对时沿用 |
+| `ToolCall.name` | 请求的工具名称 | 保存原值；非空但未注册的名称也能产生可恢复工具错误 |
+| `ToolCall.argumentsJson` | 非流式返回或流式拼装完成后的参数 JSON 文本 | 保存字符串原文；JSONL 序列化会转义其中的引号，不额外保存一份解析后对象 |
+| `ToolResult.toolCallId` | 对应 `ToolCall.id` | 保存原值 |
+| `ToolResult.name` | 注册表从调用补入的工具名 | 保存；用于本地诊断和配对校验，当前 HTTP adapter 不发送该字段 |
+| `ToolResult.ok` | 工具成功或可恢复工具错误的已交付结果 | **保存**；这是执行结果事实，不能因模型消息没有该字段而丢弃 |
+| `ToolResult.content` | 文件原文或安全错误摘要；空文件可以成功返回空字符串 | 保存原文；恢复历史使用保存的内容，不重新读文件 |
+| `ToolMessage.role` | 固定为 `tool` 的模型消息标签 | 恢复时根据 `tool_result` 生成 |
+| `ToolMessage.toolCallId` / `content` | 从 ToolResult 复制的调用 ID 和模型可见文本 | 从已保存结果派生，避免再保存一行重复结果消息 |
+| `ToolMessage.name?` | 可选的本地工具名；当前 core 创建消息时填入 | 从已保存的 `ToolResult.name` 派生；当前 HTTP adapter 省略它 |
+
+上述字段主要都是消息/结果数据；四个类型中没有 Promise、文件句柄、定时器或取消控制器。`readonly` 和可选字段标记属于 TypeScript 类型约束，不是额外 JSON 字段。流式 assembler 的 index、Map、参数片段和 ended 标记等属于当前响应的拼装状态；本轮候选格式保存拼装后的完整调用。
+
+#### `ToolResult.ok` 为什么需要单独保留
+
+当前实际流程为：
+
+```text
+Tool.execute 返回 {ok, content}
+  → RegisteredTools 补入 toolCallId、name，得到 ToolResult
+  → runTurnStream 将完整 ToolResult 加入 toolResults
+  → 同时构造 ToolMessage，加入 appendedMessages
+  → HTTP adapter 把 ToolMessage 转成 role、tool_call_id、content
+```
+
+`ok` 保留在 `toolResults` 中，没有进入 `appendedMessages` 的 tool 消息。它的缺失表达了模型消息与本地执行结果的职责不同；当前请求协议靠 tool 消息的 content 向模型表达文件错误。
+
+保存时应保留 `ok`，供恢复后的展示和诊断使用；构造模型消息时继续遵循现有 ToolMessage 契约。不能通过 `content` 是否为空或是否以 `[file_not_found]` 等文字开头来反推 `ok`：空文件是成功，真实文件内容也可能恰好包含错误提示文字。
+
+`ok: false` 只表示注册表正常交付了一个可恢复工具错误，**不等于整个 turn 失败，也不表示取消或崩溃**。取消、参数/协议错误和不可恢复内部异常在当前实现中走抛异常路径，没有对应的正常 ToolResult；不能据此伪造一条 `ok: false` 的“已完成结果”。
+
+#### 建议的记录划分
+
+| 内容 | JSONL 记录 | 设计理由 |
+| --- | --- | --- |
+| user/system 文本、assistant 文本及调用列表 | `type: "message"`，payload 保存对应消息 | 工具请求仍属于 assistant 的一次响应；同时出现的文字和多个调用保持在同一条消息中 |
+| 已交付的工具结果 | `type: "tool_result"`，payload 保存完整 ToolResult 与调用消息引用 | 保留 ok、名称和内容，恢复时可生成 ToolMessage |
+| turn 结束 | 沿用 9.1 的 `type: "turn_end"` | 评价整次提问的结果；完整 outcome 和错误字段后续讨论 |
+
+本轮建议不另建重复的 `tool_call` 记录；完整调用已在 `assistant.toolCalls` 中。同一结果只写一条 `tool_result`，不再写一条 `type: "message"` / `role: "tool"` 复制内容，避免恢复时出现双份工具结果。
+
+现有校验只保证**同一 assistant 响应批次内**调用 ID 唯一。不同响应可能重复使用同一 ID，因此建议在工具结果 payload 增加存储层字段 `callMessageSeq`，指向提出调用的 assistant 记录的 `seq`。结果的本地配对键为 `(sessionId, turnId, callMessageSeq, toolCallId)`，不能只用全会话的 `toolCallId → result` 字典。
+
+`callMessageSeq` 不属于现有 ToolResult 或模型请求格式。它在创建持久化记录时补入，恢复为 ToolMessage 时省略；同一批多个结果共享 callMessageSeq，各自使用不同的 toolCallId。
+
+#### 一次完整工具往返的 JSONL 候选示例
+
+以下是完整文件示例。时间只演示记录字段，不代表已经决定 append/fsync 的具体时机。
+
+```jsonl
+{"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
+{"seq":1,"type":"message","timestamp":"2026-10-26T02:00:01.000Z","turnId":"turn-1","payload":{"role":"user","content":"总结 README.md"}}
+{"seq":2,"type":"message","timestamp":"2026-10-26T02:00:02.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"我先读取文件。","toolCalls":[{"id":"call-1","name":"read_file","argumentsJson":"{\"path\":\"README.md\"}"}]}}
+{"seq":3,"type":"tool_result","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file","ok":true,"content":"# yucli\n一个终端 Agent 项目。\n"}}
+{"seq":4,"type":"message","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"README 介绍了一个终端 Agent 项目。"}}
+{"seq":5,"type":"turn_end","timestamp":"2026-10-26T02:00:05.000Z","turnId":"turn-1","payload":{"outcome":"success"}}
+```
+
+这里 `seq: 2` 保存模型的调用，`seq: 3` 保存本地执行结果；`callMessageSeq: 2` 和 `toolCallId: "call-1"` 把结果定位到该 assistant 消息中的具体调用。`seq: 4` 是最终回答，`seq: 5` 才表示整个 turn 成功结束。
+
+`argumentsJson` 在磁盘上看起来包含转义引号，是因为外层 JSON 保存了一个 JSON 字符串。读取 JSONL 后，该字段仍是 `{"path":"README.md"}` 的字符串。恢复器可解析它进行结构校验，再保留原字符串重建 assistant 调用；这一步不触发工具执行，也不把字符串直接当对象访问。
+
+如果文件不存在，只需将上述文件中 `seq: 3` 和 `seq: 4` 的事件替换为：
+
+```jsonl
+{"seq":3,"type":"tool_result","timestamp":"2026-10-26T02:00:03.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-1","name":"read_file","ok":false,"content":"[file_not_found] 文件不存在。"}}
+{"seq":4,"type":"message","timestamp":"2026-10-26T02:00:04.000Z","turnId":"turn-1","payload":{"role":"assistant","content":"README.md 不存在，暂时无法根据文件内容总结。"}}
+```
+
+这是同一示例文件的两行替换片段，header 和其他事件不变。工具结果是 `ok: false`，而模型随后正常解释了原因，因此这个示例仍以 `turn_end` / `outcome: "success"` 结束。整次 turn 执行失败时如何记录，继续在下一轮讨论。
+
+#### 如何恢复为现有 ToolMessage
+
+对于具备恢复资格的消息组，结果记录到模型消息的转换可表示为：
+
+```ts
+// 讨论用映射示意。外部 JSON 必须先完成结构和引用校验。
+const result = record.payload;
+
+const message: ToolMessage = {
+  role: "tool",
+  toolCallId: result.toolCallId,
+  name: result.name,
+  content: result.content,
+};
+```
+
+恢复器另行保留 `ok` 和 `callMessageSeq` 用于本地结果展示、诊断和配对。随后当前 HTTP adapter 再转换为 `{role:"tool", tool_call_id, content}`；不把 ok 或 callMessageSeq 加进模型请求，也不因恢复工具消息自动再次执行工具。
+
+一个完整工具往返的结构检查应能确认：引用的是同一 turn 中更早的 assistant 记录；其中存在匹配的 ToolCall.id；工具名一致；每项调用有且仅有一个对应结果；结果按消息和工具执行顺序出现。缺失、重复或中断时的事件字段和恢复处置留待后续设计。
+
+#### 当前代码能提供哪些保存输入
+
+`runTurnStream` 完整成功后同时返回 `appendedMessages` 和 `toolResults`。前者给出 user/assistant/tool 的消息顺序，后者保留含 ok 的执行结果；只保存前者会丢失 ok，只保存后者又缺少用户消息和 assistant 调用。
+
+未来存储转换可以顺序遍历 appendedMessages，遇到 tool 消息时消费下一项 toolResults，检查 ID、工具名和 content 一致，再生成一条 tool_result 并补入对应 assistant 记录的 seq。按批次和顺序配对，不依赖调用 ID 在整个 turn 中唯一。持久化 schema 仍应有独立运行时校验和 formatVersion；代码类型后续变化不能静默改变已写文件的解释。
+
+当前异常出口不交付部分 `StreamTurnResult`，`executeToolBatch` 也不返回半批结果。因此本节尚不能承诺崩溃前每个工具动作都已记录；如果以后需要中途保存，需要另外设计 core 的事件交付与保存时机。本次仅修改调研记录，不改变现有类型或代码行为。
+
+源码依据：[消息类型](../../src/contracts/message.ts)、[工具类型](../../src/contracts/tool.ts)、[结果生成与异常](../../src/core/toolRegistry.ts)、[流式 turn 的两份结果视图](../../src/core/runTurnStream.ts)、[HTTP 消息映射](../../src/adapters/opencode-go/OpenCodeGoClient.ts)。
 
 ## 10. 本阶段建议的评审问题
 
