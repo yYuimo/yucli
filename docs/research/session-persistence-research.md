@@ -451,9 +451,27 @@ const message: ToolMessage = {
 
 `runTurnStream` 完整成功后同时返回 `appendedMessages` 和 `toolResults`。前者给出 user/assistant/tool 的消息顺序，后者保留含 ok 的执行结果；只保存前者会丢失 ok，只保存后者又缺少用户消息和 assistant 调用。
 
-未来存储转换可以顺序遍历 appendedMessages，遇到 tool 消息时消费下一项 toolResults，检查 ID、工具名和 content 一致，再生成一条 tool_result 并补入对应 assistant 记录的 seq。按批次和顺序配对，不依赖调用 ID 在整个 turn 中唯一。持久化 schema 仍应有独立运行时校验和 formatVersion；代码类型后续变化不能静默改变已写文件的解释。
+最小接入路径可以顺序遍历 appendedMessages，遇到 tool 消息时消费下一项 toolResults，检查 ID、工具名和 content 一致，再生成一条 tool_result 并补入对应 assistant 记录的 seq。按批次和顺序配对，不依赖调用 ID 在整个 turn 中唯一。这说明现有成功返回值具备保存所需的数据，不表示阶段 04 必须继续依靠两份数组配对；是否重构交付方式见下文。持久化 schema 仍应有独立运行时校验和 formatVersion；代码类型后续变化不能静默改变已写文件的解释。
 
 当前异常出口不交付部分 `StreamTurnResult`，`executeToolBatch` 也不返回半批结果。因此本节尚不能承诺崩溃前每个工具动作都已记录；如果以后需要中途保存，需要另外设计 core 的事件交付与保存时机。本次仅修改调研记录，不改变现有类型或代码行为。
+
+#### 既有代码调整评估
+
+以下是基于当前 9.2 候选需求的评估，区分推荐重构与新增需求触发的必要改动。两份结果视图本身不构成运行错误；如果只保存完整成功的 turn，现有返回值加存储转换即可实现本节示例。
+
+| 位置 | 现状与问题 | 候选调整及必要性 |
+| --- | --- | --- |
+| `ToolCall`、`ToolResult`、`ToolMessage` | 完整调用和结果字段已具备，模型消息不含 ok | 目前可保留其职责划分；保存 ToolResult.ok，生成模型消息时省略，无需为持久化给 ToolMessage 增加 ok |
+| `core/agentLoop.ts`、`core/runTurnStream.ts` 中的结果转消息逻辑 | 两处分别把 ToolResult 转成 ToolMessage，恢复逻辑也需要同一映射 | 推荐提取 core 的纯转换函数，供运行与恢复共用，集中保持 ID、名称和 content；属于可维护性重构，不改变对外行为 |
+| `StreamTurnResult` 与 `runTurnStream` 的交付方式 | appendedMessages 和 toolResults 是两份视图，保存时需重新关联；只消费消息视图会丢 ok | 推荐评估用有序的完整业务事实作为明确来源，再派生消息历史和诊断结果，减少存储层重新配对；现有数组也可作为派生视图保留。不是让 9.2 成立的硬性前提，具体接口待设计 |
+| `executeToolBatch`、`runTurnStream` 的中途交付 | 批次和 turn 失败时不交付已有结果，外层无法保存已完成的中间工具事实 | 若后续要求保存中断前的调用/结果，则必须调整交付逻辑，例如提供结构化业务事件；保留整批预检、顺序执行和取消检查，不能为记录结果而执行原本不应执行的工具 |
+| `callMessageSeq` 与调用身份 | 现有工具 ID 只保证批次内唯一，文件引用属于新的存储数据 | 当前候选方案可由持久化记录创建方补入引用，无需改写模型给出的 ID；如果后续设计引入稳定的内部调用身份，允许替换本候选字段并同步示例与恢复校验 |
+
+若引入结构化业务事件，事件应携带完整 ToolResult 等业务事实，由外层协调保存；core 不直接读取或写入 JSONL，也不依赖文件行号或具体存储实现。事件交付后的等待、保存失败传播和取消顺序需要在后续保存边界设计中明确，不能只增加一个回调就宣称可靠落盘。
+
+模型上下文的提交与执行事实的保存应分别定义：未来即使记录了某项中间工具结果，仍可以保持失败 turn 不提交半截模型历史的行为。该方向是推荐评估的重构方案，不预先确定失败 turn 的最终恢复策略。
+
+对应验证应覆盖：原有 ok:true/false、空文件和未知工具结果的转换保持一致；文件恢复生成的 ToolMessage 不包含 ok 或存储引用；多批次复用调用 ID 时配对正确。若采用中途事件交付，还需验证“第一项工具完成、第二项取消”和“工具完成、后续模型失败”的事实交付与历史提交边界。形成阶段规格后再把确认的重构与这些验证要求纳入任务。
 
 源码依据：[消息类型](../../src/contracts/message.ts)、[工具类型](../../src/contracts/tool.ts)、[结果生成与异常](../../src/core/toolRegistry.ts)、[流式 turn 的两份结果视图](../../src/core/runTurnStream.ts)、[HTTP 消息映射](../../src/adapters/opencode-go/OpenCodeGoClient.ts)。
 
