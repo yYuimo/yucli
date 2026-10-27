@@ -18,6 +18,8 @@
 
 范围收敛：2026-10-27（Asia/Shanghai）。将 runtimeProfile 简化为 provider/model 并贯通 user TurnFact；明确分派前取消、尾部/列表状态映射及 v1 已验证平台范围，9.8 汇总五项推荐决策。
 
+示例校准：2026-10-27（Asia/Shanghai）。区分注册表分派前后的取消示例；补明终止保存等待、列表扫描成本、单条记录的资源限制、备份空间/隐私边界，以及必须在规格中落实的运行时测试。
+
 本报告只用于技术选型评审。本次没有修改 `src/`、没有创建阶段规格、接口契约或 ADR，也没有开始阶段 04 实现。
 
 ## 1. 调研范围和资料状态
@@ -580,7 +582,9 @@ success 的 turn_end 不带 error；failed/cancelled/timeout 的 turn_end 与异
 
 收到取消后仍需要尝试记录终止原因；保存收尾不能直接复用已经 aborted 的模型/工具 signal，否则可能永远写不出终止事件。收尾等待应有边界，具体关闭与存储超时策略留到落盘可靠性设计。工具和服务端操作是否真正停止仍受各自能力限制。
 
-#### 完整示例：第一项工具完成，第二项被取消
+#### 完整示例：第一项工具完成，第二项进入注册表后取消
+
+本例明确假定：call-b 的 tool_start 已确认，进程已调用注册表，并在尚未交付完整 ToolResult 时观察到用户取消，因此使用 user_interrupt。它不演示分派前取消，也不凭此断言具体工具的 execute 没有发生。
 
 ```jsonl
 {"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
@@ -593,7 +597,27 @@ success 的 turn_end 不带 error；failed/cancelled/timeout 的 turn_end 与异
 {"seq":7,"type":"turn_end","timestamp":"2026-10-26T02:00:07.000Z","turnId":"turn-1","payload":{"outcome":"cancelled","error":{"category":"cancellation","code":"user_interrupt","message":"用户取消了本次执行。"}}}
 ```
 
-这里 call-a 的成功结果仍然保存；call-b 的分派被取消，没有把取消包装成 ok:false。没有最终 assistant 回答，整个 turn 为 cancelled，以上记录供恢复展示与诊断，整组不进入后续模型上下文。
+这里 call-a 的成功结果仍然保存；call-b 已进入注册表后被取消，保留实际用户取消原因 user_interrupt，没有把取消包装成 ok:false。没有最终 assistant 回答，整个 turn 为 cancelled，以上记录供恢复展示与诊断，整组不进入后续模型上下文。
+
+#### 对照片段：分派前取消与进入注册表后取消
+
+下面两组是上述完整文件 seq=6/7 的**互斥替换**，header 和 seq=1–5 均不变，不能把两组同时追加到一个文件。
+
+A：tool_start 保存后再次检查发现取消，未调用注册表；先确认 tool_end，再由 coordinator 确认 turn_end：
+
+```jsonl
+{"seq":6,"type":"tool_end","timestamp":"2026-10-26T02:00:06.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-b","name":"read_file","outcome":"cancelled","error":{"category":"cancellation","code":"cancelled_before_dispatch","message":"进入注册表前观察到用户取消，未分派该工具。"}}}
+{"seq":7,"type":"turn_end","timestamp":"2026-10-26T02:00:07.000Z","turnId":"turn-1","payload":{"outcome":"cancelled","error":{"category":"cancellation","code":"cancelled_before_dispatch","message":"进入注册表前观察到用户取消，未分派该工具。"}}}
+```
+
+B：已经进入注册表，尚未交付正常结果时观察到用户取消；保留 user_interrupt，与完整示例一致：
+
+```jsonl
+{"seq":6,"type":"tool_end","timestamp":"2026-10-26T02:00:06.000Z","turnId":"turn-1","payload":{"callMessageSeq":2,"toolCallId":"call-b","name":"read_file","outcome":"cancelled","error":{"category":"cancellation","code":"user_interrupt","message":"用户取消了本次执行。"}}}
+{"seq":7,"type":"turn_end","timestamp":"2026-10-26T02:00:07.000Z","turnId":"turn-1","payload":{"outcome":"cancelled","error":{"category":"cancellation","code":"user_interrupt","message":"用户取消了本次执行。"}}}
+```
+
+两者都记录已知的取消原因，只有 A 明确证明没有进入注册表。若文件实际只到 seq=5，恢复仍将 call-b 标为 unknown；不能凭缺少结果反推出 cancelled_before_dispatch。若取消前已交付完整 ToolResult，则保留该结果，只用 turn_end 表达后续整轮取消，不再给同一调用追加 tool_end。
 
 如果同一进程在写完第二项的 tool_start 后崩溃，文件可能仅剩以下有效前缀：
 
@@ -846,6 +870,8 @@ logState 按 9.6 的明确映射生成：corrupt/unsupported 优先，其次是 
 
 排序使用有效 lastActivityAt 降序，再按 createdAt 降序、sessionId 字典序打破并列；时间戳只影响列表展示，日志解释仍严格依 seq。默认隐藏 header-only 空会话，报告“已隐藏 N 个空会话”；全局诊断列表可见其 empty 状态。mtime 不决定排序，损坏/不支持条目单列，不按猜测时间插入正常列表。
 
+v1 列表没有持久化索引、分页或后台缓存：每次 --sessions 枚举候选文件并读 header，对命中 cwd 的日志按固定字节范围扫描以获得状态和统计；--all 扫描范围更大。成本随文件数量及实际读取字节数增长，可能被旧长会话拖慢。扫描日志与备份均应分块处理，不为列表一次性载入所有正文；排序后的条目元数据仍需占用内存。索引和分页明确延期，阶段规格应记录该成本，不承诺大量会话下的固定延迟。
+
 候选入口固定为：`yucli` 新 REPL、`yucli --resume <sessionId>` 恢复 REPL、`yucli --sessions [--all]` 只读列举，以及闲置 REPL 的 `/resume <sessionId>` 切换。列表无需模型密钥；恢复仍需当前模型配置。`--prompt` 与 `--resume`/`--sessions` 不可组合，返回用法错误 2；不因恢复失败而悄悄新建会话。REPL 里选择当前会话是无操作，切换其他会话时先准备候选，成功后才关闭旧会话并替换历史。
 
 #### 运行配置摘要与差异提示
@@ -980,6 +1006,8 @@ v1 不提供自动保留期限、删除/归档命令、锁文件垃圾回收或�
 
 读取器在打开的普通文件句柄上取得初始大小 S，只读取 `[0,S)`，按字节 0x0A 划分物理行，用严格 UTF-8 解码，不用 JavaScript 字符串 length 推算文件偏移。每个换行结束的行都必须依次通过 JSON、schema 与 9.3 语义校验；不跳过空行或中间坏行。header 无效时直接拒绝，没有可恢复空会话。
 
+资源边界的推荐选择是：**v1 暂不新增单条记录字节硬上限，也不提供对任意不可信日志的完整 DoS 防护**，以本机受管日志为输入假设。按块扫描不代表单行内存有界：完整 JSON 行、残片或前缀识别状态仍可能很大；read_file 的 64 KiB 上限也不约束 user/assistant 记录。当前生成与写入链路没有统一消息大小上限，本轮不单独给恢复端拍阈值，避免自己写出的文件无法恢复。阶段规格必须保留这一已知限制；将来若引入上限，写入前和读取时必须使用同一 UTF-8 字节口径并增加边界测试，超限不能伪装成坏尾行而截断。
+
 扫描结果至少包含 source 的 dev/ino、observedSizeBytes、validEndBytes、lastLfEndBytes、lastSeq、tailKind 和首个诊断位置。validEndBytes 是可解释的有效字节范围的**右开边界**，不是完整成功 turn 的边界；业务投影再按 9.3 选择成功 turn。
 
 | 最后部分 | 只读结果及边界 | 可写准备 |
@@ -1015,6 +1043,8 @@ v1 不提供自动保留期限、删除/归档命令、锁文件垃圾回收或�
 #### 修改前保全原件，修改后确认同步
 
 推荐在需要 truncate 或补 LF 时保留**完整原文件快照**，从而同时保留有效前缀和残片；只保留尾部更省空间，但恢复时依赖前缀仍在，本阶段优先完整原件。普通健康恢复没有备份副作用。
+
+完整原件备份需要额外约一个原文件大小的磁盘空间，并原样包含有效消息与残片中的敏感内容。v1 以 0700/0600 限制本机访问，**不加密、不自动清理备份**；流式复制只降低复制时的内存需求，不减少磁盘占用。空间不足或备份确认失败时停止修复，不截断原件，保留已知失败报告及可能的未完成备份。
 
 写恢复在持锁状态下依次执行：
 
@@ -1132,6 +1162,8 @@ coordinator: await writer.appendDurable(user fact，外层含 runtimeProfile)
   → 仅 success 的确认成功后，返回“可提交历史”的结果给 REPL
 ```
 
+9.7 的分派前取消分支也必须先 `await sink.record(tool_end(cancelled))`；这里 code 为 cancelled_before_dispatch。仅在该 Promise 确认后，core 才以业务取消结束，coordinator 再保存唯一 turn_end(cancelled)。若 tool_end 保存拒绝，传播 PersistenceError，不能当成普通取消继续写 turn_end。
+
 sink 的桥接实现是 `async record(fact) { await writer.appendDurable(fact); }`，故 confirmedSeq 不进入 core。appendDurable 正常返回表示该记录及之前前缀完成 9.4 确认；排队成功或 write 回调不满足接口。等待返回后、继续外部操作前检查取消，已经取得的完整 ToolResult 则先保存，避免把已知结果丢掉。
 
 普通模型/工具错误由 core 保留已交付事实后向上抛；协调方映射 failed/cancelled/timeout 并保存唯一 turn_end，再报告原业务原因。取消在终止选择前参与 outcome 决定，选择后不追加第二个 turn_end。终止写入使用独立收尾上下文，不复用已取消 signal。
@@ -1143,6 +1175,17 @@ core 的 StreamTurnResult 仍是**临时业务成功结果**，不是历史提�
 普通 --prompt 路径不注入持久化 sink，继续由 core 的临时成功结果完成单次输出；它没有“已保存”凭证，也不能因不持久化而绕过原有工具校验/取消边界。该显式模式选择与存储失败后的降级不同。
 
 对应实现需修改 runTurnStream、executeToolBatch/RegisteredTools 的逐项交付与取消检查，新增 coordinator、contracts 接口及 adapter 转换；保留现有返回视图以减少兼容变化，但不得继续依靠整批成功数组作为唯一事实来源。验收应通过延迟/拒绝每个 appendDurable 检查副作用屏障、两个批次复用 ID、非法本地引用、普通异常与存储异常分类、取消竞态，以及 turn_end 确认之前 REPL 历史不变。
+
+阶段规格必须把下列要求落实为运行时单元/集成测试，不能用本节类型声明检查代替：
+
+| 注入条件 | 必须断言的行为 |
+| --- | --- |
+| user/assistant/start/result 的 appendDurable 暂不 resolve | 依赖它的下一次模型请求、注册表分派或下一项工具都不发生；使用可控 Promise 检查，不靠固定 sleep 猜时序 |
+| 任一保存 Promise 拒绝 | 原 PersistenceError 穿透，不转 protocol_error、ok:false 或取消；不递归写 tool_end/turn_end，不提交半截历史 |
+| start 确认前后、进入注册表后及完整结果交付后的取消 | 分别断言注册表是否被调用、取消 code、已知结果是否保留；工具终止记录不重复，正常保存收尾的 turn 恰有一个 turn_end |
+| turn_end(success) 的确认延迟或失败，等待期间再次取消 | 确认前 REPL 历史不变；失败不提交；已固定 outcome 不被重复终止事件覆盖 |
+
+测试实现时沿用本地 mock SSE、可控保存器与子进程边界；应用落盘与恢复另用临时目录验证。上述测试尚未编写或执行，本轮仅复核文档示例和一致性。
 
 参考依据仍是 9.2 的现有业务类型、9.3–9.4 的状态与确认约束，以及 DSH 对 append 接受和 flush 耐久边界的区分；不照搬其可后台缓存的 append 语义，本候选直接将业务写接口命名为 appendDurable，减少误用。
 
