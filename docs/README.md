@@ -9,6 +9,8 @@
 - [阶段 01：单次模型问答与四层实现结果](specs/phase-01-single-model.md)
 - [阶段 02：只读文件工具与最小 Agent Loop](specs/phase-02-read-file-agent-loop.md)
 - [阶段 03：持续对话与流式输出](specs/phase-03-repl-streaming.md)
+- [阶段 04：会话保存与恢复（proposed）](specs/phase-04-session-persistence.md)
+- [会话持久化调研报告（已收口）](research/session-persistence-research.md)
 - [接口与契约规范](contracts/README.md)
   - [LlmClient 契约](contracts/llm-client.md)
   - [OpenCode Go HTTP 接口契约](contracts/opencode-go-http.md)
@@ -22,6 +24,7 @@
   - [ADR-003：阶段 02 顺序只读工具循环](decisions/ADR-003-phase-02-minimal-agent-loop.md)
   - [ADR-004：阶段 03 流式事件与内存 REPL](decisions/ADR-004-phase-03-streaming-repl.md)
   - [ADR-005：暂不抽取 OpenAI 兼容客户端基类](decisions/ADR-005-defer-openai-compatible-base-client.md)
+  - [ADR-006：严格 JSONL 日志与单写者恢复（proposed）](decisions/ADR-006-session-persistence.md)
 - [非主流程代码清单（历史与降级路径）](legacy-paths.md)
 - [Agent 开发报告模板](templates/development-report.md)
 
