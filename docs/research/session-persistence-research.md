@@ -16,6 +16,8 @@
 
 闭环评审修订：2026-10-26（Asia/Shanghai）。补齐列表状态、运行配置差异与模式/错误边界；新增 9.6 字节扫描和备份修复算法、9.7 有序业务事件接口，并记录隔离锁验证的实际结果与平台限制。
 
+范围收敛：2026-10-27（Asia/Shanghai）。将 runtimeProfile 简化为 provider/model 并贯通 user TurnFact；明确分派前取消、尾部/列表状态映射及 v1 已验证平台范围，9.8 汇总五项推荐决策。
+
 本报告只用于技术选型评审。本次没有修改 `src/`、没有创建阶段规格、接口契约或 ADR，也没有开始阶段 04 实现。
 
 ## 1. 调研范围和资料状态
@@ -293,7 +295,7 @@ JSONL 规定每个物理行是一个独立的 JSON 值。这里建议每行都�
 
 #### 一个无工具普通问答的完整 JSONL 示例
 
-以下四行是无工具问答的完整业务记录，使用 UTC ISO 8601 时间与便于阅读的占位 ID；真实 ID 生成见 9.5。为突出外层结构，本节及后续已有示例省略可选的 runtimeProfile；9.5 补充其格式，新写入器必须记录，缺失时读取器只能报告历史配置未知。
+以下四行是无工具问答的完整业务记录，使用 UTC ISO 8601 时间与便于阅读的占位 ID；真实 ID 生成见 9.5。为突出外层结构，本节及后续已有示例省略可选的 runtimeProfile；9.5 补充其格式，新写入器必须记录，缺失时读取器只能报告历史提供方/模型未知。
 
 ```jsonl
 {"type":"session_meta","formatVersion":1,"sessionId":"session-demo","createdAt":"2026-10-26T02:00:00.000Z","cwd":"/example/project"}
@@ -517,13 +519,16 @@ const message: ToolMessage = {
 | 分派开始 / 进行中 | 当前进程正在处理该调用，对应 `tool_start`，尚无终止结果 | 交给注册表分派的开始；包含名称查找，不保证匹配成功，也不保证实际 execute 已发生 |
 | 已成功 | 对应 `tool_result` 且 ok:true | 已取得完整成功结果，保存实际返回内容 |
 | 可恢复工具错误 | 对应 `tool_result` 且 ok:false | 正常返回了文件不存在等错误，模型仍可据此回答 |
-| 分派失败、取消或超时 | 对应 `tool_end`，outcome 为 failed/cancelled/timeout | 调用异常停止，没有可交付的正常 ToolResult；不凭此断言外部操作没有发生 |
+| 分派前取消 | tool_start 后有 tool_end(cancelled)，error.code=cancelled_before_dispatch | core 明确未调用注册表，并已交付该事实；恢复可确认取消，不能误标 unknown，也不归为无 start 的 not_started |
+| 分派失败、取消或超时 | 对应 `tool_end`，outcome 为 failed/cancelled/timeout；其他取消保留实际原因 | 调用异常停止，没有可交付的正常 ToolResult；进入注册表后通常不能凭此断言外部操作没有发生 |
 | `not_started`（未开始） | 存在有效 turn_end，调用没有 tool_start，且顺序执行与保存确认规则能证明未分派 | 可出现在 failed/cancelled/timeout turn 的剩余调用中；success 要求全部有结果，因此不允许此状态 |
 | `unknown`（结果未知） | 恢复时没有工具终止记录，且满足“缺少 turn_end”或“已有 tool_start”任一条件 | 缺少 turn_end 时，只有请求也保守归为 unknown；有 start 但没有终止记录时，即使 turn 已失败、取消或超时也仍为 unknown |
 
 `tool_start` 表达的是开始分派的意图和阶段边界。即使先保存它再执行，也存在“保存后、调用前”崩溃窗口；工具完成后也可能在结果保存前崩溃。因此，已见 start 不证明工具执行过，没有 result 也不证明工具没有完成。只读 read_file 也不通过重新读取来冒充原执行结果。
 
 本轮采用方案 A：先确认保存 tool_start，再进入注册表查找名称和分派。未知名称的合法序列是 `assistant.toolCalls → tool_start → tool_result(ok:false)`，与当前 RegisteredTools 返回 `[unknown_tool]` 结果的行为一致；名称与原 ToolCall 匹配即可，不要求名称存在于当前注册表。拒绝“先查名称，未知工具只有 result 没有 start”的例外路径。
+
+tool_start 确认后、调用注册表前若观察到取消，core 明确不调用注册表，交付 `tool_end(outcome:cancelled)`，error 使用 `category:cancellation`、`code:cancelled_before_dispatch`，协调方再以同一取消原因关闭 turn。这是已知的“分派前取消”，不引入新 outcome。若已经进入注册表，即使尚未调用具体 execute，也不推断该代码；按实际观察到的取消原因记录。恢复仅剩 start、没有合法终止记录时仍为 unknown；tool_end 保存失败走存储故障，不伪装成已保存的取消。
 
 状态推导先看已保存的 tool_result/tool_end，再判断尚未终止的调用；整个 turn 为 interrupted，不会把其中已知成功或已知异常的工具重新标为 unknown。`not_started` 的判断依赖有效终止记录及 9.4 的执行前保存确认；语义损坏的文件直接拒绝恢复，不能先跳过坏记录再声称调用未开始。
 
@@ -535,7 +540,7 @@ const message: ToolMessage = {
 
 | type | payload 的候选结构 | 是否成为模型消息 |
 | --- | --- | --- |
-| `message` / user | 沿用 `{role:"user",content}` | 按 turn 的恢复资格决定 |
+| `message` / user | payload 沿用 `{role:"user",content}`；记录外层另存 runtimeProfile，来自 user TurnFact 外层 | 仅 payload 按 turn 恢复资格成为模型消息，runtimeProfile 不进入 Message |
 | `message` / assistant | 沿用完整文字和 toolCalls；不保存未校验的流式调用片段 | 按 turn 的恢复资格决定 |
 | `tool_start` | `{callMessageSeq,toolCallId,name}` | 否，仅用于恢复和诊断 |
 | `tool_result` | 沿用 `{callMessageSeq,toolCallId,name,ok,content}` | 由此派生 ToolMessage，省略 ok 和存储引用 |
@@ -549,7 +554,7 @@ const message: ToolMessage = {
 | error 字段 | 候选含义 |
 | --- | --- |
 | `category` | model、tool、protocol、limit、cancellation、timeout 或 internal |
-| `code` | 稳定机器码，如 network、http、invalid_response、protocol_error、loop_limit、user_interrupt、request_timeout、tool_execution_failed |
+| `code` | 稳定机器码，如 network、http、invalid_response、protocol_error、loop_limit、user_interrupt、cancelled_before_dispatch、request_timeout、tool_execution_failed |
 | `message` | 经过整理和脱敏的用户可读摘要，不包含堆栈或原始异常 |
 | `httpStatus?` | 已知模型 HTTP 状态时可保存整数状态码，不保存认证头或完整响应体 |
 
@@ -564,7 +569,7 @@ success 的 turn_end 不带 error；failed/cancelled/timeout 的 turn_end 与异
 1. 外层协调方接受输入，创建 turnId，交付并保存唯一 user 消息；core 返回值中的 user 不再重复写入。
 2. 模型响应完整收尾，通过响应结构校验和整批参数预检后，交付 assistant 消息；即使其中有文字，也以 toolCalls 判断是否需要工具。不把未通过结构校验的调用伪装成合法 ToolCall 记录，预检失败时不开始任何分派。
 3. 保持每批 4 项与每 turn 8 次模型上限。最后一次模型机会仍请求工具时，可以保留已校验的完整请求事实，再按额度规则终止，不能执行工具。
-4. 每项实际分派前检查取消与额度，交付 tool_start；等待该前置事件达到 9.4 的保存确认点，再次检查取消，然后进入注册表进行名称查找和分派。未知名称也已经有 start，随后交付 ok:false 结果；若再次检查时已取消，则不进入注册表，按已知原因收尾。core 使用业务关联信息，JSONL 的 seq 与 callMessageSeq 由存储转换方生成。
+4. 每项实际分派前检查取消与额度，交付 tool_start；等待该前置事件达到 9.4 的保存确认点，再次检查取消，然后进入注册表进行名称查找和分派。未知名称也已经有 start，随后交付 ok:false 结果；若再次检查时已取消，则不调用注册表，先等待 tool_end(cancelled) 确认，error 使用 cancellation/cancelled_before_dispatch，再由协调方关闭该 turn。core 使用业务关联信息，JSONL 的 seq 与 callMessageSeq 由存储转换方生成。
 5. 每取得一项完整 ToolResult，就交付含 ok 的结果事实，外层保存 tool_result；保持逐项顺序，不等整批或整个 turn 成功后才交付。普通可恢复错误也走这一条。新接口应将“取得完整结果”和“下一步取消检查”分开，避免结果已得到却因后续取消而丢掉已知事实；检查取消后不再开始下一项工具或模型请求。
 6. 当前项没有正常结果而因取消、超时或异常停止时，交付对应 tool_end；再用 turn_end 关闭整次 turn。尚未分派的剩余调用由事件证据推导，不为它们生成假结果。
 7. core 正常交付最终回答后返回临时成功结果，协调方固定 outcome 并唯一交付 turn_end。只有完整消息组、正常结果配对和 turn_end(success) 都达到保存确认点后，才向 REPL 提交这组模型历史，具体接口见 9.7。
@@ -629,7 +634,7 @@ failed/cancelled/timeout/interrupted turn 的 user、已完成的中间 assistan
 | --- | --- |
 | header 必须是第一个物理行，且整个文件只出现一次；formatVersion 必须受支持 | 拒绝；后续 session_meta 不能充当新文件的起点 |
 | 每行是符合对应 schema 的对象；必填字段、消息/调用/错误字段类型合法，type 为已知类型 | 拒绝；v1 未定义可忽略事件，不能静默跳过未知 type |
-| user 上存在 runtimeProfile 时，必须符合 9.5 的 version=1 摘要 schema；缺失仅表示历史配置未知 | 非法字段拒绝，摘要版本不支持则按 unsupported 拒绝；不能忽略损坏摘要后声称配置一致 |
+| user 记录上存在 runtimeProfile 时，必须符合 9.5 的 v1 provider/model 结构；缺失仅表示历史提供方/模型未知 | 字段缺失、空白或类型非法拒绝；不能忽略损坏摘要后声称提供方/模型一致 |
 | seq 是从 1 开始的连续正安全整数；timestamp 仅作时间信息，不参与排序 | 重复、缺口、倒退或类型错误拒绝；不通过重排或重编号修复 |
 | 每个 turn 恰有一个 user 起点，且是该 turn 第一条记录；turnId 的记录连续，开始新 turn 后不能返回旧 turn | 多余 user、无 user 的事件或跨 turn 交错拒绝；v1 不支持 steering 或并发 turn |
 | 一个 turn 最多一个 turn_end，且是**属于该 turn**的最后一条记录 | 重复结束或后续任意同 turn 记录拒绝；后续新 turn 合法 |
@@ -771,7 +776,7 @@ sessions 下只存会话 JSONL，锁单独放在 locks 下，不按项目或日�
 | 已有文件身份 | 从受管文件名定位候选后，必须核对 header.sessionId；同一 ID 对应多个正文文件时拒绝写入 | 不按“最新修改”猜测真文件，不把复制文件自动认作新会话；新建时也检查 ID 未被占用 |
 | POSIX 权限 | 新建 `.yucli/`、sessions、locks 为 0700；正文和锁文件为 0600，可受 umask 进一步收紧 | 已有受管路径必须为当前用户所有，且无组/其他用户权限；不合规时明确失败，不静默 chmod 无关路径 |
 | 文件类型 | 受管数据目录及末端正文/锁必须符合预期类型，不跟随这些位置的符号链接写入；用句柄信息复核打开目标 | 不更改 home 本身的权限；这些检查不是抵御所有父目录替换的 OS 沙箱 |
-| 平台范围 | 本候选首先面向 macOS/Linux 本地文件系统验证 | Windows 的 ACL、锁及目录同步须另有验证；不能把 POSIX mode 数字当成 Windows 隐私保证，也不能无锁降级 |
+| v1 持久化支持范围 | macOS arm64、Node 24.14.0、本地文件系统 | Linux、Windows、macOS Intel 及其他运行环境未验证，不宣称支持持久化创建/恢复；扩展前补安装、锁、权限及同步验证，不无锁降级 |
 
 9.1–9.3 的 session-demo/turn-1 是讲解占位值；真实创建路径拟采用以上生成规则。持久化 schema 仍需校验非空身份及引用，不能只因某个示例 ID 不像 UUID 就忽略其事件关系。文件名与锁路径只能使用通过校验的身份，不能把任意用户输入直接拼入路径。
 
@@ -796,7 +801,7 @@ header 与 user 不是一个原子事务。崩溃发生在二者之间，可能�
 
 | 方案 | 行为与成本 | 本轮建议 |
 | --- | --- | --- |
-| 内核建议锁 | macOS/Linux 对固定锁文件取得非阻塞独占 flock，进程终止或最后持有描述符关闭后释放；Node 需要原生适配器 | **推荐**，满足崩溃后重新打开而不猜测锁年龄的需求 |
+| 内核建议锁 | POSIX 平台可对固定文件取得非阻塞独占 flock，关闭描述符或进程终止后释放；本轮只验证 macOS arm64，Node 需要原生适配器 | **推荐**，满足崩溃后重新打开而不猜测锁年龄的需求 |
 | 原子 mkdir/独占创建占位锁 | 可仅用 Node 标准库，但崩溃会遗留占位；自动接管还需要解决进程身份和删除竞态 | 无原生依赖的备选；若采用，v1 应冲突即拒绝、由操作者确认所有写者退出后清理，不能承诺自动崩溃接管 |
 | 心跳加超时回收 | 长暂停或繁忙进程可能被误判死亡，恢复运行后形成双写 | 本阶段不采用；“超过 N 秒”不构成写者已退出的证据 |
 
@@ -837,7 +842,7 @@ header 与 user 不是一个原子事务。崩溃发生在二者之间，可能�
 | observedAt、changing | 固定初始字节上限读取；前后 stat 变化或并发观察不稳定时标 changing，只展示已观察前缀，不标为完整快照 |
 | resumability | yes / no / check_on_open，并附原因；其他 cwd、损坏、不支持或 busy 时 no，状态未知或变化时 check_on_open，最终以 openWrite 校验为准 |
 
-logState 优先显示 corrupt/unsupported，其次是 torn_tail/missing_lf/empty；没有物理尾部问题时再区分 complete/interrupted，lastTurnOutcome 另行保留。writerState 和 logState 独立展示，例如 `busy · interrupted · 仅已观察前缀`；写者可能只是闲置持锁，不能把 interrupted 直接解释为进程崩溃。available 也只表示当次探测时刻，不能保证用户选择后仍然空闲。读到完整行也不能证明写者已经收到 fsync 确认；列表不展示“已耐久保存”的推断。
+logState 按 9.6 的明确映射生成：corrupt/unsupported 优先，其次是 torn_tail/missing_lf；tailKind=none 时，无 user 为 empty，存在任一缺少 turn_end 的 turn 为 interrupted，其余为 complete。complete 包含合法失败/取消/超时的已结束 turn，不表示全部执行成功。lastTurnOutcome 另行保留。writerState 和 logState 独立展示，例如 `busy · interrupted · 仅已观察前缀`；写者可能只是闲置持锁，不能把 interrupted 直接解释为进程崩溃。available 也只表示当次探测时刻，不能保证用户选择后仍然空闲。读到完整行也不能证明写者已经收到 fsync 确认；列表不展示“已耐久保存”的推断。
 
 排序使用有效 lastActivityAt 降序，再按 createdAt 降序、sessionId 字典序打破并列；时间戳只影响列表展示，日志解释仍严格依 seq。默认隐藏 header-only 空会话，报告“已隐藏 N 个空会话”；全局诊断列表可见其 empty 状态。mtime 不决定排序，损坏/不支持条目单列，不按猜测时间插入正常列表。
 
@@ -845,18 +850,28 @@ logState 优先显示 corrupt/unsupported，其次是 torn_tail/missing_lf/empty
 
 #### 运行配置摘要与差异提示
 
-仅使用当前配置而不记录过去配置，无法发现“A 模型生成的历史由 B 继续”。推荐在**每条 user 记录的外层**增加 runtimeProfile，表示接受该 turn 时的有效运行配置；不塞进 Message.content，不每行重复，也不自动恢复历史配置。读取时允许缺失并标记未知，新写入器必须提供。每 turn 记录能避免只在 header 保存初始模型、恢复换模后仍反复和最初模型比较的问题。
+v1 将 runtimeProfile 收敛为 **provider/model 两个字段**，只回答“历史由哪个提供方、哪个模型处理”。每条 user 的 TurnFact 外层都必须带该对象，adapter 按 9.7 原样写入 user JSONL 记录外层；不进入 Message，也不在其他事件重复，不从 SessionWriter 的隐藏配置上下文补字段。
 
-| runtimeProfile 字段 | 含义 |
+| runtimeProfile 字段 | v1 含义与校验 |
 | --- | --- |
-| version:1、provider、model | 摘要版本、提供方标识和模型名 |
-| endpointHash | 对规范化、无凭证的 base URL 计算 SHA-256，不保存认证头或密钥 |
-| systemPromptHash | 对实际 system 消息序列的稳定 JSON 编码计算 SHA-256；当前无 system 消息时对空数组计算 |
-| toolsHash | 对有序工具定义、显式工具行为版本及实际工具策略稳定编码后计算 SHA-256；不能仅哈希工具名称，也不能宣称能自动检测未标版本的代码变化 |
+| provider | 非空白字符串；当前 adapter 的稳定标识为 opencode-go，不用 API 地址替代 |
+| model | 本 turn 实际选用的非空白模型标识，例如 deepseek-v4-flash；保存原值 |
 
-稳定编码递归按键排序、保留数组顺序，UTF-8 编码后输出 `sha256:<64位小写十六进制>`。摘要由协调方根据本次实际请求配置生成，经记录转换层注入 user envelope；core 不读取 .env、不计算文件路径或摘要。模型密钥、原始凭证及工具执行数据均不进入该摘要输入。9.1 示例省略该可选字段仍可读取，但不能据此宣称配置一致。
+v1 不新增独立 profile.version；它的解释由 header.formatVersion 管理。读取既有教学样例时允许整个 runtimeProfile 缺失并标为未知；对象存在时必须恰好包含合法的 provider/model 两个字符串字段，新写入的 user fact 则始终必填。若今后正式发布的格式需要扩展，再通过明确的版本兼容规则设计，不能重新解释已存字段。
 
-恢复时比较“即将进入上下文的最近成功 turn”的摘要与当前摘要；没有成功 turn 时回退最近 user 摘要。模型/提供方不同则提示旧值与当前值，其他指纹不同则提示对应配置已变化；上下文内存在缺失摘要时说明“历史配置未完整记录，无法全部核对”。提示在恢复完成后、首次新请求前向 stderr 显示一次，无需确认，不阻止继续；不回显提示词或凭证，不将提示当成模型消息。接受新问题仍使用当前环境，并写入新摘要。已有历史可能由多种配置生成，比较提示不声称复现过去运行环境。
+例如同一 user 的业务事实与磁盘转换分别是（两段均为对象示例，不是两条重复消息）：
+
+```json
+{"type":"user","turnId":"turn-1","message":{"role":"user","content":"你好"},"runtimeProfile":{"provider":"opencode-go","model":"deepseek-v4-flash"}}
+```
+
+```json
+{"seq":1,"type":"message","timestamp":"2026-10-27T02:00:00.000Z","turnId":"turn-1","runtimeProfile":{"provider":"opencode-go","model":"deepseek-v4-flash"},"payload":{"role":"user","content":"你好"}}
+```
+
+恢复时比较“即将进入上下文的最近成功 turn”的 provider/model 与当前值；没有成功 turn 时回退最近 user。不同则在恢复完成后、首次新请求前向 stderr 提示旧值和当前值一次；需要纳入上下文的记录缺摘要时，说明历史提供方/模型未完整记录，无法全部核对。提示不要求确认、不进入模型消息，后续请求和新的 user fact 使用当前配置。
+
+当前项目只有固定只读工具，没有自动 system 消息，阶段 04 聚焦可靠保存和恢复对话。本次**移除 v1 的 endpoint/system/tools 指纹要求**：这些信息没有记录或比较，相同 provider/model 也不能宣称整个运行配置一致；端点、system 提示词和工具策略变化的检测、稳定序列化及行为版本维护留到有实际需求时设计。保留指纹是更强审计能力的备选，但会扩大本阶段格式与实现面，当前规模优先采用最小摘要。9.6 用于修复原件完整性核对的 sourceSha256 继续保留，与运行配置指纹无关。
 
 #### 打开旧会话与 cwd 归属
 
@@ -912,11 +927,14 @@ logState 优先显示 corrupt/unsupported，其次是 torn_tail/missing_lf/empty
 | --- | --- |
 | session_busy：候选会话锁冲突 | `--resume` 启动失败退出 5，说明“未取得写入权，未修改正文”；REPL `/resume` 保留健康旧会话与历史，显示原因后允许重新选择/重试，不把旧写者标为故障 |
 | not_found、cwd_mismatch、unsupported、corrupt：候选不可打开 | 启动恢复退出 5；交互选择失败保留旧会话。语义损坏仍拒绝整个候选文件，不能跳过坏 turn |
+| platform_unsupported：不在 v1 已验证持久化支持范围 | 启动创建/恢复在文件副作用前以 5 拒绝；不绕过检查尝试无锁执行；普通 --prompt 不因此触发持久化平台检查 |
 | lock_unavailable：原生库加载/内核调用不可用 | 独立错误码，区别于 busy；启动退出 5，REPL 禁止进入新的持久化执行并收尾退出，不降级无锁 |
 | write_failed、sync_failed、repair_failed、ownership_lost、close_failed | PersistenceError；停止新执行，等待未决 I/O 与清理后退出 5。repair_failed 也不能继续发模型请求，即使截断实际上已完成 |
 | 普通模型/工具失败、取消、超时 | 终止记录保存成功时仍按阶段 03 处理；REPL 可继续，普通单次模式返回 4 |
 
 访问冲突不是“当前会话保存失败”，所以不应一律结束交互 REPL；真正存储故障也不能被宽泛 catch 后继续。已有用法 2、配置 3 保留。正常关闭保留 0/130 等语义；保存/关闭失败优先报告 5。模式范围也应明确出现在帮助与规格中：**v1 自动持久化只覆盖 REPL，包括显式恢复；普通 --prompt 不持久化，且不能与恢复参数组合**。
+
+原生锁能力在进入持久化创建/恢复路径并通过环境检查后加载；help/version 和普通 --prompt 不因锁库不可用而提前失败。只读列表若不能探测写者状态，按 unknown 展示，不据此授予恢复执行权限。
 
 #### 累积产物、备份与删除的明确边界
 
@@ -945,8 +963,9 @@ v1 不提供自动保留期限、删除/归档命令、锁文件垃圾回收或�
 - 同 cwd 的新进程恢复后，真实适配器发出的请求含有效旧历史和新输入；不同 cwd、父子目录或不同 worktree 拒绝恢复。同一真实目录的符号链接入口遵循规范化规则；不自动重跑旧工具。
 - clear 后新请求不带旧历史，新 sessionId 与文件独立；显式再打开旧会话仍能看到原记录；20-turn 内存窗口不裁剪磁盘原文。
 - 默认列表只含同 cwd，global 列表的其他 cwd 只能预览；空会话计数、排序并列、busy/unknown/changing 与尾部状态独立显示，探测之后发生的竞争仍由正式 openWrite 拒绝。
-- 模型、端点、system 或工具摘要变化时只提示一次并使用当前配置；缺摘要明确未知；新 user 保存新摘要，原历史保持不变，提示不进入模型消息。
+- 提供方或模型变化时提示一次并使用当前配置；缺摘要明确未知；同 provider/model 不能显示“全部配置一致”，端点、system、工具变化不在 v1 比较范围。新 user fact 外层包含摘要，原 Message 不变，提示不进入模型。
 - `--resume` 锁冲突退出 5，REPL 切换冲突保留旧历史并允许重试；锁不可用与 repair_failed 为独立原因，禁止无锁降级；普通 --prompt 不创建文件，与恢复组合返回 2。
+- 验证 start 确认后的取消阻止注册表调用，记录 cancelled_before_dispatch；仅有 start 的崩溃前缀仍为 unknown。逐项检查 9.6 的 tailKind/logState 映射，以及未验证平台在持久化文件副作用前拒绝。
 - 在创建、header/user 确认、追加、关闭和锁阶段注入失败，不发起被屏障阻止的外部操作，不继续消费后续 REPL 问题，不误报成功。关闭重入、EOF、活动取消和闲置中断时无句柄/锁泄漏，保存失败与退出码优先级一致。
 
 本轮验证文档及隔离目录中的锁候选；9.5 的锁验证结果单独列明。以上应用级验收仍待实现，不能将依赖探针通过写成 yucli 持久化已实现。
@@ -976,6 +995,22 @@ v1 不提供自动保留期限、删除/归档命令、锁文件垃圾回收或�
 实现需要一个与严格 UTF-8 解码配合的 JSON 前缀识别器，输出 complete/incomplete/invalid：跟踪对象/数组、键值阶段、字符串转义、Unicode 转义、数字与字面量；只有“存在合法后缀能补成一个 JSON 对象”才算 incomplete。不能匹配不同 Node 版本的 JSON.parse 错误文字，也不能只判断括号数、引号数或最后一个字符。完整值仍交给 JSON.parse 和 schema/语义校验，前缀识别器不替代业务校验。
 
 只读打开不改文件，返回有效前缀及尾部诊断。对活跃写者的列表读取，扫描边界 S 可能正好切在一次追加中；标注 busy/changing 和“仅已观察前缀”，不把这次观察当成可写恢复结果。写恢复取得独占后必须重新读取并分类，旧偏移、mtime 或列表缓存都不能授权截断。
+
+#### tailKind 到列表 logState 的映射
+
+先检查格式/语义拒绝条件，再应用物理尾部优先级，最后检查 turn 完成状态：
+
+| 扫描或事件证据 | logState |
+| --- | --- |
+| header.formatVersion 不支持 | unsupported；不把它当作尾部残片 |
+| JSON/schema/引用/顺序等损坏 | corrupt；不返回可用于恢复的正常 ScanResult |
+| tailKind=incomplete，且此前有效前缀成立 | torn_tail |
+| tailKind=missing_lf，最后记录完整合法 | missing_lf |
+| tailKind=none，只有合法 header、没有 user | empty |
+| tailKind=none，存在任一缺少 turn_end 的 turn | interrupted |
+| tailKind=none，存在 user，且所有 turn 都有合法 turn_end | complete；允许 failed/cancelled/timeout，不等于全部 success |
+
+因此 none 不直接等于 complete，“文件里有 turn_end”也不足以证明所有 turn 已结束。旧 interrupted turn 后追加的新 turn 即使成功，旧中断事实仍保留，logState 为 interrupted、lastTurnOutcome 可以为 success；这不妨碍按 9.3 恢复有效历史，也不要求补写旧终止记录。writerState 仍独立判断是否活跃，不能由 interrupted 推断持有者已死亡。
 
 #### 修改前保全原件，修改后确认同步
 
@@ -1037,8 +1072,11 @@ type CoreTurnFact = { turnId: string } & (
   | { type: "tool_end"; call: CallRef; end: FailureEnd }
 );
 
+// coordinator 创建，user fact 外层保存；不扩展 Message 或 core 的工具事实。
+type RuntimeProfile = { provider: string; model: string };
+
 type TurnFact = CoreTurnFact | ({ turnId: string } & (
-  | { type: "user"; message: TextMessage & { role: "user" } }
+  | { type: "user"; message: TextMessage & { role: "user" }; runtimeProfile: RuntimeProfile }
   | { type: "turn_end"; end: TurnEnd }
 ));
 
@@ -1053,14 +1091,14 @@ interface TurnExecutionContext {
   facts: TurnFactSink;
 }
 
-// adapter 实现；timestamp、seq、runtimeProfile 与引用转换在这里完成。
+// adapter 实现；分配 timestamp/seq、映射引用，并原样保存 user fact 的 runtimeProfile。
 interface SessionWriter {
   appendDurable(fact: TurnFact): Promise<{ confirmedSeq: number }>;
   close(): Promise<void>;
 }
 ```
 
-type 是 TypeScript 判别联合，运行时 JSON 仍需校验。core 每次交付前已完成流收尾、整批参数预检与结果结构检查；adapter 校验并快照传入数据，避免等待期间被修改。user 的 runtimeProfile 由协调方在准备 SessionWriter 时注入当前配置上下文，adapter 只负责放入 envelope，不自行读取模型配置；timestamp 由注入时钟在创建记录时取值。接口不携带原始 Error、SSE delta、文件句柄或 API key。
+type 是 TypeScript 判别联合，运行时 JSON 仍需校验。core 每次交付前已完成流收尾、整批参数预检与结果结构检查；adapter 校验并快照传入数据，避免等待期间被修改。user 的 runtimeProfile 由协调方构造在该条 TurnFact 外层，appendDurable 直接接收完整事实，adapter 校验并复制到 JSONL envelope，既不从构造器闭包补齐，也不自行读取模型配置；timestamp 由注入时钟在创建记录时取值。接口不携带原始 Error、SSE delta、文件句柄或 API key。
 
 本节的 callback 是有序、可等待的**业务事实边界**，不是任意监听器：同一 turn 不并发 record，不允许 fire-and-forget；Promise 拒绝必须停止后续副作用，保存与普通展示监听器不能混为一个可忽略错误的事件总线。
 
@@ -1084,10 +1122,11 @@ adapter 持有 `(turnId, assistantId) → 已确认 assistant seq` 映射。保�
 持久化路径的调用顺序为：
 
 ```text
-coordinator: await writer.appendDurable(user)
+coordinator: await writer.appendDurable(user fact，外层含 runtimeProfile)
   → core: await sink.record(assistant)
-  → core: await sink.record(tool_start)，再检查取消，进入注册表
-  → core: await sink.record(tool_result 或 tool_end)
+  → core: await sink.record(tool_start)，再检查取消
+  → 若已取消：await sink.record(tool_end(cancelled_before_dispatch))，抛取消并直接转协调方收尾
+  → 否则进入注册表：await sink.record(正常 tool_result 或异常 tool_end)
   → 正常工具结果齐全才继续模型；最终 assistant 确认后 core 返回临时结果
   → coordinator: 固定唯一 outcome，await writer.appendDurable(turn_end)
   → 仅 success 的确认成功后，返回“可提交历史”的结果给 REPL
@@ -1108,6 +1147,20 @@ core 的 StreamTurnResult 仍是**临时业务成功结果**，不是历史提�
 参考依据仍是 9.2 的现有业务类型、9.3–9.4 的状态与确认约束，以及 DSH 对 append 接受和 flush 耐久边界的区分；不照搬其可后台缓存的 append 语义，本候选直接将业务写接口命名为 appendDurable，减少误用。
 
 本轮已在临时文件中提取本节类型声明，引用当前 message/tool 类型并用项目 TypeScript 的 strict、noEmit 校验通过；这只验证候选声明能与现有类型组合，不代表运行时顺序、保存或错误传播已经实现。JSONL 示例、9.6 的字节数/摘要、本地链接与 git diff 检查均已复核，未重跑业务测试或真实模型请求。
+
+### 9.8 阶段 04 的五项范围收敛
+
+讨论日期：2026-10-27（Asia/Shanghai）。状态：**本轮推荐取舍，供用户评审；尚未成为阶段规格或实现**。本节只汇总五项决策，具体约束已同步到对应小节，不增加新的存储机制。
+
+| 决策 | 本轮推荐 | 对应约束与取舍 |
+| --- | --- | --- |
+| runtimeProfile 放哪 | coordinator 构造在 user TurnFact 外层；SessionWriter 接收完整事实，adapter 复制到 user JSONL 外层 | 9.3 事件表、9.5 示例及 9.7 类型一致；不扩展 Message，不依赖 writer 隐藏配置 |
+| start 后、分派前取消 | tool_end(cancelled)，error.code=cancelled_before_dispatch | 仅明确没有调用注册表时使用；恢复有合法终止事实则已知取消，仅剩 start 则 unknown |
+| tailKind 与 logState | 采用 9.6 映射表：incomplete→torn_tail、missing_lf→missing_lf，none 再按空会话和各 turn 终止证据分类 | complete 是日志完成状态，包含已终止的失败/取消/超时，不代表业务全部成功；writerState 独立 |
+| runtimeProfile 的 v1 范围 | 只存 provider/model；移除 endpoint/system/tools 指纹及独立摘要版本字段 | 能提示提供方/模型变化，无法检测其余配置变化；修复备份的 sourceSha256 保留，不属于此精简范围 |
+| v1 支持平台 | 持久化创建/恢复只支持 macOS arm64 + Node 24.14.0 + 本地文件系统 | 与已完成锁探针的范围一致；其他平台明确拒绝持久化执行，验证后再扩展，不自动改锁机制 |
+
+完整调用场景、验收矩阵与实现任务在阶段规格中汇总，沿用本章现有示例和失败边界，不再为相同决策另增调研机制。当前锁探针证据不等于应用已实现；现有代码和 accepted 契约仍待阶段 04 实现时同步。
 
 ## 10. 本阶段建议的评审问题
 
