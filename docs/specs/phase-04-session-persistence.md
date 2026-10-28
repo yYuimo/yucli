@@ -4,6 +4,8 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格仍为 proposed，尚未进入实现。
+
 用户已确认调研可以收口；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格，等待规格评审。本阶段尚未实现，不将调研中的类型检查和锁探针视为应用验收通过。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，当前同为 `proposed`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
@@ -20,7 +22,7 @@
 
 ### 包含
 
-- REPL 自动持久化，首次非空普通输入惰性创建会话；退出、重启、列表、显式恢复和 `/clear` 切换新会话。
+- REPL 自动持久化，首次非空普通输入惰性创建会话；退出、重启、只读列表、行式恢复选择器、继续最近会话，以及 `/new`（`/clear` 别名）切换新会话。
 - UTF-8 JSONL v1：header、user/assistant 消息、工具开始/结果/异常终止、turn 终止。
 - core 的有序、可等待业务事实交付；逐项保存工具结果，保留 `ToolResult.ok`。
 - 成功 turn 的模型历史投影、最近 20 个成功 turn 的完整分组窗口。
@@ -35,6 +37,7 @@
 - 旧 turn 自动续跑、工具重放、写入重试、eventId 去重或 exactly-once 保证。
 - 并发工具、steering、编辑旧消息、分支、树导航、回滚。
 - SQLite、持久化索引、分页、后台缓存、compaction、token 预算、文件轮换。
+- 全屏 TUI、方向键导航、Tab/Esc 快捷键、会话搜索/重命名及完整 transcript 预览；v1 picker 复用首条 user 摘要，不新增 `/sessions` 命令。
 - 删除/归档命令、自动清理锁或备份、保留期限、配额、备份自动还原、语义损坏自动修复。
 - endpoint/system/tools 指纹、usage 和 reasoning 的持久化、逐 token 日志。
 - 会话加密及对任意不可信日志的完整 DoS 防护。
@@ -54,21 +57,62 @@
 | `yucli --prompt <text>` | 一次流式 turn，不创建会话或锁目录 |
 | `yucli --sessions` | 只读列出 header.cwd 等于当前 cwd realpath 的会话，不需要模型密钥 |
 | `yucli --sessions --all` | 全局只读列表；其他 cwd 标为仅预览，需切换原目录才能恢复 |
-| `yucli --resume <sessionId>` | 取得写入权、重新扫描并准备旧文件，成功后进入 REPL；失败不新建替代会话 |
-| `/resume <sessionId>` | 仅在闲置 REPL 切换；成功准备候选后才关闭旧会话、替换历史 |
-| `/clear` | 关闭旧会话并清空上下文，转回待创建；下次普通输入使用新 sessionId，旧文件保留 |
+| `yucli --continue`、`yucli -c` | 按下文规则选当前 cwd 最近的非空候选，直接恢复，不打开 picker |
+| `yucli --resume`、`yucli -r` | 打开当前 cwd 的会话选择器，不要求用户先知道 ID |
+| `yucli --resume --all`、`yucli -r --all` | 选择器初始显示全局会话及 cwd；其他目录只预览 |
+| `yucli --resume <sessionId>`、`yucli -r <sessionId>` | 已知完整 ID 时直接恢复；取得写入权、重扫并准备成功后进入 REPL |
+| `/resume`、`/resume --all` | 闲置 REPL 打开同一选择器，默认 current，--all 初始为全局范围 |
+| `/resume <sessionId>` | 闲置 REPL 直接切换；准备候选成功后才关闭旧会话、替换历史 |
+| `/new`、`/clear` | 完全相同：关闭旧会话、清空上下文并转回待创建；下次普通输入使用新 sessionId，旧文件保留 |
 | `/exit`、`/quit`、EOF | 不再接受输入，完成已接受 turn 的收尾，关闭资源；正常退出 0 |
-| 闲置 Ctrl+C | 关闭会话后退出 130；关闭失败则退出 5 |
+| 普通 REPL 提示符闲置 Ctrl+C | 关闭会话后退出 130；关闭失败则退出 5；picker 内另按选择器规则 |
 | 活跃 Ctrl+C | 取消当前 turn；非成功终止保存确认后继续 REPL，存储失败则退出 5 |
-| `/help`、空行 | 不发模型请求、不实体化新会话；帮助说明保存范围与 clear 的保留行为 |
+| `/help`、空行 | 不发模型请求、不实体化新会话；帮助主推 /new，并说明 /clear 是同义别名 |
 
-三种模式 `--prompt`、`--sessions`、`--resume` 互斥；`--all` 仅能与 `--sessions` 使用。缺参、多余参数、空白 prompt、空白或不安全的 sessionId 为用法错误 2，在加载模型配置和创建文件前结束。REPL 内 `/resume` 缺参或非法时只报告用法，不把命令当普通问题发送；其他未知斜杠输入继续沿用原有普通文本行为。
+四种显式模式 `--prompt`、`--sessions`、`--resume`、`--continue` 两两互斥，无这些参数则新建 REPL。`--resume [sessionId]` 的参数是可选的：未给 ID 进入 picker，显式空字符串仍非法。`--all` 只允许搭配 `--sessions` 或**不带 ID 的** `--resume`，与 `--continue`、直接 ID 恢复或单独使用均为用法错误 2。`--continue` 不接受位置参数，也不隐式附带 prompt。
 
-v1 恢复选择要求完整 sessionId，不支持短前缀匹配或任意文件路径。短 ID 可用于列表显示，但必须同时提供可复制的完整 ID。身份须非空，且用于路径的 sessionId 限定为 1–128 个 ASCII 字母、数字、`_`、`-`，首字符为字母或数字；新建始终生成 UUID v4。日志中的教学占位身份可符合该安全字符规则，不以“不是 UUID”为由忽略其他校验。
+缺少必填参数、多余参数、空白 prompt、空白或不安全的 sessionId 均在加载模型配置和创建文件前返回用法错误 2。REPL 内 `/resume` 无参数合法；非法 ID、未知选项、多余参数及 `/new`/`/clear` 带参只报告命令用法并保留当前会话，不发送给模型。其他未知斜杠输入继续沿用原有普通文本行为；本阶段不注册 `/sessions`。
+
+直接按 ID 恢复要求完整 sessionId，不支持短前缀、名称匹配或任意文件路径；普通用户通过 picker 的编号选择，内部映射到完整 ID。短 ID 可用于列表显示，但必须同时提供可复制的完整 ID。身份须非空，且用于路径的 sessionId 限定为 1–128 个 ASCII 字母、数字、`_`、`-`，首字符为字母或数字；新建始终生成 UUID v4。日志中的教学占位身份可符合该安全字符规则，不以“不是 UUID”为由忽略其他校验。
 
 显式恢复在首次新请求前向 stderr 报告 sessionId、已恢复成功 turn 数及中断/尾部处理摘要，不自动重印完整历史或工具内容；恢复空会话允许继续。正常新会话创建后在 stderr 给出完整 sessionId，方便后续选择。stdout 保持文本流、REPL 提示、命令帮助和用户主动请求的列表；不打印原始 JSON、SSE、工具参数或 reasoning。
 
-启动参数检查在配置之前；`--sessions` 不调用模型配置加载器。新建/恢复 REPL 仍用启动环境加载 `.env` 和模型配置，配置失败为 3。新 REPL 的平台/锁能力预检不创建会话文件，避免接受首次问题后才发现平台根本不支持。
+启动参数和 picker 的 TTY 检查在读取会话/模型配置之前；`--sessions` 与 picker 浏览不调用模型配置加载器。CLI 启动 picker 确认选择、或 continue 解析出候选后，才加载启动环境的 `.env` 和模型配置，配置失败为 3，且尚未取得候选写锁或修复文件。REPL 内 picker 复用启动时已经加载的配置，不重新读取 `.env`。直接 ID 的 CLI 恢复在参数检查后加载配置；进入写恢复之前仍完成平台/锁能力预检。新 REPL 的预检不创建会话文件，避免接受首次问题后才发现平台根本不支持。
+
+### 共享的行式会话选择器
+
+CLI 的无 ID `--resume` 与 REPL 的无 ID `/resume` 复用同一 bootstrap 选择器，数据来自 SessionStore.list，选择器本身不调用模型、不创建或修复文件、不申请候选写锁。仅在 stdin 和 stdout 都是 TTY 时可用；非 TTY 的 CLI 调用立即以 2 结束，提示使用 `--sessions` 或 `--resume <sessionId>`。非 TTY REPL 中的 `/resume`（含 --all）只报告用法、保留历史，不能消费下一行当选择答案。直接 ID 与 --continue 不要求 TTY。
+
+默认 current 按当前 realpath 过滤；--all 仅改变初始视图。显示序号、lastActivityAt 的日期时间、首条 user 的安全摘要、logState、writerState 和不可恢复原因；all 视图另显示 cwd。排序、隐藏空会话与统计沿用下文列表规则。示意如下，时间是展示值，不改变磁盘 UTC 时间：
+
+```text
+恢复会话：/repo  [current]
+1) 2026-10-28 10:32  "fix README..."      complete     available
+2) 2026-10-28 09:10  "read src/core..."   interrupted  available
+3) 2026-10-27 18:20  "..."               complete     busy（不可选）
+
+输入编号并 Enter；a 切换 current/all；r 刷新；q 或空行取消：
+```
+
+- 输入正整数编号并 Enter，选择该次展示快照对应的完整 ID。非法、越界或不可选项只提示原因，继续选择，不发模型请求；空 Enter 不默认选择第一项。
+- `a` 切换 current/all 并重新列举，`r` 刷新当前范围。每次明确刷新后重建编号映射；用户输入编号后不能先重排再把同一编号解释成另一个 ID。
+- busy、其他 cwd、corrupt/unsupported 的目标不能选；诊断区不分配可恢复编号。unknown/changing 允许选择，但必须正式 openWrite 重验。本进程的当前会话显示“当前会话”，选择它仅关闭 picker、保留当前历史和锁，不重复打开。
+- current 无条目时提示“当前目录没有可恢复会话”；all 无条目时提示“没有可恢复会话”。空视图仍允许 a/r/q，方便切范围或刷新，不列出虚构编号、不偷偷新建。只有 header-only 的会话默认隐藏，全局视图显式可见，同 cwd 时允许选择。
+- CLI 中 q/空行取消或输入 EOF，未选择便退出 0；Ctrl+C 取消退出 130。REPL 中 q/空行/Ctrl+C 只关闭 picker，回原提示并保留会话/历史；输入 EOF 则结束整个 REPL，正常关闭后退出 0。任何存储/关闭故障仍优先退出 5。
+
+v1 用行输入实现，暂不处理 Tab/Esc、方向键、搜索、分页或完整 transcript。选择器没有人工输入的 30 秒超时；每次 list/openWrite 的 I/O 仍受第 7 节期限约束。REPL 原会话在浏览和等待期间继续持锁；同一输入源只有一个消费者，picker 与普通问题循环不能各自创建竞争的 readline 消费者。picker 中输入 `/new` 等文字只是无效选择，必须先取消再执行 REPL 命令。
+
+选择之后沿用“准备候选 → 关闭旧会话 → 替换历史”。列表观察只用于选择：文件消失、被占用或变坏仍由正式 openWrite 判定。启动 picker 的候选访问拒绝回到 picker，显示原因并刷新，用户可重选或取消；REPL picker 同样保留旧会话。直接 ID 恢复不自动进入 picker；访问失败按原错误规则报告。锁不可用、修复或其他 PersistenceError 不留在选择器重试，按存储故障收尾。
+
+上述即时取消指等待选择输入时。list 刷新或 openWrite 进行中收到 Ctrl+C，只记录取消意图，等待已开始的 I/O settle 并关闭本次准备的候选后再退出选择，不提前解锁、不消费新问题；IO 超限或清理失败仍走第 7 节故障收尾。REPL 开始关闭旧会话前检查取消，取消可保留旧会话；一旦开始关闭旧会话，切换决定固定，不因新 Ctrl+C 撤销或复活旧句柄，先按既定顺序完成切换或报告关闭故障。EOF 则请求结束整个 REPL，仍等待这些资源收尾。
+
+### 继续当前目录最近会话
+
+`--continue` / `-c` 只读取当前 cwd 的候选，排除 header-only、损坏、不支持以及无法确认归属的文件。有效候选可为 complete/interrupted/torn_tail/missing_lf，按同一 lastActivityAt、createdAt、sessionId 排序选第一项；失败/取消但已合法结束的非空会话也可恢复。若排除了损坏/不支持条目，应报告诊断，不宣称扫描到的有效候选覆盖了无法解释的文件。
+
+busy 不改变“最近”的认定，unknown/changing 也不能因探测不确定就被跳过。选定 ID 后必须 openWrite 重新取得锁、校验与必要修复；若此时 busy、消失、损坏或修复失败，报告对应错误并以 5 结束，不自动改选更旧会话。这样不会在用户不知情时换到另一段上下文。
+
+没有候选时报告“当前目录没有可恢复会话”，以 SessionAccessError(not_found) / 退出码 5 结束，不进入 picker、不加载模型配置、不创建会话。直接 ID 恢复仍允许用户显式选择合法的 header-only 会话。最近会话排序依据日志活动时间而非 mtime；不引入“上次选择”元数据或后台索引。
 
 ### 列表的数据、状态和成本
 
@@ -104,6 +148,7 @@ REPL 切换按“准备候选 → 关闭旧会话 → 替换会话与历史”�
 ```text
 bootstrap/cli：参数分流、配置、cwd/时钟/UUID/锁/存储组装
   ├─ --sessions → SessionStore.list → 固定字节扫描和占用探测 → 列表
+  ├─ --resume [ID] / --continue → 只读选择或定位 → 配置与写入预检 → openWrite
   ├─ --prompt   → displayTurn → runTurnStream（无事实 sink）
   └─ REPL：会话创建/打开/切换、输入和退出
        → core/runPersistentTurn：user → core facts → 唯一 turn_end
@@ -119,6 +164,7 @@ bootstrap/cli：参数分流、配置、cwd/时钟/UUID/锁/存储组装
 | 当前 turn 临时消息、模型次数、逐项工具事实 | core/runTurnStream 与批次执行器 | 仅完整校验后的消息和事实；不保存 SSE 片段 |
 | 唯一 turn_end 的选择、事实等待和业务/存储异常分流 | core/runPersistentTurn；不依赖 Node、文件路径或 seq | 最终 outcome 与安全业务 error |
 | 最近 20 组成功模型历史、输入、信号、会话切换 | bootstrap/repl | 磁盘不随内存窗口裁剪 |
+| picker current/all、编号→完整 ID 快照、等待/准备状态 | bootstrap 的共享选择器；同一时刻独占输入 | 仅内存，不改变 SessionStore 格式或模型消息 |
 | seq、timestamp、assistantId 映射、文件与锁句柄、最后确认游标 | 存储 adapter | seq/timestamp 与引用；句柄、Map、游标确认状态不另写事件 |
 | 待创建、打开中、可写、故障、关闭中、已关闭 | 应用生命周期与存储句柄 | 仅内存；不引入 session_end |
 | 工具 unknown/not_started、旧 turn interrupted | 扫描器依据事件推导 | 不写修复状态或伪造结果 |
@@ -134,8 +180,8 @@ bootstrap/cli：参数分流、配置、cwd/时钟/UUID/锁/存储组装
 | RegisteredTools.execute | 工具返回后取消检查可能丢掉已取得输出；内部异常统一包装 protocol_error | 合法完整输出先形成 ToolResult 并交付上层，后续取消不覆盖它；真正内部异常用稳定 ToolExecutionError 分类为 tool/tool_execution_failed |
 | ToolResult / ToolMessage | 前者有 ok，后者没有；循环有重复转换 | 保留职责，落盘完整 ToolResult；共用纯转换，模型消息仍无 ok、seq 和配置摘要 |
 | bootstrap/output.ts | displayTurn 同时调用 core 和渲染；reportError 无存储分类 | 让持久化协调路径复用文本渲染与换行收尾，不能绕开协调方；增加安全存储错误映射 |
-| bootstrap/repl.ts | 历史从空开始；catch 所有 turn 错误后继续；clear 仅清数组 | 接收恢复投影；只提交协调方确认结果；存储故障停输入并关闭；clear 与 resume 管理会话资源 |
-| bootstrap/cli.ts | 两种模式提前加载同一配置，无列表/恢复分流 | 列表不加载模型配置；帮助、参数和平台检查按顺序完成；组合存储与退出监督器 |
+| bootstrap/repl.ts | 历史从空开始；catch 所有 turn 错误后继续；clear 仅清数组；闲置 Ctrl+C 一律退出 | 接收恢复投影和 picker 输入状态；只提交协调方确认结果；存储故障停输入；new/clear 与 resume 管理资源，picker Ctrl+C 仅取消选择 |
+| bootstrap/cli.ts | 两种模式提前加载同一配置，无列表/恢复分流 | 解析可选 ID、continue 和参数互斥；列表/picker 浏览不加载模型配置；帮助、TTY、配置和平台检查按顺序完成 |
 
 取消边界只保证“已合法交付完整 ToolResult”不会被后续检查丢弃，不将文件系统已完成某次读取等同于业务结果已经交付。工具自身拒绝取消时仍是异常路径。保存等待放在工具业务 catch 之外，PersistenceError 原样穿透注册表和 core。
 
@@ -482,13 +528,15 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 
 | 分类/code | 启动或当前进程行为 |
 | --- | --- |
-| SessionAccessError：session_busy、not_found、cwd_mismatch、unsupported、corrupt、invalid_identity、permission_denied | 启动恢复退出 5；REPL 候选访问拒绝则释放候选、保留健康旧会话并允许重试 |
+| SessionAccessError：session_busy、not_found、cwd_mismatch、unsupported、corrupt、invalid_identity、permission_denied | 直接 ID/continue 启动恢复退出 5；picker 候选访问拒绝则释放候选并回选择器；REPL 保留健康旧会话并允许重试 |
 | SessionAccessError：platform_unsupported | 创建/恢复预检无持久化副作用地退出 5 |
 | SessionAccessError：lock_unavailable | 与 busy 区分；启动退出 5，REPL 停止新的持久化执行并关闭退出，不降级 |
 | PersistenceError：write_failed、sync_failed、repair_failed、ownership_lost、close_failed、contract_violation、io_timeout | 停止新执行/输入，不递归写终止；关闭或按应急期限结束，退出 5 |
 | 模型/工具普通失败、取消、超时 | 非成功 turn_end 确认后沿用阶段 03：REPL 继续，单次模式返回 4 |
 | 参数/配置失败 | 保持 2/3，不创建会话或发请求 |
 | 正常退出/闲置取消 | 资源关闭成功时为 0/130；保存或关闭故障优先为 5 |
+| CLI picker 取消、空视图、或非 TTY 调用 | q/空行/EOF 取消为 0，Ctrl+C 为 130；空视图等待显式选择范围/刷新/取消；非 TTY 为用法错误 2 |
+| --continue 无候选或选定候选后访问失败 | 退出 5，不改选旧会话或新建；REPL picker 的访问拒绝可回到选择器 |
 
 执行中保存失败即使同时观察到取消，也保留原 PersistenceError，不能改写为 AbortError、protocol_error 或 tool_result(ok:false)。访问阶段权限不合规为访问拒绝；已持有 writer 后 I/O/所有权变化是存储故障，不能被 REPL 的宽泛 catch 吞掉。
 
@@ -501,28 +549,31 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 | 保存确认 | 每个业务屏障完整写入和文件同步，创建同步目录 | 后台接受/普通 flush 边界较弱；合并同步优化待测量，不能越过副作用屏障 |
 | 写者 | 稳定 sidecar 的非阻塞内核锁，fs-ext@2.1.1 | mkdir 崩溃后需人工清理；心跳可能抢占暂停进程，不满足自动接管语义 |
 | 恢复 | 同 cwd、严格拒绝整个损坏文件、仅修复可证明未完成尾部 | 跳过坏行会伪造合法历史；自动补结果或续跑会误判外部执行 |
-| 模型历史与 clear | 最近 20 个完整成功 turn；clear 新建会话 | 失败 user 留在模型可能与新问题一起回答；原文件 context_reset 增加格式机制 |
+| 模型历史与新建 | 最近 20 个完整成功 turn；/new 新建会话，/clear 保留同义别名 | 失败 user 留在模型可能与新问题一起回答；原文件 context_reset 增加格式机制 |
+| 恢复入口 | 无 ID 默认共享 picker；--continue 当前 cwd 最近；完整 ID 直达；全局视图只预览其他 cwd | 只支持 ID 需要用户记忆/复制；完整 TUI、名称匹配和跨 cwd 运行扩大本阶段范围 |
 | 配置与模式 | 当前启动配置，user 外层仅 provider/model；REPL 保存、单次不保存 | 历史配置可能带凭证/过期策略；指纹及所有脚本自动保存扩大 v1 范围 |
 | 资源与清理 | 无记录字节硬上限、无索引分页、完整备份保留，操作有明确期限 | 上限需写读共同设计；自动删除与修复恢复需要独立所有权协议 |
 
 借鉴 Pi 的可读日志与惰性创建、DSH 的存储契约和所有权、Codex 的写者与保存屏障分工、ZCode 的核心端口及恢复投影。没有复制参考项目的树 UI、后台队列、SQLite 或宽容跳行；它们的同步 append/flush 也不作为本规格 fsync 保证的证据。参考源码和快照依据保留在调研报告，不在规格重复整份调研。
 
+本次入口对照了本地 [Codex CLI 的恢复分流](../../../references/codex/codex-rs/cli/src/main.rs)、[Codex 会话选择器](../../../references/codex/codex-rs/tui/src/resume_picker.rs)、[Pi 的启动参数](../../../references/pi/packages/coding-agent/src/cli/args.ts)和 [Pi 的交互选择器](../../../references/pi/packages/coding-agent/src/modes/interactive/components/session-selector.ts)。采用其“默认选择 / 最近继续 / 直接定位”分工，以及 current/all 的可见范围；具体按键、空列表和 cwd 执行边界以本规格为准，不推定其他项目的全部行为相同。
+
 ## 11. 实现任务清单
 
 按依赖顺序交付，每项完成必须在“实际结果”写明代码、验证和限制。不得在执行前把所有任务勾成完成。
 
-- [ ] **T1 规格与契约**：评审本规格和 ADR-006；新增 docs/contracts/session-store.md，固定格式、接口、扫描结果、错误与生命周期；CLI/REPL/tool-execution 契约登记阶段 04 draft 扩展，更新 architecture、文档入口和 legacy-paths 的实际影响。
+- [ ] **T1 规格与契约**：评审本规格和 ADR-006；新增 docs/contracts/session-store.md，固定格式、接口、扫描结果、错误与生命周期；CLI/REPL/tool-execution 契约登记阶段 04 draft 扩展，包括可选 ID、continue、共享 picker、new/clear 和输入/取消所有权；更新 architecture、文档入口和 legacy-paths 的实际影响。
 - [ ] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台验证实际安装、构建/CI 工具链和按需加载；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。
 - [ ] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。
 - [ ] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。
 - [ ] **T5 恢复与修复**：持锁重新扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 快照和纯模型投影；失败不发模型请求、不自动重放。
 - [ ] **T6 core 交付**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError，保持整批预检、顺序、额度和兼容路径。
 - [ ] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出。
-- [ ] **T8 CLI/REPL**：分开列表/单次/恢复，新建惰性保存、resume/clear、列表字段/排序/状态、配置差异提示、安全输出与退出映射；故障后停止消费管道中的后续问题。
+- [ ] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。
 - [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。
 - [ ] **T10 文档与完成审查**：按实测结果更新本文件、README、architecture、契约与依赖说明；报告保留限制和未验证环境，审核中文注释、Git diff 和阶段分支。只有验证完成才转 verified，用户审查后再转 done/申请集成。
 
-规划新增模块为 contracts/session.ts、core/runPersistentTurn.ts、core/sessionHistory.ts、core/toolMessage.ts，以及 adapters/session 下的 store/writer/scanner/repair/lock/prefix 组件；具体文件拆分可随实现规模合并，但职责、依赖方向和验收不能省略。bootstrap 可新增小型会话生命周期/退出监督模块，不把业务过程堆入参数解析器，不新建事件总线、插件平台或未使用抽象。
+规划新增模块为 contracts/session.ts、core/runPersistentTurn.ts、core/sessionHistory.ts、core/toolMessage.ts，以及 adapters/session 下的 store/writer/scanner/repair/lock/prefix 组件；具体文件拆分可随实现规模合并，但职责、依赖方向和验收不能省略。bootstrap 可新增共享 sessionPicker 与小型会话生命周期/退出监督模块，不把交互放入存储 adapter 或业务过程堆入参数解析器，不新建事件总线、插件平台或未使用抽象。
 
 ## 12. 验收矩阵与验证计划
 
@@ -538,7 +589,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 | A04 | 同 cwd 新进程恢复，随后新输入 | 请求包含最近成功历史及新问题；seq 连续、turnId 新建、文件身份不变；无旧工具执行 |
 | A05 | 工具往返、ok:false、空文件、未知工具 | 正常保存完整 ok/content，派生模型 tool 消息无 ok/seq/profile；未知工具有 start 和 ok:false；最终回答合法时可成功 |
 | A06 | 21 个成功 turn，中间穿插失败/中断 | 模型仅最近 20 个成功完整组；磁盘原文不裁剪；失败 user 不进入新请求 |
-| A07 | clear 后新输入、显式再打开旧会话 | 新 ID/文件、下一请求无旧上下文；旧文件可恢复；clear 关闭失败不进入新会话 |
+| A07 | /new 与 /clear 后新输入、显式再打开旧会话 | 两个命令同义，新 ID/文件、下一请求无旧上下文；旧文件可恢复；关闭失败不进入新会话 |
 | A08 | 当前/其他/父子 cwd、不同 worktree、目录改名、符号链接入口 | 默认列表过滤；global 其他目录仅预览；恢复严格按 realpath 相等，模型配置不从日志加载 |
 | A09 | provider/model 变化或缺摘要 | 一次安全提示且用当前配置；新 user 外层摘要正确，消息类型不扩展；不宣称核对其他配置 |
 | A10 | 正常、空、损坏、busy/unknown/changing 列表与并列时间 | 字段、隐藏计数、排序与状态独立；只读不改文件、不建目录；缓存观察不授予写权限 |
@@ -582,6 +633,23 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 | D07 | 输入管道预送多个问题，第一个触发保存失败 | 不再消费为后续 turn，不再发模型请求；安全 stderr 与退出 5，源码和构建产物一致 |
 | D08 | 新 CLI 参数互斥、--all 误用、非法 ID、列表无密钥 | 参数错误优先且无副作用；列表独立于模型配置；恢复失败不偷偷新建 |
 
+### 恢复入口与选择器
+
+| 编号 | 场景 | 必须观察到 |
+| --- | --- | --- |
+| E01 | --resume/-r 无 ID、有 ID，--continue/-c，所有模式组合 | 无 ID 进入 picker，有 ID 直达，continue 不弹 picker；模式两两互斥，空 ID/多余参数/continue 带参为 2 |
+| E02 | --all 与 sessions、无 ID resume、直接 ID、continue、单独使用 | 仅前两种合法；REPL /resume --all 初始为全局，非法组合不加载模型配置或创建文件 |
+| E03 | CLI/REPL picker 默认、切换 a、刷新 r | 相同字段/排序与组件逻辑，复用 SessionStore.list；只读、不申请候选写锁；编号只在显式刷新/切范围后重建 |
+| E04 | 选择编号前后列表顺序变化、文件被占用/删除/损坏 | 编号仍映射原展示 ID，openWrite 必须重验；访问拒绝显示并刷新，不误恢复另一个 ID；REPL 原历史和锁保持 |
+| E05 | busy/其他 cwd/unknown/changing/当前会话 | 前两者不可选且说明原因；未知或变化需正式打开判断；当前会话仅退出 picker，不重复打开；全局不切 cwd |
+| E06 | current 无记录、global 无记录、只有空会话、取消 | 提示无会话，仍能 a/r/q，无虚构默认选项或偷偷新建；global 显式空会话仅同 cwd 可选 |
+| E07 | 非整数/越界/命令文字、空 Enter、q | 无效选择不进模型；空 Enter/q 取消；启动取消为 0，REPL 返回原提示且历史不变 |
+| E08 | 等待选择输入时 Ctrl+C/EOF 与原 REPL 闲置 Ctrl+C | 启动 Ctrl+C=130/EOF=0；REPL picker Ctrl+C 只取消选择，EOF 关闭整个 REPL；原普通提示 Ctrl+C 仍为 130 |
+| E09 | stdin 或 stdout 非 TTY 的无 ID resume；管道中的 /resume 后有下一条问题 | CLI 在读取/配置/副作用前返回 2 并提示替代命令；REPL 不拿下一行当选择答案；直接 ID/continue 仍可用于非 TTY |
+| E10 | continue 的时间并列、旧失败/中断/坏尾行、空/损坏/其他 cwd | 按已定义有效非空候选和稳定排序选最近；排除项有诊断；无候选为 not_found/5，不加载模型配置或新建 |
+| E11 | continue 最近候选 busy、unknown/changing，及选后发生竞争 | 不因 busy 或未知占用改选更旧目标；正式 openWrite 失败即对应错误/5，无循环回退 |
+| E12 | 启动 picker 无密钥浏览/取消、选后配置失败；REPL 切换时配置变化、I/O 期取消或挂起 | 启动浏览不依赖密钥，选后配置错误=3 且无写锁/修复；REPL 不重读 .env；人工输入无超时，I/O 有期限；准备期取消等清理，旧 close 开始后不撤销切换；单一输入消费者 |
+
 实现时至少运行下列项目命令，保留每次结果及对应环境；本轮撰写规格不把它们记为通过：
 
 ```bash
@@ -604,8 +672,10 @@ fs-ext 原生依赖的构建前提须在实现时记录，包括 Node 版本、m
 
 ### 本轮验证与未完成项
 
-本轮通过文档检查：13 节结构、10 个未完成任务、34 个唯一验收编号、相关文档 54 个本地链接，以及两个完整 JSONL 示例的 JSON、连续 seq、调用引用和终止组合；调研正文保持不变，仅更新收口状态和规格入口。
+首稿通过文档检查：13 节结构、10 个未完成任务、34 个唯一验收编号、相关文档 54 个本地链接，以及两个完整 JSONL 示例的 JSON、连续 seq、调用引用和终止组合；调研正文保持不变，仅更新收口状态和规格入口。
 
 另将规格类型提取至临时 .mts，引用现有 message/tool/agent 类型，使用项目 strict、noUncheckedIndexedAccess、exactOptionalPropertyTypes 等选项执行 `tsc --noEmit`，校验通过；这只验证声明兼容性，不等于已实现存储接口或通过项目全套检查。本轮未运行 pnpm typecheck/lint/test 或真实模型请求，未执行尚未实现的运行时验收。T1–T10 均未标完成，声明检查不能替代保存屏障、取消竞态或错误穿透测试。
 
-下一步先评审此 proposed 规格，重点看新固定的 30 秒操作等待/5 秒故障收尾、完整 ID 选择和恢复接口。评审通过后同步 draft 契约、接受 ADR 并按 T1–T10 实现。阶段完成后仍停在阶段分支；向 main 集成、推送或打标签须用户另行授权。
+2026-10-28 的入口修订新增 E01–E12，当前共 46 个待实现验收场景；格式、存储接口和 30 秒/5 秒期限不变。本轮仅修改规格及 proposed ADR，文档检查通过：46 个验收编号、两份文档 11 个本地链接、代码围栏、命令互斥及文档 diff；另复核取消/非 TTY/无会话边界，并确认 JSONL 示例及类型声明与首稿一致。没有重跑未变化的类型声明校验、业务测试或真实模型请求。已收口调研及既有的其他工作区修改不在本次变更范围内。
+
+下一步先评审此 proposed 规格，重点看恢复 picker、continue 最近规则、new/clear 别名及既定关闭/恢复接口。评审通过后同步 draft 契约、接受 ADR 并按 T1–T10 实现。阶段完成后仍停在阶段分支；向 main 集成、推送或打标签须用户另行授权。
