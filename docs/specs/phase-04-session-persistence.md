@@ -563,7 +563,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 按依赖顺序交付，每项完成必须在“实际结果”写明代码、验证和限制。不得在执行前把所有任务勾成完成。
 
 - [x] **T1 规格与契约**：完成规格评审和 ADR-006 接受；新增 docs/contracts/session-store.md，固定格式、接口、扫描结果、错误与生命周期；CLI/REPL/tool-execution 契约登记阶段 04 draft 扩展，包括可选 ID、continue、共享 picker、new/clear 和输入/取消所有权；更新 architecture、文档入口和 legacy-paths 的实际影响。
-- [x] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台验证实际安装、构建/CI 工具链和按需加载；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。
+- [x] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台完成实际安装、构建授权、本机工具链和按需加载验证；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。托管 CI 的矩阵与流水线验证移交 T9。
 - [ ] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。
 - [ ] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。
 - [ ] **T5 恢复与修复**：持锁重新扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 快照和纯模型投影；失败不发模型请求、不自动重放。
@@ -711,9 +711,9 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm instal
 
 - 初次 add 时 pnpm 安全策略提示 Ignored build scripts，未将包存在误报为可用。加入只授权 fs-ext 的构建配置后实际执行 node-gyp configure build，gyp info ok；使用 createRequire 加载，版本为 2.1.1，flock 导出为 function。`file fs_ext.node` 确认为 Mach-O 64-bit bundle arm64。
 - 另将 package.json、lockfile、构建授权配置复制到隔离临时目录，并使用独立空 pnpm store 执行 `pnpm --dir <temp> --store-dir <temp>/store install --frozen-lockfile --prod`，再次实际编译成功并通过目标 Node 加载，未依赖已有 node_modules/native 产物。仅复制依赖文件，不复制 .env 或会话。
-- 实测构建前提：Xcode Command Line Tools（/Library/Developer/CommandLineTools），Apple clang 21.0.0、GNU Make 3.81、Python 3.14.5、node-gyp 12.3.0 与 Node 24.14.0 headers。此机 node-gyp 来自已有 npm 工具链；CI 必须保证可调用的 node-gyp/Python/编译器/make、目标 headers（首次可能需网络下载），以及 pnpm 的构建授权。未新增项目 node-gyp 依赖。
+- 实测构建前提：Xcode Command Line Tools（/Library/Developer/CommandLineTools），Apple clang 21.0.0、GNU Make 3.81、Python 3.14.5、node-gyp 12.3.0 与 Node 24.14.0 headers。此机 node-gyp 来自已有 npm 工具链；未新增项目 node-gyp 依赖。T2 收口本机目标工具链、隔离安装和构建授权；托管 CI 是否具备 node-gyp/Python/编译器/make、目标 headers（首次可能需网络下载）及 pnpm 构建授权，移交 T9 验证。
 - 上游 fs-ext 编译出现 5 条函数指针类型转换警告，但构建及实际 flock 测试成功，未修改原生依赖源码。optional 只允许非持久化安装继续，不允许持久化写入降级；目标构建/加载失败应视为 T2 阻塞。
-- 未运行托管 CI；以上是本机目标工具链与隔离安装的实测，不代表 Linux、Windows、macOS x64 或其他 Node ABI 通过。
+- 未运行托管 CI；这不阻塞 T2，因为 T2 的责任是本机目标工具链和隔离安装收口；T9 负责把同一构建前提接入托管 CI 并报告 Linux、Windows、macOS x64 或其他 Node ABI 的结果。以上不代表未验证环境通过。
 
 #### 项目检查与真实子进程验收
 
@@ -731,6 +731,7 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'for attempt
 - inode/权限：取得 flock 的回调期间替换锁路径，复核后拒绝交付；运行中替换是 ownership_lost，故障锁不复活，release 不删除新旧文件。新根/locks/锁文件权限、符号链接、路径穿越与不自动 chmod 均验证。
 - D06 的 T2 边界：可控 Promise 暂扣真实 native 成功回调，期间另一个真实进程仍 busy，本进程登记也仍 busy；回调交付后才返回锁并允许正常释放。不设置提前关闭 fd 的锁超时。完整 30 秒 io_timeout、永不 settle/迟于 30 秒的 writer/store 操作、5 秒组合根退出属于 T7/T9，尚未实现或验收。
 - 三轮重复锁验收各 25/25 通过（包含实际双进程、SIGSTOP/SIGKILL）；所有锁路径使用临时目录。research 文件未改动/未暂存，其初末 SHA-256 均为 987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b。
+- probe 的正常路径在关闭只读 fd 后返回 busy/available/unknown；关闭失败沿 `PersistenceError(close_failed)` 向上抛出，不能被列表层降级为 unknown。T2 将该语义固定为存储故障退出 5；未将关闭失败伪装成状态未知。
 
 #### 限制与下一步
 

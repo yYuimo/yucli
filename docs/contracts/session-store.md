@@ -216,8 +216,9 @@ type SessionList = {
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
+- probe(sessionId) 的清理是存储屏障：shnb/所有权检查结束后必须关闭只读 fd；关闭失败不降级为 `unknown`，而是抛 `PersistenceError`（`code: "close_failed"`、`operation: "probe_cleanup"`）。上层列表或恢复将该故障按存储失败收尾，最终退出码为 5；`unknown` 只表示状态/能力无法可靠判断且本次资源清理成功。
 - [lockPlatform](../../src/adapters/session/lockPlatform.ts) 精确检查 macOS arm64 + Node 24.14.0，再按需加载 fs-ext，并只读检查本地挂载；失败在创建前抛 platform_unsupported 或 lock_unavailable。没有 mkdir/心跳/无锁降级。
-- T2 的最小稳定错误与锁接口放在 [session-lock.ts](../../src/contracts/session-lock.ts)，未提前声明 T3 日志业务类型；后续扩展须沿用同一异常身份。已有占用为 session_busy，取锁后身份变更为 ownership_lost，关闭失败为 close_failed。
+- T2 的最小稳定错误与锁接口放在 [session-lock.ts](../../src/contracts/session-lock.ts)，未提前声明 T3 日志业务类型；后续扩展须沿用同一异常身份。已有占用为 session_busy，取锁后身份变更为 ownership_lost，任一锁描述符（包括 probe 的只读 fd）关闭失败为 close_failed。
 - local 检查使用 macOS mount 的显式 local 标记、最近已存在祖先和最长路径段匹配；未知/非 local 拒绝，不声称识别所有共享挂载或隔离并发父目录替换。只验证本机 APFS，不承诺其他环境。
 - T2 不提供 create/openWrite/list/appendDurable/close 的 30 秒期限与 5 秒故障退出；这些依然是完整 SessionStore/writer/T7 的待实现要求。锁适配器不会在 native 调用未 settle 时提前关闭或解锁。
 
