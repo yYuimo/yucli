@@ -1,0 +1,3 @@
+# fs-ext 需要 node-gyp 原生构建；只授权已确认的锁依赖，不全局放行安装脚本。
+onlyBuiltDependencies:
+  - fs-ext

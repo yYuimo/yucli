@@ -1,12 +1,12 @@
 # 阶段 04：会话保存与恢复
 
-状态：`designed`
+状态：`implementing`
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审，进入 `designed`，尚未进入实现。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按本轮授权仅实现 T2，阶段进入 `implementing`，T3–T10 未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。本阶段尚未实现，不将调研中的类型检查和锁探针视为应用验收通过。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前仅完成 T1 文档及 T2 锁能力，不将调研中的类型检查/锁探针或 T2 子集验证视为整个阶段的应用验收。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -563,7 +563,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 按依赖顺序交付，每项完成必须在“实际结果”写明代码、验证和限制。不得在执行前把所有任务勾成完成。
 
 - [x] **T1 规格与契约**：完成规格评审和 ADR-006 接受；新增 docs/contracts/session-store.md，固定格式、接口、扫描结果、错误与生命周期；CLI/REPL/tool-execution 契约登记阶段 04 draft 扩展，包括可选 ID、continue、共享 picker、new/clear 和输入/取消所有权；更新 architecture、文档入口和 legacy-paths 的实际影响。
-- [ ] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台验证实际安装、构建/CI 工具链和按需加载；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。
+- [x] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台验证实际安装、构建/CI 工具链和按需加载；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。
 - [ ] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。
 - [ ] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。
 - [ ] **T5 恢复与修复**：持锁重新扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 快照和纯模型投影；失败不发模型请求、不自动重放。
@@ -670,17 +670,70 @@ fs-ext 原生依赖的构建前提须在实现时记录，包括 Node 版本、m
 - 2026-10-29：完成 T1 文档收口，新增会话存储契约，并在 CLI、REPL、工具执行契约中登记阶段 04 的 `draft` 扩展；同步架构、文档入口和非主流程清单。
 
 - 会话持久化调研与逐项讨论收口；规格首稿、accepted ADR 和实现/验收任务已整理。
-- 既有代码阅读确认了中途交付、结果取消、错误分类和 REPL 继续行为的调整范围；生产源码和依赖尚未修改，受影响契约已登记阶段 04 的 `draft` 扩展。
-- 调研期间 fs-ext@2.1.1 已在隔离目录、macOS arm64 + Node 24.14.0 验证安装、双进程互斥、异步 exnb、只读 shnb、暂停保护、描述符关闭/SIGKILL 释放及目录同步调用；证据范围见调研报告 9.5。项目内安装、CI 与应用集成仍待 T2/T9。
+- T1 时的既有代码阅读确认了中途交付、结果取消、错误分类和 REPL 继续行为的调整范围；当时未修改生产源码和依赖，受影响契约登记为阶段 04 `draft`。T2 的实际变更见下节。
+- 调研期间 fs-ext@2.1.1 已在隔离目录、macOS arm64 + Node 24.14.0 验证安装、双进程互斥、异步 exnb、只读 shnb、暂停保护、描述符关闭/SIGKILL 释放及目录同步调用；证据范围见调研报告 9.5。项目内安装与锁应用级测试现由 T2 完成；托管 CI 及完整持久化应用集成仍待 T9。
 
 ### 本轮验证与未完成项
 
-- 本轮仅完成设计文档与契约同步；未修改生产源码、依赖或测试，未声称阶段 04 已实现。
+- 以下 T1 说明保留为历史记录；本轮 T2 实现及验证单列在后，不声称阶段 04 已全部实现。
 
 T1 文档检查覆盖阶段规格、ADR、契约、架构和文档入口：本地链接均可解析，阶段状态与契约状态一致，新增 JSONL/事实交付示例与规格中的记录类型、错误和恢复边界一致。
 
-规格中的候选类型此前已提取至临时 .mts，并使用项目 strict、noUncheckedIndexedAccess、exactOptionalPropertyTypes 等选项执行 `tsc --noEmit`，校验通过；这只验证声明兼容性，不等于已实现存储接口或通过项目全套检查。本轮未运行 pnpm typecheck/lint/test 或真实模型请求，未执行尚未实现的运行时验收。T1 已完成，T2–T10 仍待实现；声明检查不能替代保存屏障、取消竞态或错误穿透测试。
+规格中的候选类型此前已提取至临时 .mts，并使用项目 strict、noUncheckedIndexedAccess、exactOptionalPropertyTypes 等选项执行 `tsc --noEmit`，校验通过；这只验证声明兼容性，不等于已实现存储接口或通过项目全套检查。T1 当时未运行 pnpm typecheck/lint/test 或真实模型请求，未执行尚未实现的运行时验收。T1 的声明检查不能替代保存屏障、取消竞态或错误穿透测试；T2 新增检查见后文。
 
 2026-10-28 的入口修订新增 E01–E12，当前共 46 个待实现验收场景；格式、存储接口和 30 秒/5 秒期限不变。T1 复核了取消、非 TTY、无会话边界、JSONL 示例、类型声明、命令互斥和本地链接；没有重跑未变化的类型声明校验、业务测试或真实模型请求。调研报告中的其他工作区修改不属于本次 T1 文档收口。
 
-下一步按 T2–T9 开始实现与验证：先完成 fs-ext 锁和平台预检，再实现格式扫描、writer、恢复修复、core 事实交付、协调退出和 CLI/REPL 接线；每项完成后更新实际结果。阶段完成后仍停在阶段分支；向 main 集成、推送或打标签须用户另行授权。
+### T2 依赖与锁：实际结果（2026-10-29）
+
+本轮只执行 T2，T3–T10 未勾选、未实现；规格保持 `implementing`，会话存储契约保持 `draft`。没有实现 JSONL writer、扫描/修复、SessionStore、picker、coordinator 或 core 事实交付，没有修改 bootstrap/cli、bootstrap/repl 或普通 --prompt/help 行为。
+
+#### 代码与边界
+
+- package.json 的 optionalDependencies 精确固定 `fs-ext: 2.1.1`，pnpm-lock.yaml 同步，并锁定其传递依赖 nan 2.30.0。新增 pnpm-workspace.yaml 的 onlyBuiltDependencies，仅允许 fs-ext 原生构建；不全局放开安装脚本。
+- [session-lock.ts](../../src/contracts/session-lock.ts) 仅提供 T2 的 SessionLock、LockWriterState 及锁所需的最小 SessionAccessError/PersistenceError 分类，不提前定义 T3 的日志格式/事实/扫描类型。后续错误分类可在 T3 扩展，不能将其另造为不同的同名异常而破坏 instanceof。
+- [lockPlatform.ts](../../src/adapters/session/lockPlatform.ts) 在任何 mkdir/open-create 前校验 macOS arm64、精确 Node 24.14.0，按需加载并验证 native，再只读解析最近已存在祖先及 `/sbin/mount` 的最长路径段匹配，要求显式 local。平台/挂载无法确认是 platform_unsupported；native 缺失、加载或导出失败是 lock_unavailable，不切换锁方案。构造/import 不加载 native。
+- [SessionLockAdapter.ts](../../src/adapters/session/SessionLockAdapter.ts) 暴露 preflight/acquire/probe；默认根 ~/.yucli，测试注入临时根。仅预检通过后创建 0700 根/locks 容器和 0600 的 locks/<sessionId>.lock；拒绝受管目录/末端锁符号链接、非普通文件、非私有权限/所有者。不自动 chmod，不截断既有锁文件。
+- 写者为 exnb，读探测为已有文件的 O_RDONLY + shnb；缺路径、无法加载或无法可靠探测返回 unknown，不产生新目录/文件。本进程持有或正在申请的 sessionId 直接返回 busy，不为自己的锁打开额外探测描述符。available 不是写入许可，真正写入必须重新 acquire。
+- 取锁后比较路径 lstat、描述符 fstat 的 dev/ino，并复核受管目录身份；运行中由 assertOwnership 再查，替换/删除/权限变化是 ownership_lost，故障保持，不因路径被换回而复活。失败只关闭旧描述符，不 unlink 被替换的新文件。
+- 进程内登记在首次 await 前占位，跨 adapter 实例禁止同会话重复申请（同 ID 即使使用不同注入根也保守拒绝）。锁句柄隐藏 fd；release 幂等，等待已发出的检查 settle 后关闭描述符，由内核释放 flock，确认关闭后才撤销登记。申请失败也等 native 调用实际结束后清理；关闭失败报告 close_failed 并不假装释放成功。
+- 不写 PID/mtime/年龄/心跳，不清理稳定锁文件，不用 mkdir 占位或无锁 fallback。容器目录的 mkdir 只是为真正的 flock 文件提供位置，不作为互斥机制。当前不认识正文 I/O：未来 writer 必须先等其 I/O settle/关闭正文，最后 release。
+
+#### 目标环境安装、构建与按需加载
+
+实际机器 Darwin arm64，本轮所有安装、构建和测试均以 Node 24.14.0 / pnpm 10.33.2 运行（Node ABI 137），未使用全局 Node 26 构建 CLI/native。磁盘测试路径位于本地 APFS，真实 ~/.yucli 未参与测试。
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm add --save-optional --save-exact fs-ext@2.1.1'
+# 添加 onlyBuiltDependencies 后在目标 Node 下执行：
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm rebuild fs-ext'
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm install --frozen-lockfile'
+```
+
+- 初次 add 时 pnpm 安全策略提示 Ignored build scripts，未将包存在误报为可用。加入只授权 fs-ext 的构建配置后实际执行 node-gyp configure build，gyp info ok；使用 createRequire 加载，版本为 2.1.1，flock 导出为 function。`file fs_ext.node` 确认为 Mach-O 64-bit bundle arm64。
+- 另将 package.json、lockfile、构建授权配置复制到隔离临时目录，并使用独立空 pnpm store 执行 `pnpm --dir <temp> --store-dir <temp>/store install --frozen-lockfile --prod`，再次实际编译成功并通过目标 Node 加载，未依赖已有 node_modules/native 产物。仅复制依赖文件，不复制 .env 或会话。
+- 实测构建前提：Xcode Command Line Tools（/Library/Developer/CommandLineTools），Apple clang 21.0.0、GNU Make 3.81、Python 3.14.5、node-gyp 12.3.0 与 Node 24.14.0 headers。此机 node-gyp 来自已有 npm 工具链；CI 必须保证可调用的 node-gyp/Python/编译器/make、目标 headers（首次可能需网络下载），以及 pnpm 的构建授权。未新增项目 node-gyp 依赖。
+- 上游 fs-ext 编译出现 5 条函数指针类型转换警告，但构建及实际 flock 测试成功，未修改原生依赖源码。optional 只允许非持久化安装继续，不允许持久化写入降级；目标构建/加载失败应视为 T2 阻塞。
+- 未运行托管 CI；以上是本机目标工具链与隔离安装的实测，不代表 Linux、Windows、macOS x64 或其他 Node ABI 通过。
+
+#### 项目检查与真实子进程验收
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test && pnpm dev --help'
+# 同一已构建产物，重复 3 轮锁测试：
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'for attempt in 1 2 3; do pnpm exec vitest run tests/sessionLock.test.ts || exit 1; done'
+```
+
+- typecheck、lint、test 通过；pnpm test 在目标 Node 下先 clean/build，再运行 10 个文件、245 个测试。--help 用项目工具链运行成功，内容与阶段 03 行为一致；旧 CLI/REPL、wire、架构检查全部保留通过。
+- [sessionLock.test.ts](../../tests/sessionLock.test.ts) 新增 25 项；真实子进程载入构建后的 adapter，通过 IPC ready/held/released 响应确认操作顺序；SIGSTOP 后轮询 ps 状态直到 T，SIGKILL 后等待 exit 再接管。不使用固定 sleep 猜时序。
+- D01 锁层：同会话双进程一写一拒，busy 非阻塞返回；不同会话独立；同进程不同实例和准备中重复申请拒绝。启动退出 5 与 REPL picker 原历史保留属于 T8/T9，未提前声称完整 D01 通过。
+- D02 锁层：闲置仍持有；SIGSTOP + 故意设置旧 mtime 不可抢占；描述符关闭和 SIGKILL/exit 后可接管，稳定文件 dev/ino 保留。共享读者持 shnb 时 probe 仍 available、exnb 仍 busy，实际区分了共享探测与独占写锁。
+- D03 锁层：native 加载/导出失败、注入未支持平台与 Node、远程/未知挂载均安全拒绝；mkdir/open-create 前无落盘。实际阻止 native 模块加载的子进程中，import adapter、--help、--prompt 仍成功，加载尝试数为零，未创建临时 home 下的 .yucli。--prompt 使用本地 mock SSE，不访问真实模型。
+- inode/权限：取得 flock 的回调期间替换锁路径，复核后拒绝交付；运行中替换是 ownership_lost，故障锁不复活，release 不删除新旧文件。新根/locks/锁文件权限、符号链接、路径穿越与不自动 chmod 均验证。
+- D06 的 T2 边界：可控 Promise 暂扣真实 native 成功回调，期间另一个真实进程仍 busy，本进程登记也仍 busy；回调交付后才返回锁并允许正常释放。不设置提前关闭 fd 的锁超时。完整 30 秒 io_timeout、永不 settle/迟于 30 秒的 writer/store 操作、5 秒组合根退出属于 T7/T9，尚未实现或验收。
+- 三轮重复锁验收各 25/25 通过（包含实际双进程、SIGSTOP/SIGKILL）；所有锁路径使用临时目录。research 文件未改动/未暂存，其初末 SHA-256 均为 987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b。
+
+#### 限制与下一步
+
+T2 已完成且无阻塞，阶段整体仍为 implementing。advisory flock 仅协调遵守协议的写者，assertOwnership 是检查点而非文件系统事务，不对外部编辑器/父目录并发替换提供 OS 沙箱隔离。local 判定依赖 macOS mount 输出与最近存在祖先的保守匹配，拒绝已知非 local/未知结果，但不声称识别所有共享/用户态挂载或防止检查后的挂载变化；未在真实 NFS/SMB 或其他平台做安装/行为验收。
+
+本次停止在 T2；下一次获得明确任务后才进入 T3。阶段分支提交仅含 T2 源码、测试、依赖与相关记录，保留用户 research 未提交修改，不合并 main、不推送、不创建标签。
