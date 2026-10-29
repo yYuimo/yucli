@@ -1,5 +1,5 @@
 /**
- * contracts 层的会话业务数据与稳定异常。存储 adapter 校验 JSON 后创建恢复数据，
+ * contracts 层的会话业务数据、写入能力与稳定异常。存储 adapter 校验 JSON 后创建恢复数据，
  * 后续 core 只消费这里的业务消息，不接触磁盘 seq、文件句柄或 JSONL。
  * 类型声明在运行时会被擦除；它们不能替代 T3 扫描器的 schema/生命周期检查。
  */
@@ -74,11 +74,30 @@ export type CoreTurnFact = { turnId: string } & (
   | { type: "tool_end"; call: CallRef; end: ToolEnd }
 );
 
-/** user/turn_end 的业务所有者是后续协调方；本类型不实现 writer、确认屏障或协调器。 */
+/** user/turn_end 的业务所有者是后续协调方；writer 消费此数据，不负责执行业务。 */
 export type TurnFact = CoreTurnFact | ({ turnId: string } & (
   | { type: "user"; message: TextMessage & { role: "user" }; runtimeProfile: RuntimeProfile }
   | { type: "turn_end"; end: TurnEnd }
 ));
+
+/**
+ * 会话的有序保存能力，由文件 adapter 创建，后续协调方逐条 await 使用。
+ * 不暴露文件句柄、锁或取消 signal；类型检查不能替代 writer 的运行时契约校验。
+ */
+export interface SessionWriter {
+  /**
+   * 在调用时快照事实，完整写入 JSONL + LF 并等待 FileHandle.sync，返回耐久确认序号。
+   * 内部串行 I/O；调用方仍须逐条等待屏障。契约/写入/同步/所有权失败后永久拒绝追加，
+   * 不重试可能已经写出的记录；关闭开始后也拒绝追加，均抛 PersistenceError。
+   */
+  appendDurable(fact: TurnFact): Promise<{ confirmedSeq: number }>;
+
+  /**
+   * 首次调用停止接受新事实，等待已发出的 I/O，关闭正文后才释放写锁。
+   * 重复调用等待同一结果；关闭失败抛 close_failed，不能假装锁已安全释放。
+   */
+  close(): Promise<void>;
+}
 
 /** 扫描器从合法 header 提取的会话身份；不含格式版本或平台资源。 */
 export interface SessionMeta {
@@ -104,6 +123,28 @@ export interface RecoveredTurn {
   runtimeProfile?: RuntimeProfile;
   /** 原始业务顺序，去掉 seq、tool_start/end 和 turn_end，不执行工具。 */
   items: readonly RecoveredItem[];
+}
+
+/** create 或未来 openWrite 交付的业务快照；不含磁盘游标或平台资源。 */
+export interface SessionSnapshot {
+  /** 校验后的稳定身份；create 使用真实 cwd 和同一次取值的创建时间/文件名。 */
+  meta: SessionMeta;
+  /** create 为空；未来恢复只交付最近 20 个完整成功 turn。 */
+  recentSuccessfulTurns: readonly RecoveredTurn[];
+  /** 最近 user 的运行摘要；新会话尚无 user，因此缺失。 */
+  lastUserProfile?: RuntimeProfile;
+  /** 证据推导的中断数量；create 为零。 */
+  interruptedTurnCount: number;
+  /** 本次打开的尾部修改；T4 仅新建，固定 none，不实现恢复修复。 */
+  repair: "none" | "truncate_tail" | "append_lf";
+}
+
+/** 创建/打开成功后转交调用方的 writer 和独立业务快照；失败不得交付半准备资源。 */
+export interface OpenedSession {
+  /** 拥有正文与锁的写入能力，调用方负责 close；adapter 同时登记用于整体收尾。 */
+  writer: SessionWriter;
+  /** 已确认的会话读模型；不能以它授权其他 writer 或重跑旧执行。 */
+  snapshot: SessionSnapshot;
 }
 
 /** 尚未取得可写会话时的稳定访问分类；锁与扫描共用同一个异常类。 */

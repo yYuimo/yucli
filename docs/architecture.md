@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 进入 `implementing`，T2 原生锁/预检与 T3 JSONL 类型/只读扫描已实现并验证；writer、修复、SessionStore 及 CLI 接线尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 进入 `implementing`，T2 原生锁/预检、T3 JSONL 类型/只读扫描及 T4 文件创建/writer 已实现并验证；恢复修复、完整 SessionStore、core 持久化交付及 CLI 接线尚未实现。
 
 ## 目标场景
 
@@ -114,7 +114,7 @@ src/
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
 
-### 阶段 04 的设计边界（T2 锁与 T3 只读扫描已实现）
+### 阶段 04 的设计边界（T2 锁、T3 扫描与 T4 文件/writer 已实现）
 
 阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
 
@@ -126,9 +126,13 @@ src/
 
 fs-ext@2.1.1 放 optionalDependencies，pnpm 构建脚本仅授权该包；构建前提和目标 Node 24.14.0 + macOS arm64 的子进程/隔离安装验证见[阶段 04 T2 实际结果](specs/phase-04-session-persistence.md#t2-依赖与锁实际结果2026-10-29)。T2 完成不等于整个存储契约已实现，30 秒存储期限与 5 秒退出监督仍由 T7/T9 后续交付。
 
-T3 新增 `contracts/session.ts` 的业务数据/稳定错误（锁入口重导出同一异常），以及 adapter 内的 `sessionSchema → sessionSequence` 校验、`jsonPrefix` 与 `scanSession` 字节扫描。扫描器以初始 fstat 固定 `[0,S)`，严格 UTF-8，提供 none/missing_lf/incomplete 与全文件 corrupt/unsupported 拒绝；损坏结果不暴露局部可执行历史。合法结果返回列表统计、工具证据及最近 20 个完整成功业务组，由未来 core 再转模型消息；只读观察不授予写入或恢复执行权。当前 CLI 没有调用扫描器，扫描不创建目录、不修改正文、不备份、不 fsync；T4/T5 仍负责文件创建/权限、writer 和持锁修复。T3 验证与内存/并发限制见[阶段 04 T3 实际结果](specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。
+T3 新增 `contracts/session.ts` 的业务数据/稳定错误（锁入口重导出同一异常），以及 adapter 内的 `sessionSchema → sessionSequence` 校验、`jsonPrefix` 与 `scanSession` 字节扫描。扫描器以初始 fstat 固定 `[0,S)`，严格 UTF-8，提供 none/missing_lf/incomplete 与全文件 corrupt/unsupported 拒绝；损坏结果不暴露局部可执行历史。合法结果返回列表统计、工具证据及最近 20 个完整成功业务组，由未来 core 再转模型消息；只读观察不授予写入或恢复执行权。当前 CLI 没有调用扫描器，扫描不创建目录、不修改正文、不备份、不 fsync；T4 已补充新文件/writer，已有文件持锁修复仍属 T5。T3 验证与内存/并发限制见[阶段 04 T3 实际结果](specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。
 
 T3 审查修正把工具终止收窄为 ToolEnd（工具执行失败或两种取消），turn_end 保留完整业务原因；当前不接受工具 timeout。SessionSequence 用失败/完成标志执行单次使用约束，错误后不能生成摘要，finish 后不能再修改已返回读模型。未来 writer/replay 需沿用这些类型和运行时边界；单行/前缀深度仍无硬上限，不把分块扫描当作有界内存。
+
+T4 增加 `contracts/session.ts` 的 SessionWriter/SessionSnapshot/OpenedSession，以及 `SessionFileAdapter → SessionWriterAdapter → sessionFact → sessionSchema/SessionSequence` 新建与追加路径。文件 adapter 在预检后核对 cwd realpath、私有目录与 UUID，取原 T2 锁后 wx 独占创建正文；header/文件/必要目录同步后返回空快照与 writer。writer 深拷贝事实、转换已确认的 assistantId 引用，串行处理短写和 sync，成功才确认 seq；永久故障后不重试不确定行。每个保存检查点复核正文/目录/锁身份。
+
+资源从 create 准备阶段即登记，writer/文件 adapter 的 close 都幂等并等待实际 I/O settle；正文/临时目录 fd 全部关闭成功后才释放 T2 锁，关闭失败继续保留登记和锁。`sessionFileIO` 提供真实 Node I/O 的窄注入，测试使用临时目录及 T3 双扫描 oracle。T4 不提供 openWrite/list/repair，不修改 core/bootstrap；30 秒/5 秒监督仍待 T7。完整 T4 验证与开发报告记录在阶段规格中，整体阶段没有因此转为 verified。
 
 ### 依赖检查
 

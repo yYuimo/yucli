@@ -218,7 +218,7 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描；本文整体仍为 draft，没有 SessionStore/SessionWriter、备份修复、持久化 CLI 或 core 事实交付。
+T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描，T4 再追加文件创建/writer；本文整体仍为 draft，完整 SessionStore、备份修复、持久化 CLI 和 core 事实交付仍待后续任务。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
@@ -232,14 +232,22 @@ T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描；本文整
 
 ## T3 只读格式与扫描实现状态（2026-10-29）
 
-- [session.ts](../../src/contracts/session.ts) 提供运行摘要、安全错误、事实数据、恢复业务组及稳定异常；声明事实数据不表示已经接入 core 交付。SessionStore/SessionWriter 和保存屏障仍待后续任务。
+- [session.ts](../../src/contracts/session.ts) 在 T3 提供运行摘要、安全错误、事实数据、恢复业务组及稳定异常；声明事实数据不表示已经接入 core 交付。T4 追加 SessionWriter/空快照类型及下节文件保存屏障，完整 SessionStore 仍待后续任务。
 - [scanSession.ts](../../src/adapters/session/scanSession.ts) 的 scanSessionFile 拥有并关闭只读 fd；scanSessionHandle 借用已有 fd，不替调用方关闭。初次 fstat 固定 dev/ino/S，显式 read 只解释 `[0,S)`，0x0A 分行、fatal UTF-8；返回 [scanTypes.ts](../../src/adapters/session/scanTypes.ts) 中的 status 判别联合。
 - valid 分支包含 validEndBytes、lastLfEndBytes、lastSeq、tailKind、列表统计、无正文 turn/工具证据及最近 20 个完整成功业务组；rejected 分支仅含来源和安全位置/原因，不交付可局部恢复的历史或边界。missing_lf 的完整记录计入 seq/S，incomplete 保留到上一合法 LF 后的 P；仅完整且全套校验合法的记录进入状态机。
 - schema 和状态机严格执行第 5 节字段、序号、完整引用/批内顺序/终止边界；独立 JSON 前缀识别器结合 UTF-8 状态判断可完成性，不读取 JSON.parse 错误文字。unknown/not_started 与旧 interruption 由证据推导，不补写事件或重跑工具。
 - T3 审查修正将 tool_end 类型/运行时配对收窄为工具失败或取消；turn 级错误和工具 timeout 拒绝。SessionSequence 明确为单次使用，accept 失败后或 finish 成功后继续 accept/finish 均抛安全的 validator_state，不返回失败后的局部历史，也不改变已交付摘要。直接 API 和文件扫描反例已验证，详见阶段实际结果中的“T3 审查修正”。
-- changing 是前后 fstat 的变化观察，不是原子快照或锁许可。当前 cwd 的 realpath 归属和完整受管目录/文件权限检查仍属 T4/T5；只有未来持锁重扫及必要修复后才能继续执行。T3 不创建日志、不 fsync、不备份/截断/补 LF、不实现列表入口或模型历史投影。
+- changing 是前后 fstat 的变化观察，不是原子快照或锁许可。T4 为新建补充 cwd realpath/目录归属及受管路径权限检查；已有文件的可写恢复仍须 T5 持锁重扫和必要修复。T3 扫描本身不创建日志、不 fsync、不备份/截断/补 LF、不实现列表入口或模型历史投影。
 
 本机目标工具链下 B01–B05 和 B06 只读子集通过，完整结果及未验证平台见[阶段 04 的 T3 实际结果](../specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。B06 的备份修复/sync 重验仍待 T5；整体契约状态保持 draft。
+
+## T4 文件与 writer 实现状态（2026-10-29）
+
+- [SessionFileAdapter](../../src/adapters/session/SessionFileAdapter.ts) 仅提供 create/资源级 close，供未来完整 store 组合。新建先 T2 预检，再核对真实目录 cwd 和私有受管目录；UUID v4/路径碰撞最多三次。正文以 wx 独占语义 + NOFOLLOW 创建 0600，复核路径/fd 身份，完整 header、文件及 sessions/locks/root/根父目录同步后才交付 writer 和空快照，之后调用方再 append user。
+- [SessionWriterAdapter](../../src/adapters/session/SessionWriterAdapter.ts) 实现本契约 SessionWriter。入口快照并校验事实，实际 I/O 串行；磁盘结构/生命周期复用 T3，短写按实际字节补齐，sync 与所有权复核成功才返回 confirmedSeq。已确认 assistantId 映射转换为 callMessageSeq，批次间复用 toolCallId 继续按 T3 引用规则配对，turn_end 确认后清除本地身份。
+- write/sync、契约、所有权故障后永久拒绝 append，不重试不确定行。关闭首次停止接收，等已发出的操作 settle，所有正文/目录 fd 关闭成功才调用原 T2 release；重复 close 等待同一结果。关闭失败保留锁与资源登记，不再次 close 不确定 fd。文件 adapter 同时登记未交付的 create，成功关闭后才撤销资源登记。
+- [sessionFileIO](../../src/adapters/session/sessionFileIO.ts) 的窄能力、时钟、UUID 和已有 T2 锁能力均支持注入，默认委托真实 Node/T2；没有新增依赖、生产假模型或 CLI 根路径开关。所有测试用显式临时根，T3 双扫描入口核验实际落盘字节；目标 Node 下 T4 新增 69 项、全部 590 项通过。
+- 此为 T4 保存与资源边界，没有完整 SessionStore/openWrite/list、恢复/备份/修复、core 事实交付、30 秒/5 秒监督或 CLI 接线。关闭失败保留资源需要后续 T7 监督，不得在 I/O 未 settle 时提前解锁。阶段仍 implementing，契约仍 draft；完整报告见阶段 04 的 T4 实际结果及开发报告。
 
 ## 错误和退出映射
 
@@ -262,5 +270,5 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 已实现 T2/T3：`src/contracts/session.ts`、`src/contracts/session-lock.ts` 及 `src/adapters/session/` 内锁/只读扫描；其余 writer/store、`src/core/runPersistentTurn.ts` 和 CLI 接线待后续任务
+- 已实现 T2–T4：`src/contracts/session.ts`、`src/contracts/session-lock.ts` 及 `src/adapters/session/` 内锁、只读扫描、文件创建/writer；完整 store/恢复修复、`src/core/runPersistentTurn.ts` 和 CLI 接线待后续任务
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收
