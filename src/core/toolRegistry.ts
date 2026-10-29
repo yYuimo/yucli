@@ -1,5 +1,9 @@
+/** core 层工具预检、名称分派与顺序事实交付；不操作存储路径，不持有全局历史。 */
 import { AbortError, AgentLoopError } from "../contracts/llm-client.js";
 import type { Tool, ToolCall, ToolDefinition, ToolRegistry, ToolResult } from "../contracts/tool.js";
+import { ToolExecutionError } from "../contracts/tool.js";
+import { PersistenceError } from "../contracts/session.js";
+import type { ToolEnd, TurnExecutionContext } from "../contracts/session.js";
 
 /**
  * 把模型生成的参数 JSON 文本转换成 read_file 可以接收的参数对象。
@@ -108,9 +112,9 @@ export class RegisteredTools implements ToolRegistry {
    * 执行顺序是校验参数 → 检查取消 → 查找工具 → 执行 → 附加调用 ID/名称。
    *
    * @param call 一项模型调用，包含原始 ID、工具名和参数 JSON 文本。
-   * @param signal 可选取消信号，继续传给具体工具；工具结束后再次检查取消。
+   * @param signal 可选取消信号，继续传给具体工具；合法完整输出返回后不再用取消覆盖结果。
    * @returns 配对的 ToolResult；未知名称及普通文件错误返回 ok:false，供模型继续回答。
-   * @throws AgentLoopError 参数/结构非法，或工具抛出不可恢复内部异常。
+   * @throws AgentLoopError 参数/结构非法；ToolExecutionError 工具内部异常或输出不合法。
    * @throws AbortError 取消时拒绝 Promise，不把取消转换成普通文件错误。
    * 只把安全摘要交给上层；文件读取发生在具体工具中，本注册表不接触 Node 文件 API。
    */
@@ -131,43 +135,80 @@ export class RegisteredTools implements ToolRegistry {
 
     try {
       // 3. 从原始 JSON 得到已校验的参数对象后才执行实际工具，并把同一取消信号继续传下去。
-      // await 期间可能发生取消，所以工具返回后还要检查，不能把取消后的读取结果当作成功。
+      // 工具可以在自己的读取检查点拒绝取消；一旦完整合法输出返回，结果必须先交付上层。
       const output = await tool.execute(parseToolArguments(call.argumentsJson), signal);
-      if (signal?.aborted) throw new AbortError("工具调用已取消。");
+      if (!output || typeof output.ok !== "boolean" || typeof output.content !== "string") throw new ToolExecutionError();
 
       // 4. 工具只返回 ok/content；注册表补上调用 ID 和名称，形成可回传的 ToolResult。
-      return { toolCallId: call.id, name: call.name, ...output };
+      return { toolCallId: call.id, name: call.name, ok: output.ok, content: output.content };
     } catch (error) {
       // 取消必须继续向上抛，不能伪装成普通文件错误回传模型。
       // 其他未被工具转为 ok:false 的内部异常，以固定摘要停止循环，不泄露底层内容。
-      if (signal?.aborted || error instanceof AbortError) throw new AbortError("工具调用已取消。");
-      throw new AgentLoopError("protocol_error", "工具执行发生内部错误，本次命令已停止。");
+      if (error instanceof PersistenceError || error instanceof ToolExecutionError) throw error;
+      if (error instanceof AbortError) throw error;
+      if (signal?.aborted) throw new AbortError("工具调用已取消。");
+      throw new ToolExecutionError();
     }
   }
 }
 
 /**
- * 顺序执行已预检的完整批次，由流式 turn 和非流式循环在预算允许后调用。
+ * 复核完整批次并顺序交付工具事实，由流式 turn 和非流式循环在预算允许后调用。
  * registry 为名称分派器，calls 为原始调用顺序；signal 贯穿所有工具。
- * 返回有序配对结果；取消/内部错误抛异常，不返回部分批次，也不继续后面的工具。
+ * 可选 context 含本批 assistantId/事实 sink；每项在 start 确认后分派，正常结果确认后再检查取消。
+ * 返回有序配对结果；取消/内部错误抛异常，不返回部分批次，但已交付事实不能被后续取消覆盖。
  * 实际文件读取由 registry 中的工具负责；本函数不修改 calls、不追加模型历史。
  */
 export async function executeToolBatch(
   registry: ToolRegistry,
   calls: readonly ToolCall[],
   signal?: AbortSignal,
+  context?: TurnExecutionContext & { assistantId: string },
 ): Promise<ToolResult[]> {
+  // 独立调用执行器也必须整批合法；缩小额度的调用方已先按自己的限制校验，硬上限仍为 4。
+  validateToolBatch(calls, 4);
   const results: ToolResult[] = [];
 
   // for...of 内 await 一个完成后才进入下一项；不能改用 map + Promise.all 并发执行。
-  // 调用方已经完成全批预检，此处负责执行顺序与取消边界，不在执行途中逐项决定批次是否合法。
+  // 入口已经复核全批，此处只负责执行顺序与取消边界，不在执行途中决定批次是否合法。
   for (const call of calls) {
     if (signal?.aborted) throw new AbortError("工具循环已取消。");
-    const result = await registry.execute(call, signal);
+    const ref = { assistantId: context?.assistantId ?? "", toolCallId: call.id, name: call.name };
+    if (context) await context.facts.record({ type: "tool_start", turnId: context.turnId, call: ref });
 
-    // 即使底层文件操作无法被立即抢占，也要在返回后阻止继续追加结果/开始下一项。
-    if (signal?.aborted) throw new AbortError("工具循环已取消。");
+    // start 的保存等待不能用业务 signal 中断；确认后若取消，明确证明注册表尚未进入。
+    if (signal?.aborted) {
+      if (context) await context.facts.record({
+        type: "tool_end", turnId: context.turnId, call: ref,
+        end: { outcome: "cancelled", error: { category: "cancellation", code: "cancelled_before_dispatch", message: "工具分派前已取消。" } },
+      });
+      throw new AbortError("工具分派前已取消。");
+    }
+    let result: ToolResult;
+    try {
+      const delivered = await registry.execute(call, signal);
+      // 注入的注册表也需交付完整配对数据；只提取业务字段，不接受错误 ID 或非法结果形状。
+      if (
+        !delivered || delivered.toolCallId !== call.id || delivered.name !== call.name ||
+        typeof delivered.ok !== "boolean" || typeof delivered.content !== "string"
+      ) throw new ToolExecutionError();
+      result = { toolCallId: delivered.toolCallId, name: delivered.name, ok: delivered.ok, content: delivered.content };
+    } catch (error) {
+      // 保存故障和模型协议/额度分类原样穿透；不能伪装成工具结束，或在故障 sink 上递归写入。
+      if (error instanceof PersistenceError || error instanceof AgentLoopError) throw error;
+      const business = error instanceof ToolExecutionError || error instanceof AbortError ? error
+        : signal?.aborted ? new AbortError("工具调用已取消。") : new ToolExecutionError();
+      const end: ToolEnd = business instanceof AbortError
+        ? { outcome: "cancelled", error: { category: "cancellation", code: "user_interrupt", message: "工具调用已取消。" } }
+        : { outcome: "failed", error: { category: "tool", code: "tool_execution_failed", message: business.message } };
+      if (context) await context.facts.record({ type: "tool_end", turnId: context.turnId, call: ref, end });
+      throw business;
+    }
+
+    // 保存结果在工具业务 catch 外：保存拒绝不能变成 tool_end，也不能被并发取消掩盖。
+    if (context) await context.facts.record({ type: "tool_result", turnId: context.turnId, call: ref, result });
     results.push(result);
+    if (signal?.aborted) throw new AbortError("工具循环已取消。");
   }
 
   // 只在整批执行完成时交付；中途异常会直接抛出，调用方拿不到部分成功数组。

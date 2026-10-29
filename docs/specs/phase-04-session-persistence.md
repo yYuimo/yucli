@@ -4,9 +4,9 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2 锁、T3 扫描、T4 文件/writer，及本轮 T5 存储恢复/修复实现。T5 验证通过，并获用户授权独立提交，阶段保持 `implementing`，T6–T10 未开始。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2 锁、T3 扫描、T4 文件/writer、T5 存储恢复/修复及 T6 core 交付/纯模型投影。T5/T6 已通过验证，并获用户授权分开提交，阶段保持 `implementing`，T7–T10 未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T5 的授权范围，不将调研探针或存储子集验证视为整个阶段的应用验收；T5 仅交付成功 turn 的业务快照，纯模型消息投影已正式移入 T6 core 任务。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T6 的授权范围，不将调研探针、存储或 core 子集验证视为整个阶段的应用验收；T5 仅交付成功 turn 的业务快照，T6 交付纯模型消息投影，不包含 T7 协调器或 T8 接线。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -574,7 +574,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 - [x] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。B06 的只读分类/原件不变已验证，备份修复与 sync 重验仍归 T5。
 - [x] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。目标 Node 下新增 69 项测试，T3 双扫描入口验证实际字节；创建资源收尾已覆盖，恢复/修复、core 屏障和退出监督仍属 T5–T7。
 - [x] **T5 恢复与修复（存储范围）**：持锁重新定位/扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 业务快照、已有文件续写与资源收尾；失败不发模型请求、不自动重放。成功 turn 的纯模型投影不在本任务，已正式移至 T6。新增 102 项测试，目标 Node 下全部 692 项通过；实现已获用户授权独立提交。
-- [ ] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。
+- [x] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。新增 57 项、2 个测试文件，目标环境全部 17 文件/749 项及 typecheck/lint/build 通过；已获用户授权独立提交，不含 T7/T8。
 - [ ] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出。
 - [ ] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。
 - [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。
@@ -934,8 +934,80 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'node --vers
 
 仅验证当前 macOS arm64、Node 24.14.0、本地文件系统；未验证 Linux/Windows/macOS x64、其他 Node/共享挂载或实际设备断电。T4 记录的 `storageRoot` 父目录本身为符号链接时目录 `O_NOFOLLOW` 同步可能失败，T5 未处理；默认 `~/.yucli` 不受影响。没有新增记录/单行字节硬上限，T3 单行/当前 turn/诊断内存成本不变；备份按块不等于全流程内存有界。advisory 锁与多次身份/摘要复核不隔离任意外部编辑器或所有父目录并发替换。备份含敏感原文、不加密、不自动清理；完整原件和摘要复核需要额外磁盘/读取成本。关闭或 I/O 永久挂起仍需 T7 监督，T5 不提前解锁、不直接结束进程。
 
-#### Git diff/status
+#### Git diff/status（实现完成时快照）
+
+以下保留实施完成时的工作区记录；后续授权提交情况见本文件末尾补记。
 
 - 分支 `phase/04-session-persistence`，HEAD 保持 `e7279fa`；未 commit、push、merge 或创建标签，所有 T5 改动留工作区、未暂存。
 - 本轮改动为上述 T5 源码/测试/正式文档；审查收口时同步更新了 README.md、docs/README.md 和 `agent-lab/plan.md` 的 T5 存储范围状态，并把纯模型投影正式归入 T6。`agent-lab/plan.md` 位于上级目录、不属于 yucli Git 仓库。
 - research 文件未编辑/暂存/提交，SHA-256 保持 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`；本轮结束时保留其原有未提交修改。
+
+### T6 core 交付与纯模型投影实际结果（2026-10-29）
+
+状态：`completed`（仅 T6，实现完成时待审查、未提交；现已获用户授权提交，见末尾补记）。已完成本轮授权范围；部分完成：无；阻塞：无。阶段保持 `implementing`，阶段 04 扩展契约仍为 `draft`，T7–T10 未勾选。
+
+#### 完成内容
+
+- 新增纯 `toolResultToMessage`，实时流式/非流式兼容循环与恢复共用。ToolResult 保留 ok，包括 ok:false 和空文本；模型消息显式复制 role/toolCallId/name/content，不带 ok、磁盘 seq、callMessageSeq、runtimeProfile 或 assistantId。
+- 新增纯 `projectSessionHistory`，将 T5 已验证的 RecoveredItem/RecoveredTurn 业务组转为 `Message[][]`，按原顺序整组取最近 20 个 success，并复制嵌套调用。失败/取消/超时/中断由 T5 成功窗口排除，不拼接失败问题，不重跑模型或工具，不重建旧执行。
+- `runTurnStream` 增加末尾可选执行上下文，完整流/assembler/整批预检后交付 assistant，当前 turn 内编号 a1/a2，包含最终回答和额度末次合法工具请求。逐项 start/result/end 都等待 sink 确认；无 context 路径保留兼容行为。没有新增 user/turn_end 所有者或提交凭证。
+- `RegisteredTools` 返回合法完整输出后先创建配对 ToolResult；执行器先保存结果再检查取消，不覆盖已取得输出、不重复终止同 call。start 确认后的分派前取消保存 cancelled_before_dispatch；进入注册表后的实际取消保存 user_interrupt。真正内部异常使用固定安全 ToolExecutionError 分类为 tool/tool_execution_failed；保存错误原样穿透，不递归结束、不重试。
+- 保留整批预检、顺序执行、每批 4 次工具和每 turn 8 次模型调用；未改 StreamAssembler、ReadFileTool、adapter 或 bootstrap。同步更新契约、架构、ADR 和 T6 勾选；adapter 继续只依赖 contracts，不反向依赖 core。
+
+#### 实际修改文件与 T5 拆分边界
+
+本轮 T6 涉及 14 个文件（4 新增、10 修改）。T5 开始前已有修改以本轮入口快照和 SHA-256 核对，未做暂存或提交。
+
+| 归属 | 文件 | 本轮处理 |
+| --- | --- | --- |
+| T6 新增 | `src/core/toolMessage.ts`、`src/core/sessionHistory.ts` | 纯工具消息转换及成功历史整组投影 |
+| T6 新增 | `tests/coreFacts.test.ts`、`tests/sessionHistory.test.ts` | 分别新增 48 和 9 项测试 |
+| T6 修改，入口时干净 | `src/contracts/tool.ts`、`src/core/runTurnStream.ts`、`src/core/toolRegistry.ts`、`src/core/agentLoop.ts`、`docs/contracts/tool-execution.md` | 工具异常、逐项交付/取消边界、共用转换及契约说明 |
+| T5/T6 共享，需按 hunk 拆分 | `src/contracts/session.ts` | 保留 T5 的恢复快照注释；T6 新增 sink/context 及事实职责说明 |
+| T5/T6 共享，需按 hunk 拆分 | `docs/architecture.md`、`docs/contracts/session-store.md`、`docs/decisions/ADR-006-session-persistence.md`、本规格 | 保留 T5 记录，追加 T6 状态、实现和实际验证 |
+| T5 原有未提交修改，T6 未编辑 | `src/adapters/session/SessionFileAdapter.ts`、`SessionWriterAdapter.ts`、`sessionFileIO.ts`、`sessionSequence.ts`、新增 `repairSession.ts`、`sessionFilename.ts`、`tests/sessionRecovery.test.ts` | 与入口基线 SHA-256 一致，仍留工作区 |
+| 其他既有修改，T6 未编辑 | `README.md`、`docs/README.md`、`docs/research/session-persistence-research.md`、上级 `agent-lab/plan.md` | 与入口基线 SHA-256 一致；plan 不属于 yucli Git 仓库 |
+
+#### 设计决策
+
+- RecoveredTurn 按既有契约只表示已验证完整 success，不新增 outcome 或在 core 复制 T3/T5 的扫描状态机。纯投影返回分组数组，使后续 REPL 保持整组裁剪；合法输入仍由存储边界保证。
+- 增加可选末尾 context，保留原调用签名的所有既有位置，不扩大非流式兼容循环的事实交付职责。ToolMessage 不通过 spread 从 ToolResult 构造，防止存储字段随结构扩展进入模型。
+- 工具返回业务输出与文件工具内部读取检查点分开：ReadFileTool 尚未返回的读取仍可取消；一旦注册表得到合法输出，结果先交付。工具执行 catch 只负责业务分类，正常事实保存放在该 catch 外，end 保存失败也直接传播。
+- 沿用规格 §6 的边界：最终 assistant 确认后返回的仍是临时 StreamTurnResult，固定 outcome、turn_end 保存、CommittedTurnResult 和 REPL 历史提交属于 T7。未发现阻止 T6 实现的规格/契约缺失或冲突。
+
+#### 验证命令与结果
+
+实际环境为 macOS arm64（`uname -sm` 输出 `Darwin arm64`），命令确认 `node --version` 为 `v24.14.0`、`pnpm --version` 为 `10.33.2`。
+
+```sh
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test'
+```
+
+- 完整验证通过：typecheck、lint、`pnpm test`（先 clean/build 再 vitest）；**17 个测试文件、749 项测试全部通过**。T5 基线 15 文件/692 项，本轮新增 2 文件/57 项；T4 基线为 590 项。执行时同一命令另打印 Node/pnpm 版本用于核对。
+- 定向验证通过：既有 `agentLoop.test.ts`、`stream.test.ts`、`toolHttp.test.ts` 共 3 文件/110 项；新增 `coreFacts.test.ts`、`sessionHistory.test.ts` 共 2 文件/57 项。新增测试首次 typecheck 发现测试 HTTP 回调的返回类型不匹配，修正后通过；另修正非法 SSE 帧放在 DONE 后的 fixture，使其实际覆盖 message_end 后但 generator 结束前的拒绝路径。
+- C01–C05 的 T6 子集：可控 Promise 暂扣 assistant/start/result/end，后继动作不能越过确认；各处保存拒绝在并发取消时仍原样穿透，不递归保存或继续执行。工具结果和结果保存期间取消先保留结果；分派前取消不调用注册表；第一项完成后第二取消、工具后模型失败、最后合法调用但额度耗尽、未知工具均保留准确事实。
+- B02/B03 及恢复投影子集：两批复用 toolCallId 按不同 assistantId 配对；非法批次/空白/截断/缺 end/非法收尾不交付伪造 assistant。实际 T4/T5 writer 保存后 openWrite，恢复投影与实时完整消息组一致；failed/cancelled/timeout/interrupted 排除，24 个 success 取最后 20 组，不重放请求或工具。
+- 全量保留额度、顺序、非流式/单次/CLI 产物及架构依赖回归；测试仅用本地 mock SSE 和显式临时存储，没有新增生产假模型客户端、读取项目 .env、触碰真实 ~/.yucli 或请求真实模型。
+
+#### 未完成事项与未验证边界
+
+T6 无部分项或阻塞。未实现 T7 的 runPersistentTurn/user/唯一 turn_end、提交凭证、30 秒期限、5 秒退出监督，未实现 T8 的 list/picker/CLI/REPL 接线；这些仍按既有规格后续交付。T6 sink 的接口和测试桥接不表示产品持久化路径已经连通。
+
+后续接线需注意：静态检查现有 `bootstrap/output.ts` 的 reportError 尚未识别新的 ToolExecutionError，会落入安全的未分类错误分支（返回 1）；T8 接线时应按 §9 补齐工具业务错误的安全显示和单次退出码 4。本轮按授权保持 bootstrap 不变，未将这一 CLI 故障分支计为 T6 已验证的产品行为。
+
+仅验证目标 macOS arm64/Node 24.14.0/本地文件系统；未验证其他平台/Node、共享挂载、真实设备断电或真实模型联调。T5 存储内存、advisory 锁及备份限制不变；永久挂起和故障退出需 T7 监督。恢复投影消费可信业务快照，不独立接受未经 T3/T5 校验的任意 JSON。
+
+#### Git diff/status（实现完成时快照）
+
+- 分支保持 `phase/04-session-persistence`，HEAD 保持 `e7279fa`；未暂存（cached diff 为空）、commit、push、merge 或创建标签，所有修改留工作区待审查。
+- T5 adapter/测试和其他既有修改逐文件 SHA-256 与入口基线一致；共享文档和 session 契约按上表追加 T6 hunk，后续拆分提交时不能把全部未提交 diff 一概视作 T6。
+- `git diff --check` 通过，新增/修改文档的本地链接目标均存在。工作树共 24 项（17 个已修改、7 个未跟踪）；普通 `git diff --stat` 只统计已跟踪文件，含 T5/既有修改，不能作为 T6 独立 diff。T6 本轮为 14 文件（4 新增、10 修改），其中 5 文件与 T5 共享。
+
+#### 提交授权补记（2026-10-29）
+
+- 用户在 T5/T6 验证通过后授权提交，覆盖此前“不要 commit、留工作区审查”的约束；仍不推送、不合并 main、不创建标签、不进入 T7/T8。
+- T5 单独提交为 `13ba764`（`feat(session): implement T5 recovery and tail repair`）。从准确暂存树导出到临时目录，目标 Node 24.14.0/pnpm 10.33.2 下重新通过 typecheck、lint、build 和 15 文件/692 项测试，确认不依赖 T6。
+- T6 以独立提交记录 core 交付/纯模型投影、对应测试与契约/架构/规格。实现范围仍为上述 14 文件；提交收口另同步 README.md、docs/README.md 的任务进度，共 16 文件，不改变代码。
+- T6 的准确暂存树也导出到独立临时目录，目标 Node 24.14.0/pnpm 10.33.2 下重新通过 typecheck、lint、build 和 17 文件/749 项测试；两个提交的阶段边界均已独立验证。
+- README 中与阶段 03 集成说明相关的既有 hunk、research 原有修改和上级 plan.md 保留不提交。T5/T6 共享文件按任务边界拆分，原有 T5 adapter/测试内容保持不变。

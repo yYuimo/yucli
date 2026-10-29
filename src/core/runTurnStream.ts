@@ -4,17 +4,21 @@ import type { LlmClient } from "../contracts/llm-client.js";
 import type { AgentLoopOptions, StreamTurnResult } from "../contracts/agent.js";
 import type { Message } from "../contracts/message.js";
 import type { ToolRegistry, ToolResult } from "../contracts/tool.js";
+import type { TurnExecutionContext } from "../contracts/session.js";
 import { StreamAssembler } from "./streamAssembler.js";
 import { resolveLoopLimits } from "./loopLimits.js";
 import { executeToolBatch } from "./toolRegistry.js";
+import { toolResultToMessage } from "./toolMessage.js";
 
 /**
  * 在已有完整历史之后完成一个用户 turn，必要时执行多批只读工具，直到生成最终文本。
  * CLI/REPL 调用；history 是旧消息快照，prompt 保留原文，onText 将每个文本片段交给 bootstrap。
  * client/registry 为注入能力，options 默认 8/4，signal 覆盖该 turn 的全部模型和工具操作。
+ * context 可选，存在时逐条 await assistant/工具事实屏障；user/turn_end 由后续协调方保存。
  * 返回完整 StreamTurnResult（含本 turn 新增消息），成功之前不修改 history、不提交半截结果。
  * 异步迭代完整成功后才允许执行工具；全批预检、按序执行、最后一轮不执行工具沿用阶段 02。
- * 协议/额度、模型失败和取消通过稳定异常传播；已通过 onText 显示的片段不回滚。
+ * 协议/额度、工具内部错误、模型失败和取消通过稳定异常传播；保存故障原样穿透。
+ * 已通过 onText 显示的片段不回滚；返回的临时成功结果不代表 turn_end 已保存。
  * 本函数不打印、不读写文件；网络/文件副作用由注入 adapter 处理和清理。
  */
 export async function runTurnStream(
@@ -26,6 +30,7 @@ export async function runTurnStream(
   onText: (text: string) => void,
   options: Partial<AgentLoopOptions> = {},
   signal?: AbortSignal,
+  context?: TurnExecutionContext,
 ): Promise<StreamTurnResult> {
   // 1. 在任何网络请求之前确定额度。一次 turn 可能经历多次模型响应，
   // 但这些响应共用这组额度，不能在每次工具往返后重新获得 8 次机会。
@@ -60,9 +65,14 @@ export async function runTurnStream(
     if (signal?.aborted) throw new AbortError("模型循环已取消。");
     const message = assembler.finish();
     const calls = message.toolCalls ?? [];
+    const assistantId = `a${modelCalls}`;
+
+    // 只在整条 stream/assembler/全批校验都成功后交付完整 assistant（含最终回答）。
+    // 即使最后一轮已无额度执行工具，该条合法调用事实也先保存，再由上层表达 loop_limit。
+    if (context) await context.facts.record({ type: "assistant", turnId: context.turnId, assistantId, message });
 
     // 5. 没有工具调用意味着模型已完成回答。把最终 assistant 也纳入消息组后，
-    // 一次性返回完整结果；这是 REPL 唯一可以提交本 turn 历史的成功出口。
+    // 一次性返回完整结果；持久化路径仍须由后续协调方固定 outcome、保存 turn_end 才可提交。
     if (!calls.length) {
       appendedMessages.push(message);
       return { finalText: message.content ?? "", modelCalls, toolResults, appendedMessages, stopKind: "final_text" };
@@ -77,13 +87,13 @@ export async function runTurnStream(
     // 7. 保留模型提出的完整调用，再顺序取得整批结果。
     // await 期间若失败/取消，不会返回半批结果；本地临时消息也不会被外层提交。
     appendedMessages.push(message);
-    const results = await executeToolBatch(registry, calls, signal);
+    const results = await executeToolBatch(registry, calls, signal, context ? { ...context, assistantId } : undefined);
     for (const result of results) {
       toolResults.push(result);
 
       // 模型靠 toolCallId 将每条结果对应到先前的请求，而不是靠文件内容或数组位置。
       // 下一次循环会把 assistant 调用和这些 tool 消息一起发送，继续生成最终答案。
-      appendedMessages.push({ role: "tool", toolCallId: result.toolCallId, name: result.name, content: result.content });
+      appendedMessages.push(toolResultToMessage(result));
     }
   }
 

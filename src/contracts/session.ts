@@ -64,7 +64,7 @@ export interface CallRef {
 }
 
 /**
- * 执行层可交付的有序事实数据；这里只声明数据，不接入 sink 或执行流程。
+ * 执行 core 交给 TurnFactSink 的有序事实数据；不包含协调方负责的 user/turn_end。
  * type 收窄后才能读取相应字段，工具结果必须保留本地 ok 状态。
  */
 export type CoreTurnFact = { turnId: string } & (
@@ -73,6 +73,26 @@ export type CoreTurnFact = { turnId: string } & (
   | { type: "tool_result"; call: CallRef; result: ToolResult }
   | { type: "tool_end"; call: CallRef; end: ToolEnd }
 );
+
+/**
+ * 执行 core 交付已校验事实的保存能力，由未来协调方桥接 SessionWriter。
+ * 不接收取消 signal：已取得结果或固定终止事实必须等待保存，不因业务取消丢失。
+ */
+export interface TurnFactSink {
+  /**
+   * 按业务顺序快照并保存一项事实；调用方逐条 await，成功后才越过对应执行屏障。
+   * 持久化故障原样抛出，不重试、不改写为工具结果，不在故障 sink 上递归保存结束事件。
+   */
+  record(fact: CoreTurnFact): Promise<void>;
+}
+
+/** 可选的流式执行上下文；协调方创建，core 不接触文件 seq、存储路径、时钟或锁。 */
+export interface TurnExecutionContext {
+  /** 当前新 turn 身份；由调用方提供，core 仅沿用，不恢复或继续旧执行。 */
+  turnId: string;
+  /** 当前 turn 的有序事实保存屏障；缺整个上下文时沿用无持久化路径。 */
+  facts: TurnFactSink;
+}
 
 /** user/turn_end 的业务所有者是后续协调方；writer 消费此数据，不负责执行业务。 */
 export type TurnFact = CoreTurnFact | ({ turnId: string } & (

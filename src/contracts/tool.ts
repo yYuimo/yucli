@@ -114,9 +114,27 @@ export interface ToolRegistry {
   /**
    * 根据模型提出的名称执行一项调用，将执行结果与原始 ID 配对，供 AgentLoop 追加 tool 消息。
    * @param call 内部调用结构，包括 id、name 和尚需校验的 argumentsJson。
-   * @param signal 可选取消信号，应传给具体工具，并在结果交回前检查。
+   * @param signal 可选取消信号，应传给具体工具；完整合法输出已交付后不以新取消覆盖结果。
    * @returns 含 toolCallId、name、ok、content 的 ToolResult；未知名称返回 ok:false。
-   * 结构非法和不可恢复内部异常抛稳定循环错误；取消抛 AbortError，不作为普通错误回传模型。
+   * 结构非法抛 AgentLoopError(protocol_error)，不可恢复内部异常抛 ToolExecutionError；
+   * 真正取消抛 AbortError，保存故障原样穿透，均不作为普通工具失败回传模型。
    */
   execute(call: ToolCall, signal?: AbortSignal): Promise<ToolResult>;
+}
+
+/**
+ * 工具实现/注册表无法交付合法结果时的安全业务异常，由执行边界创建、core/后续协调方识别。
+ * 区别于模型协议错误和正常 ok:false，也不是存储故障；可映射为 tool/tool_execution_failed。
+ */
+export class ToolExecutionError extends Error {
+  override name = "ToolExecutionError";
+  /** 后续协调方映射安全错误时使用的工具业务分类。 */
+  readonly category = "tool";
+  /** 区别于 protocol_error 与正常 ok:false 的稳定内部执行错误码。 */
+  readonly code = "tool_execution_failed";
+
+  /** 固定安全摘要，不接受原始异常/路径/堆栈输入；调用后无 I/O 或保存副作用。 */
+  constructor() {
+    super("工具执行发生内部错误，本次命令已停止。");
+  }
 }

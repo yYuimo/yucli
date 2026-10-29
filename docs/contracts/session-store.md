@@ -15,7 +15,7 @@
 | 参与方 | 责任 | 不负责的内容 |
 | --- | --- | --- |
 | `core/runPersistentTurn` | 生成 user、assistant、工具事实和唯一 `turn_end`；等待每次保存确认；成功后交付提交凭证 | 文件路径、seq、锁、JSONL 和 `process.exit` |
-| `TurnFactSink` | 将 core 的工具事实按顺序转交给 writer，并等待确认 | fire-and-forget 事件广播、原始 Error 或取消 signal |
+| `TurnFactSink` | 将 core 的完整 assistant/工具事实按顺序转交给 writer，并等待确认 | fire-and-forget 事件广播、原始 Error 或取消 signal |
 | `SessionWriter` | 校验本地引用，分配 seq，追加 JSONL，执行同步屏障并维护故障状态 | 调用模型、执行工具、重试不确定写入 |
 | `SessionStore` | 创建/打开会话、列出只读摘要、登记资源、统一关闭 | 选择 picker 编号、提交 REPL 历史 |
 | `bootstrap/repl` | 持有最近 20 个成功 turn，接入新建/恢复/切换和退出 | 直接拼装 JSONL 或绕过 writer 写文件 |
@@ -108,6 +108,11 @@ type TurnFact = CoreTurnFact | ({ turnId: string } & (
 
 interface TurnFactSink {
   record(fact: CoreTurnFact): Promise<void>;
+}
+
+interface TurnExecutionContext {
+  turnId: string;
+  facts: TurnFactSink;
 }
 
 interface SessionWriter {
@@ -222,7 +227,7 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存储恢复/修复；本文整体仍为 draft，完整 SessionStore/list、持久化 CLI 和 core 事实交付/模型投影仍待后续任务。
+T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存储恢复/修复，T6 追加 core 事实交付/纯模型投影；本文整体仍为 draft，完整 SessionStore/list、协调器和持久化 CLI 仍待后续任务。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
@@ -260,7 +265,14 @@ T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存
 - 快照只含原 meta、最近最多 20 个完整 success 的业务组、最近 user 摘要（缺失保持缺失）、中断数量和本次 repair。adapter 不生成 ToolMessage，不把 seq/assistantId 交给 core。原清单的纯模型投影已正式移至 T6 core 任务。
 - SessionSequence.forAppend 建立新校验器，继承已校验 seq 和所有旧 turnId 的拒绝集合；不复活已 finish 的实例、不重建旧 assistant/tool 状态。续写从 lastSeq+1 开始，header-only 从 1 开始，继续共用 T4 的短写、同步、永久故障及幂等 close。备份/目录/正文 fd 全部由同一 writer 登记；openWrite 在首次 await 前登记，close 等实际 settle/关闭正文后才放锁，关闭失败仍保持登记。
 - 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下，新增 102 项 T5 测试，全部 15 个文件、692 项测试及 typecheck/lint/build 通过。B06–B09 和 D04 的存储子集验证使用临时目录、可控 I/O/Promise，不访问真实 home/.env 或模型；不宣称已验证 CLI、进程中断监督或其他平台。
-- T5 实现通过验证，并获用户授权独立提交；阶段仍 implementing、契约仍 draft。未实现 list/picker、core 事实交付/模型投影、30 秒/5 秒监督或 CLI/REPL 接线，完整结果见阶段规格的 T5 开发报告。
+- T5 实现通过验证，并获用户授权独立提交；阶段仍 implementing、契约仍 draft。T5 当时未实现 list/picker、core 事实交付/模型投影、30 秒/5 秒监督或 CLI/REPL 接线；T6 core 子集见下节，T5 完整结果见阶段规格的开发报告。
+
+## T6 core 事实交付与纯模型投影实现状态（2026-10-29）
+
+- [session.ts](../../src/contracts/session.ts) 新增 `TurnFactSink` 与 `TurnExecutionContext` 能力接口，沿用既有 CoreTurnFact/CallRef。`runTurnStream` 通过末尾可选上下文逐条等待已完整校验的 assistant 和逐项工具事实；不生成 user/turn_end，不返回提交凭证。T7 协调器及其 turn 终止、历史提交、监督仍未实现。
+- [toolRegistry.ts](../../src/core/toolRegistry.ts) 保留整批预检和顺序执行，start 确认前不分派，result 确认前不执行后项。合法完整工具输出先成为 ToolResult 并交付，再观察取消；内部异常通过 ToolExecutionError 安全分类，保存拒绝原样穿透，不递归结束、不重试。
+- [toolMessage.ts](../../src/core/toolMessage.ts) 提供实时/兼容路径和恢复共用的 `toolResultToMessage`；[sessionHistory.ts](../../src/core/sessionHistory.ts) 的 `projectSessionHistory(turns: readonly RecoveredTurn[]): Message[][]` 只消费 T5 已验证的成功组，按文件顺序整组取最后 20 个，显式复制模型字段与嵌套调用。失败/取消/超时/中断由 T5 排除，不另造 outcome，不把 seq/assistantId/profile/ok 送入模型，不重跑工具或请求。
+- adapter 继续只返回业务快照，不 import core；当前没有 bootstrap 恢复/持久化接线。目标环境新增 57 项测试，17 个文件、749 项及 typecheck/lint/build 全部通过；T6 已获用户授权独立提交，完整报告见阶段规格。
 
 ## 错误和退出映射
 
@@ -283,5 +295,5 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 已实现 T2–T5：`src/contracts/session.ts`、`src/contracts/session-lock.ts` 及 `src/adapters/session/` 内锁、扫描、创建/writer、存储恢复/修复（T5 待审查）；完整 store/list、`src/core/runPersistentTurn.ts`、模型消息投影和 CLI 接线待后续任务
+- 已实现 T2–T6：`src/contracts/session.ts`、`src/contracts/session-lock.ts`、`src/adapters/session/` 内锁/扫描/writer/恢复修复，以及 core 事实交付/纯模型投影；完整 store/list、`src/core/runPersistentTurn.ts` 和 CLI 接线待后续任务
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收

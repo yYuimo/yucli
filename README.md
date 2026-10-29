@@ -6,7 +6,7 @@
 
 阶段 03 已完成实现和验证，等待集成审查；设计、实际结果与真实服务限制见[阶段 03 规格](docs/specs/phase-03-repl-streaming.md)。
 
-阶段 04 当前完成 T2 原生锁、T3 JSONL 类型/只读扫描、T4 文件与 writer，以及 T5 存储恢复/修复，尚未接入持久化 CLI；运行入口仍使用阶段 03 的内存历史。纯模型消息投影归入 T6 core 任务。进度与验证范围见[阶段 04 实际结果](docs/specs/phase-04-session-persistence.md#13-实际结果与下一步)。
+阶段 04 当前完成 T2 原生锁、T3 JSONL 类型/只读扫描、T4 文件与 writer、T5 存储恢复/修复及 T6 core 事实交付/纯模型投影，T5/T6 已通过验证并获用户授权分开提交。尚未接入持久化 CLI；运行入口仍使用阶段 03 的内存历史。进度与验证范围见[阶段 04 实际结果](docs/specs/phase-04-session-persistence.md#13-实际结果与下一步)。
 
 ## 运行
 

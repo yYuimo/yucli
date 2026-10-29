@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-阶段 04 扩展状态：`draft`（持久化事实交付和恢复投影尚未实现）
+阶段 04 扩展状态：`draft`（T6 core 事实交付和纯模型投影已实现、验证并获用户授权提交；T7 协调器和 T8 CLI 接线尚未实现）
 
 适用阶段：阶段 02/03，只读 `read_file`、非流式 AgentLoop 与流式 turn；阶段 04，带持久化事实交付的流式 turn。
 
@@ -89,7 +89,7 @@ AgentLoop 必须按以下顺序追加消息：
 
 assistant 响应的有效性规则是：非空白文本或至少一个合法工具调用，满足其一即可；两者都没有时产生 `ResponseError`。`content` 可以缺失或为 `null`，只要存在合法工具调用即可。
 
-如果同一响应中任一调用缺少 ID、名称，参数 JSON 不是合法 JSON，或参数不是恰好包含字符串 `path` 的对象，则整个响应是协议错误，一个调用都不能执行。名称非空但没有注册、路径越界或文件读取失败属于工具执行错误，生成 `ok: false` 的 tool message。
+如果同一响应中任一调用缺少 ID、名称，参数 JSON 不是合法 JSON，或参数不是恰好包含字符串 `path` 的对象，则整个响应是协议错误，一个调用都不能执行。名称非空但没有注册、路径越界或文件读取失败属于可恢复工具失败，生成 `ToolResult(ok:false)`；投影后的 ToolMessage 只含模型字段，不带 `ok`。
 
 `finish_reason: "length"` 表示响应可能在文本或工具参数中途被截断。adapter 必须保留该值并产生 `ResponseError`；AgentLoop 不得执行其中任何工具调用。
 
@@ -177,7 +177,16 @@ user → assistant → tool_start → tool_result 或 tool_end → … → turn_
 
 只有 coordinator 保存并确认 `turn_end(success)` 后，REPL 才提交 `StreamTurnResult.appendedMessages` 到内存历史。失败、取消、超时或保存故障不提交半截历史；保存故障原样穿透 core，不转成 `ok:false` 工具结果、协议错误或普通取消。普通 `--prompt` 不注入 sink，继续保持无会话副作用。
 
-该扩展仍保留本文件前述的整批参数预检、顺序执行、4 个工具调用和 8 次模型调用上限；扩展接口、保存屏障、错误分类和恢复投影见[会话存储契约](session-store.md)。实现和验收完成前不得将本节的持久化行为当作已交付能力。
+该扩展仍保留本文件前述的整批参数预检、顺序执行、4 个工具调用和 8 次模型调用上限；扩展接口、保存屏障、错误分类和恢复投影见[会话存储契约](session-store.md)。T6 只交付下述 core 子集，不表示 coordinator、REPL 历史提交或应用持久化已接通。
+
+### T6 core 实际实现（2026-10-29）
+
+- `runTurnStream` 在原 signal 后增加可选 `TurnExecutionContext`，旧调用方无需修改。完整 generator/assembler/整批预检成功后逐条等待 assistant 保存，包括最终回答和额度末次合法工具请求；a1/a2 仅在当前新 turn 内分配。只交付 assistant/start/result/end，user/turn_end 仍归后续 T7。
+- `executeToolBatch` 在入口复核完整批次，每项依次等待 start → 注册表 → result；start 确认后取消且注册表尚未进入，保存 `cancelled_before_dispatch`。注册表进入后按实际取消或异常保存 end，end 确认后抛原稳定业务异常；不再开始后项或模型请求。
+- `RegisteredTools.execute` 先将工具已返回的合法 `{ok,content}` 显式复制为配对 ToolResult，后续取消不能覆盖它。执行器同样先交付/等待 result，再检查取消；`ok:false`、空文本和未知工具均走正常结果路径，同 call 不再补 end。ReadFileTool 自己的读取/解码检查点不变，尚未返回业务输出的字节不等于已交付 ToolResult。
+- 非法输出或真正内部异常使用固定安全摘要的 `ToolExecutionError`（`category=tool`、`code=tool_execution_failed`），不归 protocol_error，不保存原始 Error。已分类的取消/工具错误保持身份；PersistenceError 原样穿透。sink 的 assistant/start/result 保存位于业务 catch 外，end 保存拒绝也直接抛出，不能递归保存终止或重试。
+- [toolMessage.ts](../../src/core/toolMessage.ts) 的纯 `toolResultToMessage` 由流式、非流式兼容路径和恢复历史共用；显式复制 role/toolCallId/name/content，剔除 ok、seq、callMessageSeq、runtimeProfile 等存储字段。[sessionHistory.ts](../../src/core/sessionHistory.ts) 的 `projectSessionHistory` 接收 T5 校验后的 `readonly RecoveredTurn[]`，返回最近最多 20 个完整 success 的 `Message[][]`；组内顺序不变，独立复制嵌套调用，不读取文件或重放执行。
+- 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下新增 57 项、2 个测试文件；全部 17 个文件、749 项测试及 typecheck/lint/build 通过。使用本地 mock SSE 和临时存储，实时结果经 writer/恢复后投影与原消息组一致；无生产假模型客户端或真实模型请求。完整范围与未验证边界见阶段规格的 T6 记录。
 
 ## OpenCode Go 映射
 
@@ -222,7 +231,7 @@ user → assistant → tool_start → tool_result 或 tool_end → … → turn_
 - [agentLoop.ts](../../src/core/agentLoop.ts)：历史与预算、顺序执行和结果；adapter 的结构/截断错误为 ResponseError，core 的批次/参数错误为 AgentLoopError。
 - [ReadFileTool.ts](../../src/adapters/filesystem/ReadFileTool.ts)：路径、stat、受限读取与 fatal UTF-8 解码。采用 ignoreBOM:true 保留文件开头 BOM；读取后再次检查大小，文件增长不会静默截断成功。
 - 文件错误摘要使用稳定前缀：invalid_arguments、invalid_path、outside_workspace、file_not_found、not_regular_file、file_too_large、invalid_utf8、permission_denied、read_failed；不拼接底层异常或绝对路径。
-- 取消在操作前后和每次读取之间检查，同一个 signal 贯穿循环、注册表和工具；底层 stat/read 没有 OS 级抢占取消保证，已开始的文件调用完成后检查信号，拒绝继续追加成功结果。句柄在 finally 关闭。
+- 取消在操作前后和每次读取之间检查，同一个 signal 贯穿循环、注册表和工具；底层 stat/read 没有 OS 级抢占取消保证。ReadFileTool 仍在自己的检查点拒绝继续；一旦合法业务输出已返回注册表，T6 先交付 ToolResult，再停止后续动作。句柄在 finally 关闭。
 - 真实路径检查不是操作系统沙箱，不承诺对父目录并发替换提供原子隔离；当前边界和大小限制测试结果见阶段规格。
 - [agentLoop.test.ts](../../tests/agentLoop.test.ts)、[readFile.test.ts](../../tests/readFile.test.ts)、[toolHttp.test.ts](../../tests/toolHttp.test.ts)覆盖循环、工具和协议往返，CLI 子进程测试覆盖源码及产物入口。
 

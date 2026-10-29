@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2 原生锁、T3 扫描、T4 文件/writer 已实现，T5 存储恢复/修复实现通过目标环境测试，并获用户授权独立提交；完整 SessionStore/list、core 持久化交付/模型投影及 CLI 接线尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2 原生锁、T3 扫描、T4 文件/writer 已实现，T5 存储恢复/修复与 T6 core 事实交付/纯模型投影通过目标环境测试，并获用户授权分开提交；完整 SessionStore/list、T7 协调器/监督及 T8 CLI 接线尚未实现。
 
 ## 目标场景
 
@@ -114,7 +114,7 @@ src/
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
 
-### 阶段 04 的设计边界（T2–T5 存储实现，T5 待审查）
+### 阶段 04 的设计边界（T2–T5 存储、T6 core 子集已实现）
 
 阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
 
@@ -139,6 +139,12 @@ T5 将已有会话入口限定为 `SessionFileAdapter.openWrite → T2 acquire �
 `repairSession` 为两类尾部先计算原件摘要，按块复制恰好 [0,S)，wx 创建并校验/同步 0600 的完整备份与清单，同步 0700 recovery 各级目录项。修改前再次核对源 dev/ino/大小/时间与 SHA-256，再对原正文 fd 补 LF/截 P、sync、重扫及校验保留前缀摘要。修改前失败不改正文，修改后失败不回滚；所有产物保留。备份/清单/目录 fd 仍归 writer 登记，关闭不确定不能提前解锁。
 
 续写建立新的 T3 校验器，只继承已校验 seq 和旧 turnId 拒绝集合，不复活 finish 后的实例、不重建旧 a1/a2 或工具状态。T4 与 T5 共用 `writeSessionBytes` 短写算法；仅增加内部 read/truncate 注入和受管名称辅助函数。T5 实际完成范围、B06–B09/D04 测试及保留限制见阶段规格；未接入 list、picker、模型事实交付、计时/进程监督或 CLI。
+
+T6 在 `contracts/session.ts` 增加 `TurnFactSink/TurnExecutionContext`；`runTurnStream` 在 signal 后接收可选 context，无上下文的 CLI/兼容调用不变。整条流和批次校验成功后保存 assistant（当前 turn 的 a1/a2），包括最终回答和额度末次合法调用。`executeToolBatch` 逐项等待 start → 注册表 → result，确认后才越过对应屏障；分派前取消保存 cancelled_before_dispatch，已进入的执行按实际原因保存 end。`RegisteredTools` 已取得的合法输出先形成 ToolResult，后续取消不覆盖；真正内部异常用 ToolExecutionError 安全分类，PersistenceError 和 sink 拒绝直接穿透，不递归保存结束。
+
+`core/toolMessage.ts` 是实时、非流式兼容循环和恢复共用的纯转换，只提取模型业务字段，保留原 ToolResult 的 ok 供事实保存。`core/sessionHistory.ts` 消费 T5 的 `RecoveredTurn[]`，返回最多 20 组 success 的 `Message[][]`，整组裁剪并复制嵌套调用；不读写磁盘、不回放模型或工具。adapter 不 import core；本轮未增加 bootstrap 接线。user/唯一 turn_end、提交凭证和历史提交仍由后续 T7/T8 实现。
+
+T6 新增 2 个测试文件、57 项测试，用本地 mock SSE、可控保存 Promise 和临时 writer/恢复验证屏障及实时/恢复一致性；目标环境全部 17 个文件、749 项及 typecheck/lint/build 通过。该结果只覆盖 T6 core 子集，阶段仍 implementing，未验收 T7 的 30 秒/5 秒监督或 T8 的产品入口。
 
 ### 依赖检查
 

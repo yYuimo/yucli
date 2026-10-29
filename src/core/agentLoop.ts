@@ -5,6 +5,7 @@ import type { Message } from "../contracts/message.js";
 import type { ToolRegistry, ToolResult } from "../contracts/tool.js";
 import { resolveLoopLimits } from "./loopLimits.js";
 import { executeToolBatch, validateToolBatch } from "./toolRegistry.js";
+import { toolResultToMessage } from "./toolMessage.js";
 
 /**
  * 完成用户一次提问中的工具循环：模型要文件时先执行工具，再把结果交回模型，直到得到最终文本。
@@ -87,9 +88,7 @@ export async function agentLoop(
       toolResults.push(result);
 
       // 本地结果的 ok 用于诊断；模型通过 tool 消息的 ID 和 content 看到执行结果。
-      messages.push({
-        role: "tool", toolCallId: result.toolCallId, name: result.name, content: result.content,
-      });
+      messages.push(toolResultToMessage(result));
     }
   }
 
