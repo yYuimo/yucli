@@ -1,15 +1,18 @@
-/** adapters 层的 T4 新文件 writer；拥有正文/临时目录句柄与 T2 写锁，不提供恢复打开。 */
+/** adapters 层的新建/恢复 writer；拥有正文/临时句柄与 T2 锁，复用同一追加屏障和关闭算法。 */
 import { constants, type BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { PersistenceError, SessionAccessError } from "../../contracts/session.js";
-import type { SessionMeta, SessionWriter, TurnFact } from "../../contracts/session.js";
+import type { SessionMeta, SessionSnapshot, SessionWriter, TurnFact } from "../../contracts/session.js";
 import type { SessionLock } from "../../contracts/session-lock.js";
 import { prepareSessionFact, SessionFactEncoder } from "./sessionFact.js";
 import {
   fileErrorCode, requirePrivateSessionPath, sameSessionIdentity, SessionIdentityCollision,
-  type SessionFileIO,
+  writeSessionBytes, type SessionFileIO,
 } from "./sessionFileIO.js";
+import { parseSessionBasename, sessionBasename } from "./sessionFilename.js";
+import { repairSessionTail } from "./repairSession.js";
+import { scanSessionHandle } from "./scanSession.js";
 import { SessionSequence } from "./sessionSequence.js";
 import { validateSessionHeader } from "./sessionSchema.js";
 
@@ -22,14 +25,14 @@ export interface SessionDirectories {
 }
 
 /**
- * 新会话的底层资源所有者，由 SessionFileAdapter 在取得锁后立即登记。
- * initialize 成功前不交付 SessionWriter；任何失败都保留产物，等待 close 实际结束后才解锁。
+ * 新建或恢复会话的底层资源所有者，由 SessionFileAdapter 在取得锁后立即登记。
+ * initialize/initializeExisting 成功前不交付 SessionWriter；失败保留产物，close 实际结束后才解锁。
  */
 export class SessionWriterAdapter implements SessionWriter {
   private readonly handles = new Set<FileHandle>();
   private readonly handleCloses = new Map<FileHandle, Promise<void>>();
   private readonly encoder = new SessionFactEncoder();
-  private readonly sequence: SessionSequence;
+  private sequence: SessionSequence;
   private body: FileHandle | undefined;
   private identity: BigIntStats | undefined;
   private directories: SessionDirectories | undefined;
@@ -57,7 +60,7 @@ export class SessionWriterAdapter implements SessionWriter {
     private readonly now: () => Date,
     private readonly onClosed: () => void,
   ) {
-    this.basename = `${meta.createdAt.replaceAll(":", "-").replaceAll(".", "-")}_${meta.sessionId}.jsonl`;
+    this.basename = sessionBasename(meta);
     this.path = join(root, "sessions", this.basename);
     this.sequence = new SessionSequence(meta.createdAt);
   }
@@ -74,9 +77,7 @@ export class SessionWriterAdapter implements SessionWriter {
     await this.verifyDirectories();
     const names = await this.io.readdir(join(this.root, "sessions"));
 
-    // 时间与 ID 分开捕获，不能用 suffix 把带下划线的另一个身份误当同 ID。
-    const managed = /^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d(?:-\d+)?Z_([A-Za-z0-9][A-Za-z0-9_-]{0,127})\.jsonl$/u;
-    if (names.some((name) => managed.exec(name)?.[1] === this.meta.sessionId)) throw new SessionIdentityCollision();
+    if (names.some((name) => parseSessionBasename(name)?.sessionId === this.meta.sessionId)) throw new SessionIdentityCollision();
 
     try {
       // 与 wx+ 相同的独占创建，同时拒绝末端 symlink；绝不使用会覆盖文件的 w/a+。
@@ -107,6 +108,83 @@ export class SessionWriterAdapter implements SessionWriter {
   }
 
   /**
+   * T5 持锁恢复入口：只以 r+ 打开已有正文，全文件扫描并完成必要备份修复后交付业务快照。
+   * 创建器在调用前已登记本资源；扫描借用正文 fd，不另开需要提前关闭的扫描描述符。
+   * 不写 header、不恢复旧调用；任何失败均由创建器等待本操作 settle 后 close，不交付半成品。
+   */
+  async initializeExisting(directories: SessionDirectories, uuid: () => string): Promise<SessionSnapshot> {
+    this.directories = directories;
+    await this.lock.assertOwnership();
+    await this.verifyDirectories();
+
+    // 定位在持锁后重新进行，打开前观察的目录列表不能当成正式许可。
+    const matches = (await this.io.readdir(join(this.root, "sessions")))
+      .filter((name) => parseSessionBasename(name)?.sessionId === this.meta.sessionId);
+    if (matches.length === 0) throw new SessionAccessError("not_found", "open_write", "找不到指定会话正文。");
+    if (matches.length !== 1) throw new SessionAccessError("invalid_identity", "open_write", "同一身份对应多个正文文件。");
+    if (matches[0] !== this.basename) throw this.failure("ownership_lost", "open_write", "定位期间会话正文发生变化。");
+    this.identity = await this.io.lstat(this.path);
+    requirePrivateSessionPath(this.identity, false);
+    if (this.identity.size > BigInt(Number.MAX_SAFE_INTEGER)) throw new SessionAccessError("invalid_identity", "open_write", "会话大小不能精确表示。");
+
+    // O_RDWR 是 r+ 的打开语义；没有 CREAT/TRUNC/APPEND，缺失文件不能被意外新建。
+    this.body = await this.io.open(this.path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    this.handles.add(this.body);
+    requirePrivateSessionPath(await this.body.stat({ bigint: true }), false);
+    this.position = Number(this.identity.size);
+    this.recordStart = this.position;
+    await this.assertOwnership();
+    let scan = await scanSessionHandle(this.body, this.basename);
+    if (scan.changing) throw this.failure("ownership_lost", "open_write", "会话在扫描期间发生变化。");
+    if (scan.status === "rejected") {
+      throw new SessionAccessError(scan.logState, "open_write", scan.diagnostic.message, scan.diagnostic);
+    }
+    if (scan.meta.cwd !== this.meta.cwd) throw new SessionAccessError("cwd_mismatch", "open_write", "会话不属于当前真实工作目录。");
+    await this.assertObservedSource();
+
+    let repair: SessionSnapshot["repair"] = "none";
+    if (scan.tailKind !== "none") {
+      const result = await repairSessionTail({
+        root: this.root, body: this.body, original: this.identity, io: this.io, now: this.now, uuid,
+        // 临时备份/目录 fd 与正文共用资源所有权，修复器本身没有释放会话锁的能力。
+        own: (handle) => { this.handles.add(handle); },
+        close: (handle) => this.closeHandle(handle),
+        assertSource: (size) => this.assertOwnership(size),
+      }, scan);
+      scan = result.scan;
+      repair = result.repair;
+    } else {
+      // 完整文件不改字节、不备份；同步当前合法前缀，再把它作为本次 writer 的确认起点。
+      try { await this.io.sync(this.body); }
+      catch { throw this.failure("sync_failed", "open_write", "已有会话前缀未取得同步确认。"); }
+      await this.assertObservedSource();
+    }
+
+    this.position = scan.observedSizeBytes;
+    this.recordStart = this.position;
+    await this.assertOwnership();
+    this.sequence = SessionSequence.forAppend(scan);
+    this.confirmedSeq = scan.lastSeq;
+    this.initialized = true;
+
+    // 快照与 writer 内存状态隔离；只保留业务组，不交付磁盘 seq、调用引用或临时 assistantId。
+    return structuredClone({
+      meta: scan.meta, recentSuccessfulTurns: scan.recentSuccessfulTurns,
+      interruptedTurnCount: scan.statistics.interruptedTurnCount, repair,
+      ...(scan.statistics.lastUserProfile ? { lastUserProfile: scan.statistics.lastUserProfile } : {}),
+    });
+  }
+
+  /** 恢复扫描/完整文件同步后核对打开时的大小与时间观测；变化抛 ownership_lost，不改正文。 */
+  private async assertObservedSource(): Promise<void> {
+    await this.assertOwnership();
+    const current = await this.body!.stat({ bigint: true });
+    if (current.mtimeNs !== this.identity!.mtimeNs || current.ctimeNs !== this.identity!.ctimeNs) {
+      throw this.failure("ownership_lost", "open_write", "会话内容在准备期间发生变化。");
+    }
+  }
+
+  /**
    * 复核创建时 root/sessions 的 dev/ino 和私有权限；创建与每个保存检查点共用。
    * 路径/权限/所有者变化以 ownership_lost 抛出，不自动修正，也不关闭仍在使用的 fd。
    */
@@ -126,9 +204,10 @@ export class SessionWriterAdapter implements SessionWriter {
 
   /**
    * 在写入前和 sync 后复核 T2 锁、受管目录及正文路径/fd 的 dev/ino、权限和预期大小。
+   * expectedSize 默认追加游标；T5 可在修改后明确传新大小复核，尚不提前推进 writer 游标。
    * 失败永久进入故障；这些检查点无法隔离外部编辑器的同大小写入或所有父目录竞态。
    */
-  private async assertOwnership(): Promise<void> {
+  private async assertOwnership(expectedSize = this.position): Promise<void> {
     try {
       await this.lock.assertOwnership();
       await this.verifyDirectories();
@@ -138,7 +217,7 @@ export class SessionWriterAdapter implements SessionWriter {
       requirePrivateSessionPath(descriptor, false);
       if (
         !this.identity || !sameSessionIdentity(path, this.identity) || !sameSessionIdentity(descriptor, this.identity) ||
-        descriptor.size !== BigInt(this.position) || path.size !== descriptor.size
+        descriptor.size !== BigInt(expectedSize) || path.size !== descriptor.size
       ) throw new Error("body identity or size changed");
     } catch {
       throw this.failure("ownership_lost", "assert_ownership", "会话正文、目录或写锁的身份已改变。");
@@ -174,17 +253,10 @@ export class SessionWriterAdapter implements SessionWriter {
     let bytes: Buffer;
     try { bytes = Buffer.from(JSON.stringify(value) + "\n"); }
     catch { throw this.failure("contract_violation", operation, "会话记录无法编码为 UTF-8 JSONL。"); }
-    let offset = 0;
-    while (offset < bytes.length) {
-      try {
-        const count = await this.io.write(this.body!, bytes.subarray(offset), this.position);
-        if (!Number.isSafeInteger(count) || count <= 0 || count > bytes.length - offset) throw new Error("invalid write progress");
-        offset += count;
-        this.position += count;
-      } catch {
-        throw this.failure("write_failed", operation, "会话记录未取得完整写入确认。");
-      }
-    }
+    try {
+      // 公用短写循环只报告已确认的字节进度；抛错时不假定未知的剩余部分没有落盘。
+      await writeSessionBytes(this.io, this.body!, bytes, this.position, (position) => { this.position = position; });
+    } catch { throw this.failure("write_failed", operation, "会话记录未取得完整写入确认。"); }
     try { await this.io.sync(this.body!); }
     catch { throw this.failure("sync_failed", operation, "会话记录未取得文件同步确认。"); }
     await this.assertOwnership();

@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 进入 `implementing`，T2 原生锁/预检、T3 JSONL 类型/只读扫描及 T4 文件创建/writer 已实现并验证；恢复修复、完整 SessionStore、core 持久化交付及 CLI 接线尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2 原生锁、T3 扫描、T4 文件/writer 已实现，T5 存储恢复/修复实现通过目标环境测试，并获用户授权独立提交；完整 SessionStore/list、core 持久化交付/模型投影及 CLI 接线尚未实现。
 
 ## 目标场景
 
@@ -114,7 +114,7 @@ src/
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
 
-### 阶段 04 的设计边界（T2 锁、T3 扫描与 T4 文件/writer 已实现）
+### 阶段 04 的设计边界（T2–T5 存储实现，T5 待审查）
 
 阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
 
@@ -132,7 +132,13 @@ T3 审查修正把工具终止收窄为 ToolEnd（工具执行失败或两种取
 
 T4 增加 `contracts/session.ts` 的 SessionWriter/SessionSnapshot/OpenedSession，以及 `SessionFileAdapter → SessionWriterAdapter → sessionFact → sessionSchema/SessionSequence` 新建与追加路径。文件 adapter 在预检后核对 cwd realpath、私有目录与 UUID，取原 T2 锁后 wx 独占创建正文；header/文件/必要目录同步后返回空快照与 writer。writer 深拷贝事实、转换已确认的 assistantId 引用，串行处理短写和 sync，成功才确认 seq；永久故障后不重试不确定行。每个保存检查点复核正文/目录/锁身份。
 
-资源从 create 准备阶段即登记，writer/文件 adapter 的 close 都幂等并等待实际 I/O settle；正文/临时目录 fd 全部关闭成功后才释放 T2 锁，关闭失败继续保留登记和锁。`sessionFileIO` 提供真实 Node I/O 的窄注入，测试使用临时目录及 T3 双扫描 oracle。T4 不提供 openWrite/list/repair，不修改 core/bootstrap；30 秒/5 秒监督仍待 T7。完整 T4 验证与开发报告记录在阶段规格中，整体阶段没有因此转为 verified。
+资源从 create 准备阶段即登记，writer/文件 adapter 的 close 都幂等并等待实际 I/O settle；正文/临时目录 fd 全部关闭成功后才释放 T2 锁，关闭失败继续保留登记和锁。`sessionFileIO` 提供真实 Node I/O 的窄注入，测试使用临时目录及 T3 双扫描 oracle。T4 交付时仅提供新建/writer；下文 T5 追加 openWrite/repair，不修改 core/bootstrap，30 秒/5 秒监督仍待 T7。完整 T4 验证与开发报告记录在阶段规格中，整体阶段没有因此转为 verified。
+
+T5 将已有会话入口限定为 `SessionFileAdapter.openWrite → T2 acquire → SessionWriterAdapter.initializeExisting → scanSessionHandle → 必要时 repairSessionTail → SessionSequence.forAppend`。只读名称定位先排除缺失/多文件，持锁后重新定位并 r+ 打开，无 CREAT/TRUNC/APPEND；复核 cwd、目录/正文身份、权限和大小。扫描借用同一正文 fd，不新增独立扫描句柄；完整文件同步当前合法前缀但不改字节、不备份。业务快照直接取最近 20 个 success、最近 user 摘要及中断统计，不在 adapter 里产生 ToolMessage；纯模型投影归 T6 core。
+
+`repairSession` 为两类尾部先计算原件摘要，按块复制恰好 [0,S)，wx 创建并校验/同步 0600 的完整备份与清单，同步 0700 recovery 各级目录项。修改前再次核对源 dev/ino/大小/时间与 SHA-256，再对原正文 fd 补 LF/截 P、sync、重扫及校验保留前缀摘要。修改前失败不改正文，修改后失败不回滚；所有产物保留。备份/清单/目录 fd 仍归 writer 登记，关闭不确定不能提前解锁。
+
+续写建立新的 T3 校验器，只继承已校验 seq 和旧 turnId 拒绝集合，不复活 finish 后的实例、不重建旧 a1/a2 或工具状态。T4 与 T5 共用 `writeSessionBytes` 短写算法；仅增加内部 read/truncate 注入和受管名称辅助函数。T5 实际完成范围、B06–B09/D04 测试及保留限制见阶段规格；未接入 list、picker、模型事实交付、计时/进程监督或 CLI。
 
 ### 依赖检查
 

@@ -4,9 +4,9 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 先完成 T2，随后按独立授权完成 T3 只读格式与扫描及 T4 文件/writer，阶段保持 `implementing`，T5–T10 未开始。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2 锁、T3 扫描、T4 文件/writer，及本轮 T5 存储恢复/修复实现。T5 验证通过，并获用户授权独立提交，阶段保持 `implementing`，T6–T10 未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前完成 T1 文档、T2 锁能力、T3 只读扫描和 T4 文件/writer，不将调研探针或 T2–T4 子集验证视为整个阶段的应用验收。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T5 的授权范围，不将调研探针或存储子集验证视为整个阶段的应用验收；T5 仅交付成功 turn 的业务快照，纯模型消息投影已正式移入 T6 core 任务。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -525,6 +525,8 @@ writer 在 write/sync、契约或所有权失败后进入故障，拒绝后续 a
 
 备份额外占约一个原文件大小，完整保留消息及残片的敏感内容；目录/文件 0700/0600，**不加密、不自动清理**。truncate/补 LF/sync/重验失败为 repair_failed，底层超时仍保留 io_timeout 及 operation=repair；不接受新 user，不继续当前 REPL。待所有已发出的操作结束后关闭资源、释放锁；仍未决则按第 7 节进程期限结束，不能为重试提前解锁。
 
+2026-10-29 T5 验收澄清（用户确认）：修改前失败保证本次操作不改变正文；truncate/补 LF 已生效后，后续 sync/重验失败保留实际字节及完整备份，返回 repair_failed，不交付 writer、不回滚、不重试旧边界。不得把 B07 的“修改前保持原字节”扩张成 B08 的修改后原子回滚保证。T5 不实现本节引用的 30 秒/5 秒监督，该部分仍归 T7。
+
 header-only、创建失败产物、稳定锁文件及备份会累积。手动删除须在所有相关写者退出后离线进行：正文与 recovery 备份分别决定是否删除，锁文件可保留；不得在可能有持有者或并发打开者时 unlink 锁。未来删除/归档须另行设计锁、备份、目录同步和失败恢复，本阶段不实现。
 
 ## 9. 错误、退出码与恢复能力
@@ -571,8 +573,8 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 - [x] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台完成实际安装、构建授权、本机工具链和按需加载验证；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。托管 CI 的矩阵与流水线验证移交 T9。
 - [x] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。B06 的只读分类/原件不变已验证，备份修复与 sync 重验仍归 T5。
 - [x] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。目标 Node 下新增 69 项测试，T3 双扫描入口验证实际字节；创建资源收尾已覆盖，恢复/修复、core 屏障和退出监督仍属 T5–T7。
-- [ ] **T5 恢复与修复**：持锁重新扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 快照和纯模型投影；失败不发模型请求、不自动重放。
-- [ ] **T6 core 交付**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError，保持整批预检、顺序、额度和兼容路径。
+- [x] **T5 恢复与修复（存储范围）**：持锁重新定位/扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 业务快照、已有文件续写与资源收尾；失败不发模型请求、不自动重放。成功 turn 的纯模型投影不在本任务，已正式移至 T6。新增 102 项测试，目标 Node 下全部 692 项通过；实现已获用户授权独立提交。
+- [ ] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。
 - [ ] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出。
 - [ ] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。
 - [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。
@@ -865,3 +867,75 @@ T4 已完成；没有 T4 部分项或阻塞。A03、B02/C02、D04–D06 的上�
 #### Git 状态
 
 工作分支为 `phase/04-session-persistence`；本次仅提交 T4 源码、测试及相关正式文档，不合并 main、不推送、不创建标签。用户 research 文件保持原有未提交修改，不暂存、不提交，SHA-256 仍为 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`。提交 hash 在交付回复中报告。
+
+### T5 存储恢复与修复：实际结果及开发报告（2026-10-29）
+
+状态：`completed`（本轮明确的 T5 存储范围，待审查、未提交）。部分完成：无本轮 T5 部分项。阻塞：无。阶段仍为 `implementing`，契约仍为 `draft`；尚未进入 T6–T10。
+
+#### 完成内容
+
+- `SessionFileAdapter.openWrite({ sessionId, cwd })` 实现安全定位、T2 预检/独占锁、持锁重新定位、r+ 打开、全文件扫描、必要修复及业务快照交付。缺路径/候选返回 not_found，不代建正文/目录；多正文返回 invalid_identity，不按 mtime 任取。busy 原样拒绝，不改选其他会话。
+- cwd 在取锁前必须是实际目录的规范 realpath，随后与 header.cwd 精确相等；root/sessions/正文检查所有者、私有权限、类型、单硬链接和 dev/ino/大小。正文打开不带 CREAT/TRUNC/APPEND。扫描复用 T3 scanSessionHandle，损坏/不支持拒绝整个文件，不恢复局部成功前缀；准备期观察到变化拒绝。
+- 完整文件不创建 recovery、不改字节，仅同步合法前缀，snapshot.repair=none。missing_lf 备份后只在 S 补 LF，lastSeq 已包括完整尾行；incomplete 备份后只截到 P，残片不计 seq。两者均对同一正文 fd sync，再重扫实际文件并核对 seq、完整 LF、有效边界、实际大小、身份和保留前缀摘要。
+- 备份复制恰好 [0,S) 的原始字节，包含残片、原 JSON 空白/字段顺序和多字节 UTF-8。备份/清单使用同一次新时间与 UUID，wx + NOFOLLOW/NONBLOCK 创建 0600 文件，0700 recovery/<sessionId> 容器逐级检查。原件、复制结果、备份大小/摘要及清单字节均复核；文件和每级必要目录同步且临时关闭确认完成后，才进入正文修改。
+- 修改前再次核对源 dev/ino、大小、时间观测和 SHA-256。用户已明确确认 §8 的失败边界：修改前失败不改变正文；修改生效后的 sync/重验失败保留实际字节与完整备份，不回滚、不删产物、不重试旧边界、不交付 writer。普通修复失败为 repair_failed；关闭不确定优先报告 close_failed，保持资源登记/锁。
+- 快照交付原 meta、最近最多 20 个完整 success 业务组、最近 user 摘要或缺失、中断计数和 repair。失败/取消/超时/中断不进入成功窗口，不重建旧执行、不生成 ToolMessage、不暴露磁盘 seq/assistantId。按已确认范围，纯模型投影正式移至 T6 core 任务，不计作 T5 已交付能力。
+- 恢复后的 writer 使用全新 T3 校验器，只继承 lastSeq 和所有旧 turnId 的拒绝集合，不复活已 finish/failed 的扫描实例，不重建旧 a1/a2；首条必须是新 user/turnId，seq 从 lastSeq+1 开始。继续共用 T4 的事实快照、引用转换、短写、sync、永久故障和幂等 close；header-only 从 1 开始。
+- openWrite 在首次 await 前登记准备任务；取锁即登记 writer。正文扫描直接借用 fd，无额外扫描 fd 待关闭。恢复/修复中的临时 fd 同样归 writer 管理，所有 I/O 真正 settle、正文/临时 fd 关闭成功后才 release。失败未返回 writer 时也不泄漏或提前放锁，整体 close 可等待未完成的恢复操作。
+
+#### 实际修改文件
+
+- [SessionFileAdapter.ts](../../src/adapters/session/SessionFileAdapter.ts)：最小扩展 openWrite 和既有整体资源登记，不实现 list 或完整产品 store。
+- [SessionWriterAdapter.ts](../../src/adapters/session/SessionWriterAdapter.ts)：增加已有文件初始化、扫描/修复/快照、恢复起点确认，继续复用同一追加/关闭算法。
+- [repairSession.ts](../../src/adapters/session/repairSession.ts)：新增持锁备份、SHA-256、清单/目录同步、修改前复核、同 fd 修改与重验。
+- [sessionFilename.ts](../../src/adapters/session/sessionFilename.ts)：提取 T4 命名规则供创建碰撞与恢复定位共用；仅定位，最终身份/时间/版本仍交 T3 schema 扫描。
+- [sessionFileIO.ts](../../src/adapters/session/sessionFileIO.ts)：增加实际定位 read/truncate 注入，提取共用 writeSessionBytes 短写循环；未增加依赖。
+- [sessionSequence.ts](../../src/adapters/session/sessionSequence.ts)：新增 forAppend 工厂，为已持锁验证的完整前缀创建新校验器，保留原单次使用保护。
+- [contracts/session.ts](../../src/contracts/session.ts)：仅同步会话业务类型的中文注释（含 T6 投影归属），没有改变磁盘格式/跨层数据结构或新增完整 SessionStore。
+- [sessionRecovery.test.ts](../../tests/sessionRecovery.test.ts)：新增 102 项测试；现有 T3/T4 测试未改动。
+- 本规格、[session-store](../contracts/session-store.md)、[architecture](../architecture.md)、[ADR-006](../decisions/ADR-006-session-persistence.md)：同步 T5 实际边界、已确认失败语义与未实现项；审查收口时同步 README、docs README 和上级 `agent-lab/plan.md` 的 T5 状态，research 未修改。
+
+#### 关键设计选择
+
+1. 先只读排除缺失/多候选，再取得 T2 锁并正式重新定位/打开/扫描，不沿用只读列表缓存；T2 算法不变。完整文件也同步合法前缀，再作为本次 writer 的确认起点，不把只读 lastSeq 直接当 durable 证明。
+2. T3 扫描器、schema、格式、JSON 前缀算法均不改；只给 T3 sequence 增加新实例工厂。它的旧 turnId 集合防止复用旧成功/中断身份，旧调用映射故意不恢复，原扫描实例的 finish 后保护保持有效。
+3. T4 写入算法提取为公用字节写入原语，记录、备份/清单、补 LF 都使用它；错误分类仍由对应生命周期负责，不复制一套 writer 或对不确定写入重试。备份块最大 64 KiB，允许短读/短写，单行解析的既有限制不变。
+4. 扫描借用正文句柄，全部修复产物 fd 委托同一 writer 资源集合。临时 close 失败不在原 fd 上重试，不能为了返回拒绝就提前解锁；T7 的永久挂起监督仍待后续任务。
+5. 修复不是原子事务：不承诺修改后失败仍保持原字节。备份/清单不是自动还原标记；再次打开只按实际文件重扫，若文件已健康，不重做备份或旧修复。
+
+#### 验证命令与实际结果
+
+实际目标为 macOS arm64、Node **24.14.0**、pnpm **10.33.2**。本轮先运行原基线：typecheck/lint/build 和 14 文件、590 项全部通过。扩展后旧 T3/T4 定向 242 项通过；T5 初版 51 项中 50 项通过，唯一失败是 ASCII header-only fixture 误断言“UTF-8 字节数大于字符串长度”，已修正为只对含多字节正文的 fixture 断言。开发中的默认 UUID 参数类型推断和测试 Lint 问题已修正，未把失败预检写成通过。
+
+```bash
+# 开发定向：旧 T3/T4 242 项；T5 故障矩阵扩展至 96 项时全部通过。
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm exec vitest run tests/sessionRecovery.test.ts'
+# 最终新增持锁重定位、时间精度兼容和旧 turn_end 反例后执行全套：
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'node --version && pnpm --version && pnpm typecheck && pnpm lint && pnpm test'
+```
+
+最终 typecheck、lint、test 内置 clean/build 和全部测试通过：**15 个文件、692 项测试 = T4 基线 590 项 + T5 新增 102 项**。现有原生锁子进程、T3 格式/扫描、T4 写入/故障/关闭、CLI/REPL/wire 和四层架构测试全部回归通过。未使用全局 Node 26 验证。
+
+- openWrite：缺失根/正文、非法 ID、规范路径/符号链接/非目录/其他 cwd、busy、损坏/不支持、同 ID 多文件均覆盖；取锁后出现第二候选或文件改名再次拒绝。受管名称区分带下划线的其他 ID/非受管后缀，保留 T3 无小数秒/任意小数精度的合法创建时间。
+- 成功窗口：23 个成功 turn 穿插普通失败，另有取消/超时和两个中断，仅最近 20 个 success 进入快照；最近 user 缺摘要不继承旧配置。工具 ok:false/空内容保留为 ToolResult；新 a1/同 toolCallId 按新的 assistant seq 配对；修改返回快照不改变内部旧 turnId 集合。旧 user/turn_end 和旧工具引用不允许续写。
+- B06/B09：缺记录 LF、缺 header LF、可完成 JSON 残片、半个 UTF-8 字符，均验证完整备份字节、实际 S/P/lastSeq、SHA-256、清单内容、同时间/UUID、0700/0600、所有必要同步先于正文修改，以及实际重扫。大原件使用 997 字节短读/401 字节短写仍逐字节一致；旧 JSON 和未知工具证据保留，不补假结束/结果。后续 seq 连续，健康二次打开不重复备份。
+- B07：ENOSPC/备份创建、复制读取、完整/部分/零进度备份写、备份 sync/摘要、清单创建/写/sync/摘要、目录打开/sync、根 sync、修改前源摘要异常均保持正文原字节、不交付 writer；未完成产物保留。备份后源内容同大小变化、源 inode/大小或锁 inode 替换停止本次修改，不覆盖外部修改。recovery 目录的链接/宽权限/模拟异主与产物 wx 文件/链接碰撞均拒绝，不 chmod/覆盖/换身份重试。
+- B08：truncate/补 LF 在调用前拒绝、已生效后确认丢失、假成功但实际未修改、正文 sync 拒绝、重扫读取失败/仍缺 LF、保留前缀摘要不符，均报告 repair_failed、只尝试一次修改、不交付 writer。修改前失败保持原文，修改后保留实际字节/原件备份；模拟下一次打开已健康的文件，repair=none，不重复备份/旧边界。此为存储故障与二次打开子集，没有声称已运行真实 SIGKILL 修复进程或 T7 超时监督。
+- D04：root/sessions/正文符号链接、错误类型、宽权限、模拟异主、硬链接，及打开时正文替换/增长/消失、目录替换和扫描期间增长均拒绝。扫描失败的正文 close 故障、修复临时目录 close 故障均返回 close_failed、不重复关闭、仍登记并持锁。
+- settle/收尾：分别用可控 Promise 暂扣备份 write、已生效的 truncate 和修复后扫描 read，整体 close 始终等待实际 I/O，期间仍 busy；完成后先关正文再 release，close 重入同一结果，不接受新 openWrite/append。恢复后的 append sync 失败继续保留已落盘但未确认事实，永久拒绝后继 append。
+
+所有新增磁盘用例使用显式临时根与真实 T2 flock；I/O/时钟/UUID/延迟均可控，不靠固定 sleep 猜顺序。没有访问真实 ~/.yucli、读取项目 .env、发模型请求或引入假模型客户端。
+
+#### 部分完成、阻塞与未完成事项
+
+本轮 T5 存储目标全部实现，无部分项或阻塞，待用户审查。纯模型消息投影已正式移至 T6；没有实现完整 SessionStore/list、picker、CLI/REPL 接线、core 事实交付、runPersistentTurn、30 秒操作期限、5 秒故障收尾、进程退出监督或任何 T6–T10 功能，也没有真实模型联调。
+
+#### 未验证平台与限制
+
+仅验证当前 macOS arm64、Node 24.14.0、本地文件系统；未验证 Linux/Windows/macOS x64、其他 Node/共享挂载或实际设备断电。T4 记录的 `storageRoot` 父目录本身为符号链接时目录 `O_NOFOLLOW` 同步可能失败，T5 未处理；默认 `~/.yucli` 不受影响。没有新增记录/单行字节硬上限，T3 单行/当前 turn/诊断内存成本不变；备份按块不等于全流程内存有界。advisory 锁与多次身份/摘要复核不隔离任意外部编辑器或所有父目录并发替换。备份含敏感原文、不加密、不自动清理；完整原件和摘要复核需要额外磁盘/读取成本。关闭或 I/O 永久挂起仍需 T7 监督，T5 不提前解锁、不直接结束进程。
+
+#### Git diff/status
+
+- 分支 `phase/04-session-persistence`，HEAD 保持 `e7279fa`；未 commit、push、merge 或创建标签，所有 T5 改动留工作区、未暂存。
+- 本轮改动为上述 T5 源码/测试/正式文档；审查收口时同步更新了 README.md、docs/README.md 和 `agent-lab/plan.md` 的 T5 存储范围状态，并把纯模型投影正式归入 T6。`agent-lab/plan.md` 位于上级目录、不属于 yucli Git 仓库。
+- research 文件未编辑/暂存/提交，SHA-256 保持 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`；本轮结束时保留其原有未提交修改。

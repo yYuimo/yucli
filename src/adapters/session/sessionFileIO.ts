@@ -1,11 +1,11 @@
-/** adapters 层的正文 I/O 注入边界；T4 的创建和 writer 使用，锁仍由 T2 自行管理。 */
+/** adapters 层的正文 I/O 注入边界；创建、writer、T5 修复共用，锁仍由 T2 自行管理。 */
 import type { BigIntStats } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, type FileHandle } from "node:fs/promises";
 import { SessionAccessError } from "../../contracts/session.js";
 
 /**
  * 文件创建/写入实际使用的窄能力；默认委托 Node，测试可逐项替换以控制 settle/短写/故障。
- * 保留真实 FileHandle，便于用 T3 scanSessionHandle 验证；不提供 repair/truncate 能力。
+ * 保留真实 FileHandle，便于用 T3 scanSessionHandle 验证；修复仅增加定位读取和明确截断能力。
  */
 export interface SessionFileIO {
   /** 读取路径自身的 bigint 身份，不能跟随受管末端符号链接；失败由调用方分类。 */
@@ -20,6 +20,10 @@ export interface SessionFileIO {
   realpath(path: string): Promise<string>;
   /** 从指定字节位置写出整个 remaining 的一个片段；返回实际写入量，允许短写。 */
   write(handle: FileHandle, remaining: Uint8Array, position: number): Promise<number>;
+  /** 从显式位置读取至多 buffer.length 字节；T5 摘要/备份使用，不能扩大初始 [0,S)。 */
+  read(handle: FileHandle, buffer: Uint8Array, position: number): Promise<number>;
+  /** 将已持锁正文截到明确字节边界；只由完整备份确认后的 T5 修复调用。 */
+  truncate(handle: FileHandle, sizeBytes: number): Promise<void>;
   /** 等待 Node FileHandle.sync；成功才构成该文件/目录的同步证据。 */
   sync(handle: FileHandle): Promise<void>;
   /** 等待真正的 close；失败不能被解释为句柄已经安全关闭。 */
@@ -34,6 +38,8 @@ export const nodeSessionFileIO: SessionFileIO = {
   readdir: (path) => readdir(path),
   realpath: (path) => realpath(path),
   write: async (handle, remaining, position) => (await handle.write(remaining, 0, remaining.length, position)).bytesWritten,
+  read: async (handle, buffer, position) => (await handle.read(buffer, 0, buffer.length, position)).bytesRead,
+  truncate: (handle, sizeBytes) => handle.truncate(sizeBytes),
   sync: (handle) => handle.sync(),
   close: (handle) => handle.close(),
 };
@@ -57,6 +63,28 @@ export function requirePrivateSessionPath(stats: BigIntStats, directory: boolean
 /** 比较精确 dev/ino；大小另由 writer 检查，不依赖 mtime 或日志内容判断身份。 */
 export function sameSessionIdentity(first: BigIntStats, second: BigIntStats): boolean {
   return first.dev === second.dev && first.ino === second.ino;
+}
+
+/**
+ * 完整写入一段实际 UTF-8 字节；T4 记录、T5 备份/清单及补 LF 共用，避免复制短写算法。
+ * 输入为已登记 fd、起点和完整字节，返回右开末端；progress 仅报告已确认的写入位置。
+ * 零进度/非法计数或底层拒绝立即失败，不重试不确定写入；错误分类由对应生命周期负责。
+ */
+export async function writeSessionBytes(
+  io: Pick<SessionFileIO, "write">,
+  handle: FileHandle,
+  bytes: Uint8Array,
+  position: number,
+  progress?: (position: number) => void,
+): Promise<number> {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const count = await io.write(handle, bytes.subarray(offset), position + offset);
+    if (!Number.isSafeInteger(count) || count <= 0 || count > bytes.length - offset) throw new Error("invalid write progress");
+    offset += count;
+    progress?.(position + offset);
+  }
+  return position + offset;
 }
 
 /** 只用于生成新身份时的碰撞控制流；不能吞掉其他创建/同步/关闭故障并重试。 */

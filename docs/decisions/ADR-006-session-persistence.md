@@ -45,4 +45,4 @@ mkdir 占位锁无需原生依赖，但崩溃后自动接管与清理竞态未�
 - [会话持久化调研报告](../research/session-persistence-research.md)
 - [现有 REPL 契约](../contracts/repl.md)、[工具执行契约](../contracts/tool-execution.md)、[CLI 契约](../contracts/cli.md)：阶段 04 扩展待实现同步。
 - [会话存储契约](../contracts/session-store.md)已固定阶段 04 的跨层边界，状态为 `draft`，待实现和运行时验证后接受。
-- T2–T4 已实现 contracts/session 业务数据/稳定错误/writer 能力，以及 adapters/session 的锁、只读 JSONL 扫描和新文件/writer；core 协调/模型历史投影、完整 store、恢复修复和 CLI 接线仍待后续任务。实际验证边界见阶段 04 的 T2–T4 记录，不视为整个持久化设计已验收；T4 沿用本决策，未新增锁算法或恢复策略。
+- T2–T5 已实现 contracts/session 业务数据/稳定错误/writer 能力，以及 adapters/session 的锁、扫描、新文件/writer 和存储恢复/修复；T5 通过目标测试，并获用户授权独立提交。core 协调/模型历史投影（T6）、完整 store/list 和 CLI 接线仍待后续任务。实际验证边界见阶段 04 的 T2–T5 记录，不视为整个设计已验收；T5 沿用本决策，修改后失败保留实际字节与备份，不增加回滚、自动重放或新锁算法。

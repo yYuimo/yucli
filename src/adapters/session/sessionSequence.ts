@@ -1,7 +1,7 @@
 /** adapters 层逐记录语义状态机：不读写文件，不执行工具，只依据已通过 schema 的事实推进。 */
 import type { RecoveredItem, RecoveredTurn, RuntimeProfile, ToolEnd, TurnEnd } from "../../contracts/session.js";
 import type { ToolCall } from "../../contracts/tool.js";
-import type { ScanStatistics, ScannedCall, ScannedTurn } from "./scanTypes.js";
+import type { ScanStatistics, ScannedCall, ScannedTurn, ValidScanResult } from "./scanTypes.js";
 import { requireSession, type DiskCallRef, type SessionRecord } from "./sessionSchema.js";
 
 /** 单个调用的真实证据；只有 result 才能放行下一项，end 不能当作正常结果。 */
@@ -46,7 +46,7 @@ interface ActiveTurn {
 export interface SequenceSummary {
   /** 全部合法 turn 的只读统计，不是写入确认或锁探测。 */
   statistics: ScanStatistics;
-  /** 最近最多 20 组 success 的业务内容，交给未来 core 投影。 */
+  /** 最近最多 20 组 success 的业务内容，交给 T6 core 投影。 */
   recentSuccessfulTurns: readonly RecoveredTurn[];
   /** 所有 turn 的无正文证据摘要，失败/中断不会从这里抹除。 */
   turns: readonly ScannedTurn[];
@@ -80,6 +80,23 @@ export class SessionSequence {
   /** 用 header 创建时间初始化空文件统计；构造不验证 header，也没有 I/O 或业务执行。 */
   constructor(createdAt: string) {
     this.lastActivityAt = createdAt;
+  }
+
+  /**
+   * T5 完成持锁扫描/修复后，为后续追加建立全新的校验器，不复活已经 finish 的扫描实例。
+   * 只接受换行完整、未观察到变化的合法结果；保存 seq 和所有旧 turnId 以禁止续旧执行。
+   * 不复制历史正文或重建旧调用；此实例供 writer 校验新事实，历史快照仍使用原扫描结果。
+   */
+  static forAppend(scan: ValidScanResult): SessionSequence {
+    requireSession(
+      scan.status === "valid" && scan.tailKind === "none" && !scan.changing &&
+      scan.validEndBytes === scan.observedSizeBytes && Number.isSafeInteger(scan.lastSeq) && scan.lastSeq >= 0,
+      "validator_state", "续写需要已验证且换行完整的持锁扫描结果。",
+    );
+    const next = new SessionSequence(scan.meta.createdAt);
+    next.lastSeq = scan.lastSeq;
+    for (const turn of scan.turns) next.seenTurns.add(turn.turnId);
+    return next;
   }
 
   /**
@@ -210,7 +227,7 @@ export class SessionSequence {
       call.terminal = { kind: "result", ok: record.payload.ok };
       batch.next++;
 
-      // 转成业务结果时显式去掉磁盘 callMessageSeq；后续 core 才负责转 ToolMessage。
+      // 转成业务结果时显式去掉磁盘 callMessageSeq；T6 core 才负责转 ToolMessage。
       const { toolCallId, name, ok, content } = record.payload;
       turn.items.push({ type: "tool_result", result: { toolCallId, name, ok, content } });
     } else {

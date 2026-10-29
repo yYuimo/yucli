@@ -1,6 +1,6 @@
 /**
  * contracts 层的会话业务数据、写入能力与稳定异常。存储 adapter 校验 JSON 后创建恢复数据，
- * 后续 core 只消费这里的业务消息，不接触磁盘 seq、文件句柄或 JSONL。
+ * T6 core 只消费这里的业务消息，不接触磁盘 seq、文件句柄或 JSONL。
  * 类型声明在运行时会被擦除；它们不能替代 T3 扫描器的 schema/生命周期检查。
  */
 import type { AssistantMessage, TextMessage } from "./message.js";
@@ -109,7 +109,7 @@ export interface SessionMeta {
   cwd: string;
 }
 
-/** 校验后的成功 turn 内容，仍保留 ToolResult；转换为模型 ToolMessage 属于后续 core。 */
+/** 校验后的成功 turn 内容，仍保留 ToolResult；转换为模型 ToolMessage 属于 T6 core。 */
 export type RecoveredItem =
   | { type: "user"; message: TextMessage & { role: "user" } }
   | { type: "assistant"; message: AssistantMessage }
@@ -125,17 +125,17 @@ export interface RecoveredTurn {
   items: readonly RecoveredItem[];
 }
 
-/** create 或未来 openWrite 交付的业务快照；不含磁盘游标或平台资源。 */
+/** create/openWrite 交付的业务快照；不含磁盘游标或平台资源，ToolMessage 投影由 T6 core 负责。 */
 export interface SessionSnapshot {
-  /** 校验后的稳定身份；create 使用真实 cwd 和同一次取值的创建时间/文件名。 */
+  /** 校验后的稳定身份；create 使用真实 cwd，openWrite 保留原身份/时间且重新核对 cwd。 */
   meta: SessionMeta;
-  /** create 为空；未来恢复只交付最近 20 个完整成功 turn。 */
+  /** create 为空；openWrite 只交付最近 20 个完整成功 turn 的业务数据。 */
   recentSuccessfulTurns: readonly RecoveredTurn[];
-  /** 最近 user 的运行摘要；新会话尚无 user，因此缺失。 */
+  /** 最近 user 的运行摘要；新会话或该 user 没有摘要时缺失，不继承更早 user 的配置。 */
   lastUserProfile?: RuntimeProfile;
   /** 证据推导的中断数量；create 为零。 */
   interruptedTurnCount: number;
-  /** 本次打开的尾部修改；T4 仅新建，固定 none，不实现恢复修复。 */
+  /** 本次打开的尾部动作；完整文件为 none，T5 仅在完整备份后补 LF 或截断残片。 */
   repair: "none" | "truncate_tail" | "append_lf";
 }
 

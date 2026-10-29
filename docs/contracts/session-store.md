@@ -131,6 +131,10 @@ writer 在写入、同步、契约或所有权失败后进入故障状态，拒�
 
 扫描器在持锁恢复前和只读列表时都必须按字节边界读取、严格解码 UTF-8，并逐行执行 JSON、schema、seq、引用和生命周期校验。中间坏行、未知事件、非法引用和语义损坏拒绝整个文件，不跳过记录。只允许最后一行可证明为 JSON/UTF-8 前缀残片，或完整合法记录但缺少 LF；修复前必须完成原件备份、清单同步、大小与 SHA-256 复核，修复后重新扫描确认。
 
+尾部修复只允许在原 S 补一个 LF，或截断到上一合法 LF 后的 P。备份逐字节包含完整 [0,S)（含残片），与清单用同一新时间戳/UUID、wx 创建；全部文件及必要目录同步后，仍需再次核对原件 dev/ino、大小和 SHA-256 才能修改。修改后对同一正文 fd sync，并重新扫描检查 tailKind=none、lastSeq、有效字节边界和实际大小。
+
+2026-10-29 用户确认的失败边界：修改前失败保证本操作不改变正文；修改生效后 sync/重验失败保留真实字节和完整备份，不回滚、不重试旧边界、不交付 writer。一般修复故障为 repair_failed，描述符关闭不确定仍报 close_failed 并保留锁/登记。重新打开必须依据实际文件证据，健康文件不重复备份。
+
 恢复只返回已校验的业务数据，不把磁盘 seq 或内部 assistantId 交给 core：
 
 ```ts
@@ -218,7 +222,7 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描，T4 再追加文件创建/writer；本文整体仍为 draft，完整 SessionStore、备份修复、持久化 CLI 和 core 事实交付仍待后续任务。
+T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存储恢复/修复；本文整体仍为 draft，完整 SessionStore/list、持久化 CLI 和 core 事实交付/模型投影仍待后续任务。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
@@ -239,15 +243,24 @@ T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描，T4 再追
 - T3 审查修正将 tool_end 类型/运行时配对收窄为工具失败或取消；turn 级错误和工具 timeout 拒绝。SessionSequence 明确为单次使用，accept 失败后或 finish 成功后继续 accept/finish 均抛安全的 validator_state，不返回失败后的局部历史，也不改变已交付摘要。直接 API 和文件扫描反例已验证，详见阶段实际结果中的“T3 审查修正”。
 - changing 是前后 fstat 的变化观察，不是原子快照或锁许可。T4 为新建补充 cwd realpath/目录归属及受管路径权限检查；已有文件的可写恢复仍须 T5 持锁重扫和必要修复。T3 扫描本身不创建日志、不 fsync、不备份/截断/补 LF、不实现列表入口或模型历史投影。
 
-本机目标工具链下 B01–B05 和 B06 只读子集通过，完整结果及未验证平台见[阶段 04 的 T3 实际结果](../specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。B06 的备份修复/sync 重验仍待 T5；整体契约状态保持 draft。
+本节仅记录 T3 的 B01–B05 和 B06 只读子集证据，结果及未验证平台见[阶段 04 的 T3 实际结果](../specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。B06 的存储修复/sync 重验由后文 T5 实现；整体契约状态保持 draft。
 
 ## T4 文件与 writer 实现状态（2026-10-29）
 
-- [SessionFileAdapter](../../src/adapters/session/SessionFileAdapter.ts) 仅提供 create/资源级 close，供未来完整 store 组合。新建先 T2 预检，再核对真实目录 cwd 和私有受管目录；UUID v4/路径碰撞最多三次。正文以 wx 独占语义 + NOFOLLOW 创建 0600，复核路径/fd 身份，完整 header、文件及 sessions/locks/root/根父目录同步后才交付 writer 和空快照，之后调用方再 append user。
+- [SessionFileAdapter](../../src/adapters/session/SessionFileAdapter.ts) 在 T4 交付时提供 create/资源级 close，供未来完整 store 组合，T5 再扩展 openWrite。新建先 T2 预检，再核对真实目录 cwd 和私有受管目录；UUID v4/路径碰撞最多三次。正文以 wx 独占语义 + NOFOLLOW 创建 0600，复核路径/fd 身份，完整 header、文件及 sessions/locks/root/根父目录同步后才交付 writer 和空快照，之后调用方再 append user。
 - [SessionWriterAdapter](../../src/adapters/session/SessionWriterAdapter.ts) 实现本契约 SessionWriter。入口快照并校验事实，实际 I/O 串行；磁盘结构/生命周期复用 T3，短写按实际字节补齐，sync 与所有权复核成功才返回 confirmedSeq。已确认 assistantId 映射转换为 callMessageSeq，批次间复用 toolCallId 继续按 T3 引用规则配对，turn_end 确认后清除本地身份。
 - write/sync、契约、所有权故障后永久拒绝 append，不重试不确定行。关闭首次停止接收，等已发出的操作 settle，所有正文/目录 fd 关闭成功才调用原 T2 release；重复 close 等待同一结果。关闭失败保留锁与资源登记，不再次 close 不确定 fd。文件 adapter 同时登记未交付的 create，成功关闭后才撤销资源登记。
 - [sessionFileIO](../../src/adapters/session/sessionFileIO.ts) 的窄能力、时钟、UUID 和已有 T2 锁能力均支持注入，默认委托真实 Node/T2；没有新增依赖、生产假模型或 CLI 根路径开关。所有测试用显式临时根，T3 双扫描入口核验实际落盘字节；目标 Node 下 T4 新增 69 项、全部 590 项通过。
-- 此为 T4 保存与资源边界，没有完整 SessionStore/openWrite/list、恢复/备份/修复、core 事实交付、30 秒/5 秒监督或 CLI 接线。关闭失败保留资源需要后续 T7 监督，不得在 I/O 未 settle 时提前解锁。阶段仍 implementing，契约仍 draft；完整报告见阶段 04 的 T4 实际结果及开发报告。
+- 本节为 T4 当时交付的保存/资源边界；后文 T5 扩展 openWrite/备份修复，完整 SessionStore/list、core 事实交付、30 秒/5 秒监督和 CLI 仍待后续任务。关闭失败保留资源需要后续 T7 监督，不得在 I/O 未 settle 时提前解锁；T4 当时的完整报告见阶段规格。
+
+## T5 存储恢复与修复实现状态（2026-10-29）
+
+- SessionFileAdapter.openWrite 对规范真实 cwd 和完整安全 ID 只读定位，排除缺失/同 ID 多文件；T2 预检/独占锁成功后再正式重定位，r+ + NOFOLLOW/NONBLOCK 打开正文，不带创建、覆盖或追加标志。逐项复核受管目录/文件权限、所有者、普通文件/单硬链接、dev/ino 和大小，借用同一正文 fd 做 T3 全文件扫描。扫描拒绝为 unsupported/corrupt，归属不符为 cwd_mismatch，准备期间身份/内容变化为 ownership_lost；不改选、不重放。
+- 完整文件不备份、不改字节，同步当前合法前缀后建立 writer 起点。[repairSession](../../src/adapters/session/repairSession.ts) 对两类合法尾部执行上述保全/修改/重验流程；备份、清单、recovery 容器为 0600/0700。原件/备份/清单核对实际 UTF-8 字节及摘要；保留前缀摘要还用于确认修复没有重写旧 JSON。全部成功前不允许新执行。
+- 快照只含原 meta、最近最多 20 个完整 success 的业务组、最近 user 摘要（缺失保持缺失）、中断数量和本次 repair。adapter 不生成 ToolMessage，不把 seq/assistantId 交给 core。原清单的纯模型投影已正式移至 T6 core 任务。
+- SessionSequence.forAppend 建立新校验器，继承已校验 seq 和所有旧 turnId 的拒绝集合；不复活已 finish 的实例、不重建旧 assistant/tool 状态。续写从 lastSeq+1 开始，header-only 从 1 开始，继续共用 T4 的短写、同步、永久故障及幂等 close。备份/目录/正文 fd 全部由同一 writer 登记；openWrite 在首次 await 前登记，close 等实际 settle/关闭正文后才放锁，关闭失败仍保持登记。
+- 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下，新增 102 项 T5 测试，全部 15 个文件、692 项测试及 typecheck/lint/build 通过。B06–B09 和 D04 的存储子集验证使用临时目录、可控 I/O/Promise，不访问真实 home/.env 或模型；不宣称已验证 CLI、进程中断监督或其他平台。
+- T5 实现通过验证，并获用户授权独立提交；阶段仍 implementing、契约仍 draft。未实现 list/picker、core 事实交付/模型投影、30 秒/5 秒监督或 CLI/REPL 接线，完整结果见阶段规格的 T5 开发报告。
 
 ## 错误和退出映射
 
@@ -270,5 +283,5 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 已实现 T2–T4：`src/contracts/session.ts`、`src/contracts/session-lock.ts` 及 `src/adapters/session/` 内锁、只读扫描、文件创建/writer；完整 store/恢复修复、`src/core/runPersistentTurn.ts` 和 CLI 接线待后续任务
+- 已实现 T2–T5：`src/contracts/session.ts`、`src/contracts/session-lock.ts` 及 `src/adapters/session/` 内锁、扫描、创建/writer、存储恢复/修复（T5 待审查）；完整 store/list、`src/core/runPersistentTurn.ts`、模型消息投影和 CLI 接线待后续任务
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收

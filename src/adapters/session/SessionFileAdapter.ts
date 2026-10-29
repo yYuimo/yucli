@@ -1,4 +1,4 @@
-/** adapters 层 T4 会话创建与资源登记；未来 SessionStore 可组合它，不实现 openWrite/list/repair。 */
+/** adapters 层会话创建、持锁恢复与资源登记；未来完整 store 可组合它，本轮不提供 list/CLI。 */
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,6 +8,7 @@ import { SessionLockAdapter } from "./SessionLockAdapter.js";
 import { SessionWriterAdapter, type SessionDirectories } from "./SessionWriterAdapter.js";
 import { fileErrorCode, nodeSessionFileIO, requirePrivateSessionPath, SessionIdentityCollision, type SessionFileIO } from "./sessionFileIO.js";
 import { validateSessionHeader } from "./sessionSchema.js";
+import { parseSessionBasename, requireSessionId } from "./sessionFilename.js";
 
 /** bootstrap/临时目录测试的组装项；不新增 CLI/env 覆盖项，不注入模型或业务执行器。 */
 export interface SessionFileOptions {
@@ -25,7 +26,7 @@ export interface SessionFileOptions {
 
 /**
  * 管理创建中及已交付的全部文件资源；创建失败也不能遗漏未返回句柄的锁/正文。
- * 只实现 T4 创建边界，后续 store 的读恢复、列表与超时监督不在这里预设假实现。
+ * 提供 T4 创建与 T5 恢复边界；列表和超时监督不在这里预设假实现。
  */
 export class SessionFileAdapter {
   private readonly root: string;
@@ -58,6 +59,61 @@ export class SessionFileAdapter {
     // 两个分支都只移除已经 settle 的登记，保留原 Promise 给调用方观察失败。
     void task.then(() => this.preparing.delete(task), () => this.preparing.delete(task));
     return task;
+  }
+
+  /**
+   * 按完整 ID 打开当前真实 cwd 的已有会话，持锁扫描/修复后返回 writer 与成功业务快照。
+   * 不创建正文、不复用只读观察；首次 await 前登记准备资源，整体 close 会等待实际 I/O settle。
+   * 缺失/忙碌/归属/格式失败不返回半准备句柄；修复和关闭错误保留存储分类。
+   */
+  openWrite(input: { sessionId: string; cwd: string }): Promise<OpenedSession> {
+    if (this.closing) return Promise.reject(new PersistenceError("contract_violation", "open_write", "文件 adapter 已开始关闭。"));
+    const task = this.openFile(input.sessionId, input.cwd);
+    this.preparing.add(task);
+    void task.then(() => this.preparing.delete(task), () => this.preparing.delete(task));
+    return task;
+  }
+
+  /**
+   * 只读定位后取 T2 独占锁，再由 writer 正式重定位/打开/扫描；缺路径不代建会话或目录。
+   * 取得锁立即登记 writer，任何后续拒绝均等待实际关闭后再释放锁，无改选、重放或自动重试。
+   */
+  private async openFile(sessionId: string, cwd: string): Promise<OpenedSession> {
+    try {
+      requireSessionId(sessionId);
+      await this.locks.preflight();
+      try {
+        if (
+          typeof cwd !== "string" || resolve(cwd) !== cwd || await this.io.realpath(cwd) !== cwd ||
+          !(await this.io.lstat(cwd)).isDirectory()
+        ) throw new Error("not canonical cwd");
+      } catch { throw new SessionAccessError("cwd_mismatch", "open_write", "工作目录必须是规范化的真实绝对目录。"); }
+
+      const root = await this.io.lstat(this.root);
+      requirePrivateSessionPath(root, true);
+      const sessions = await this.io.lstat(join(this.root, "sessions"));
+      requirePrivateSessionPath(sessions, true);
+      const identities = (await this.io.readdir(join(this.root, "sessions")))
+        .map(parseSessionBasename).filter((candidate) => candidate?.sessionId === sessionId);
+      if (identities.length === 0) throw new SessionAccessError("not_found", "open_write", "找不到指定会话正文。");
+      if (identities.length !== 1) throw new SessionAccessError("invalid_identity", "open_write", "同一身份对应多个正文文件。");
+
+      const lock = await this.locks.acquire(sessionId);
+      const meta: SessionMeta = { ...identities[0]!, cwd };
+      const writer = new SessionWriterAdapter(this.root, meta, lock, this.io, this.now, () => { this.resources.delete(writer); });
+      this.resources.add(writer);
+      try {
+        const snapshot = await writer.initializeExisting({ root, sessions }, this.uuid);
+        return { writer, snapshot };
+      } catch (error) {
+        // 借用正文的扫描已经 settle；正文/修复临时 fd 确认关闭后才放锁，失败资源仍被登记。
+        await writer.close();
+        throw error;
+      }
+    } catch (error) {
+      if (error instanceof SessionAccessError || error instanceof PersistenceError) throw error;
+      throw new SessionAccessError(fileErrorCode(error) === "ENOENT" ? "not_found" : "permission_denied", "open_write", "无法安全打开已有会话。");
+    }
   }
 
   /**
@@ -141,7 +197,7 @@ export class SessionFileAdapter {
   }
 
   /**
-   * 停止新建，等待全部 create 的底层操作 settle，再幂等关闭全部已登记 writer。
+   * 停止新建/恢复，等待全部 create/openWrite 底层操作 settle，再幂等关闭全部已登记 writer。
    * 单个 writer 自行先关正文再放锁；任何关闭失败都上抛且资源仍被登记，不伪装关闭成功。
    * 本边界没有 T7 的 30 秒/5 秒计时器；不会因不再等待而提前解锁。
    */
