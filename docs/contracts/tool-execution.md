@@ -173,6 +173,8 @@ user → assistant → tool_start → tool_result 或 tool_end → … → turn_
 
 `tool_start` 确认后如果在进入注册表前收到取消，必须先保存 `tool_end`，其安全错误码为 `cancelled_before_dispatch`，确认后才结束业务 turn；注册表已经开始后按实际异常或取消原因保存结果。完整 `ToolResult` 已交付时只保存 `tool_result`，不能再为同一调用追加重复的 `tool_end`。
 
+`tool_end` 的 failed 仅允许 `tool/tool_execution_failed`，cancelled 仅允许 `cancellation/user_interrupt` 或 `cancellation/cancelled_before_dispatch`。model、protocol、limit、internal 错误由 turn_end 表达；当前未定义工具执行期限，tool_end(timeout) 读写均拒绝，不套用模型 request_timeout，也不提前接受 tool_timeout。
+
 只有 coordinator 保存并确认 `turn_end(success)` 后，REPL 才提交 `StreamTurnResult.appendedMessages` 到内存历史。失败、取消、超时或保存故障不提交半截历史；保存故障原样穿透 core，不转成 `ok:false` 工具结果、协议错误或普通取消。普通 `--prompt` 不注入 sink，继续保持无会话副作用。
 
 该扩展仍保留本文件前述的整批参数预检、顺序执行、4 个工具调用和 8 次模型调用上限；扩展接口、保存屏障、错误分类和恢复投影见[会话存储契约](session-store.md)。实现和验收完成前不得将本节的持久化行为当作已交付能力。

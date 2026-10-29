@@ -128,6 +128,8 @@ fs-ext@2.1.1 放 optionalDependencies，pnpm 构建脚本仅授权该包；构�
 
 T3 新增 `contracts/session.ts` 的业务数据/稳定错误（锁入口重导出同一异常），以及 adapter 内的 `sessionSchema → sessionSequence` 校验、`jsonPrefix` 与 `scanSession` 字节扫描。扫描器以初始 fstat 固定 `[0,S)`，严格 UTF-8，提供 none/missing_lf/incomplete 与全文件 corrupt/unsupported 拒绝；损坏结果不暴露局部可执行历史。合法结果返回列表统计、工具证据及最近 20 个完整成功业务组，由未来 core 再转模型消息；只读观察不授予写入或恢复执行权。当前 CLI 没有调用扫描器，扫描不创建目录、不修改正文、不备份、不 fsync；T4/T5 仍负责文件创建/权限、writer 和持锁修复。T3 验证与内存/并发限制见[阶段 04 T3 实际结果](specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。
 
+T3 审查修正把工具终止收窄为 ToolEnd（工具执行失败或两种取消），turn_end 保留完整业务原因；当前不接受工具 timeout。SessionSequence 用失败/完成标志执行单次使用约束，错误后不能生成摘要，finish 后不能再修改已返回读模型。未来 writer/replay 需沿用这些类型和运行时边界；单行/前缀深度仍无硬上限，不把分块扫描当作有界内存。
+
 ### 依赖检查
 
 `tests/architecture.test.ts` 使用 TypeScript 解析源码模块依赖，并按下表检查；`pnpm test` 同时运行源码和新构建产物的 CLI 验证。构建前清理 `dist`，包入口为 `dist/bootstrap/cli.js`。

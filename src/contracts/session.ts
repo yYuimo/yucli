@@ -29,13 +29,26 @@ export interface SafeError {
   httpStatus?: number;
 }
 
-/** 工具或 turn 的异常终止；必须携带与 outcome 匹配的安全错误。 */
+/** turn 级异常终止；必须携带与 outcome 匹配的安全错误，不能直接作为工具终止事实。 */
 export interface FailureEnd {
   /** failed 是业务失败；cancelled 是取消；timeout 仅代表已实现的请求超时。 */
   outcome: "failed" | "cancelled" | "timeout";
   /** 原因由执行方交付，读取方不能仅凭缺结果合成此对象。 */
   error: SafeError;
 }
+
+/**
+ * 单项工具可以报告的异常终止，由工具事实交付方创建，adapter 在读取时按同一上下文校验。
+ * failed 仅允许工具执行错误，cancelled 保留实际取消检查点；模型、协议、额度等错误属于 turn。
+ * SafeError 与具体分类的交叉类型（&）保留安全摘要字段，同时缩小 category/code 的取值。
+ * 当前没有工具执行期限，因此不声明 timeout/tool_timeout，也不能套用模型 request_timeout。
+ */
+export type ToolEnd =
+  | { outcome: "failed"; error: SafeError & { category: "tool"; code: "tool_execution_failed" } }
+  | {
+      outcome: "cancelled";
+      error: SafeError & { category: "cancellation"; code: "user_interrupt" | "cancelled_before_dispatch" };
+    };
 
 /** 判别联合：success 禁止 error；其余终止状态必须带 error。中断没有落盘的 turn_end。 */
 export type TurnEnd = { outcome: "success"; error?: never } | FailureEnd;
@@ -58,7 +71,7 @@ export type CoreTurnFact = { turnId: string } & (
   | { type: "assistant"; assistantId: string; message: AssistantMessage }
   | { type: "tool_start"; call: CallRef }
   | { type: "tool_result"; call: CallRef; result: ToolResult }
-  | { type: "tool_end"; call: CallRef; end: FailureEnd }
+  | { type: "tool_end"; call: CallRef; end: ToolEnd }
 );
 
 /** user/turn_end 的业务所有者是后续协调方；本类型不实现 writer、确认屏障或协调器。 */

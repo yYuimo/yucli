@@ -1,7 +1,7 @@
 /** adapters 层的 JSONL v1 运行时结构校验；扫描器先调用本模块，再检查跨记录语义。 */
 import { posix } from "node:path";
 import type { AssistantMessage } from "../../contracts/message.js";
-import type { FailureEnd, RuntimeProfile, SessionMeta, TurnEnd } from "../../contracts/session.js";
+import type { RuntimeProfile, SessionMeta, ToolEnd, TurnEnd } from "../../contracts/session.js";
 import type { ToolResult } from "../../contracts/tool.js";
 
 /** JSONL 首行；版本只属于 header，不混入 core 使用的 SessionMeta。 */
@@ -36,7 +36,7 @@ export type SessionRecord = Envelope & (
   | { type: "message"; payload: AssistantMessage }
   | { type: "tool_start"; payload: DiskCallRef }
   | { type: "tool_result"; payload: DiskCallRef & ToolResult }
-  | { type: "tool_end"; payload: DiskCallRef & FailureEnd }
+  | { type: "tool_end"; payload: DiskCallRef & ToolEnd }
   | { type: "turn_end"; payload: TurnEnd }
 );
 
@@ -181,16 +181,21 @@ function callReference(value: Record<string, unknown>): void {
 }
 
 /**
- * 校验结束状态和安全错误配对；供 tool_end 与 turn_end 共用。
- * success 仅限 turn_end 且不能有 error；失败原因只允许规格列出的 category/code 组合。
+ * 在指定事件上下文中检查终止状态；tool_end/turn_end 结构分支显式传入事件类型。
+ * 输入为 payload 对象，成功无返回值，非法 outcome、错误结构或配对均抛 schema。
+ * 安全错误的字段检查共用，允许的原因分别判断，避免把模型/协议/额度错误认作工具失败。
+ * 本函数只校验数据；当前工具没有执行期限，tool_end(timeout) 即使有错误对象也拒绝。
  */
-function termination(value: Record<string, unknown>, allowSuccess: boolean): void {
+function termination(value: Record<string, unknown>, kind: "tool_end" | "turn_end"): void {
   if (value.outcome === "success") {
-    requireSession(allowSuccess && !Object.hasOwn(value, "error"), "schema", "success 不允许 error，也不能作为 tool_end。");
+    requireSession(kind === "turn_end" && !Object.hasOwn(value, "error"), "schema", "success 不允许 error，也不能作为 tool_end。");
     return;
   }
 
-  requireSession(["failed", "cancelled", "timeout"].includes(value.outcome as string), "schema", "终止 outcome 非法。");
+  // 先检查事件允许的 outcome，再检查安全错误；request_timeout 只属于模型请求，
+  // 不能因为 SafeError/FailureEnd 包含 timeout 枚举就提前允许工具超时。
+  const outcomes = kind === "tool_end" ? ["failed", "cancelled"] : ["failed", "cancelled", "timeout"];
+  requireSession(outcomes.includes(value.outcome as string), "schema", "当前终止事件的 outcome 非法或尚未支持。");
   object(value.error);
   fields(value.error, ["category", "code", "message"], ["httpStatus"]);
   requireSession(
@@ -205,6 +210,16 @@ function termination(value: Record<string, unknown>, allowSuccess: boolean): voi
   );
 
   const pair = `${value.error.category}/${value.error.code}`;
+  if (kind === "tool_end") {
+    // 工具取消沿用两个实际观察点；普通 failed 必须明确来自工具执行。
+    // 这里只限制记录含义，不推断 execute 是否发生，也不合成工具结果。
+    const toolPairs = value.outcome === "failed" ? ["tool/tool_execution_failed"]
+      : ["cancellation/user_interrupt", "cancellation/cancelled_before_dispatch"];
+    requireSession(toolPairs.includes(pair), "schema", "tool_end 只能保存工具执行失败或合法工具取消。");
+    return;
+  }
+
+  // turn_end 保留完整的业务终止原因；其模型请求超时仍使用 request_timeout。
   const allowed = value.outcome === "cancelled" ? ["cancellation/user_interrupt", "cancellation/cancelled_before_dispatch"]
     : value.outcome === "timeout" ? ["timeout/request_timeout"]
     : [
@@ -249,11 +264,11 @@ export function validateSessionRecord(value: unknown): SessionRecord {
     case "tool_end":
       fields(value.payload, ["callMessageSeq", "toolCallId", "name", "outcome", "error"]);
       callReference(value.payload);
-      termination(value.payload, false);
+      termination(value.payload, "tool_end");
       break;
     case "turn_end":
       fields(value.payload, ["outcome"], ["error"]);
-      termination(value.payload, true);
+      termination(value.payload, "turn_end");
       break;
     default:
       throw new SessionFormatIssue("schema", "未知 v1 记录类型或重复 header。");

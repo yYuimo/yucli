@@ -211,7 +211,7 @@ user 记录外层另有 runtimeProfile；新写入必填，只含非空白字符
 | message / assistant | 现有完整 AssistantMessage | 保留 content/toolCalls；无调用时必须是非空白最终回答 |
 | tool_start | `{callMessageSeq,toolCallId,name}` | 表示将交给注册表分派，含名称查找，不保证匹配或 execute 发生 |
 | tool_result | `{callMessageSeq,toolCallId,name,ok:boolean,content:string}` | 正常 ToolResult，ok:false 仍可属于成功 turn；空内容合法 |
-| tool_end | `{callMessageSeq,toolCallId,name,outcome,error}` | 没有正常结果的异常终止，outcome 仅 failed/cancelled/timeout |
+| tool_end | `{callMessageSeq,toolCallId,name,outcome,error}` | 没有正常结果的工具异常终止；当前 outcome 仅 failed/cancelled，不允许工具 timeout |
 | turn_end | `{outcome,error?}` | outcome 为 success/failed/cancelled/timeout；决定整组历史资格 |
 
 v1 message 记录只允许 user/assistant。当前 CLI 无自动 system 消息，模型 tool 消息由 tool_result 派生，不单独复制保存；system/context_reset 等新事件不在 v1。未知 type、非法字段结构或消息角色均拒绝，不能静默跳过。
@@ -234,7 +234,9 @@ error 保存安全对象 `{category,code,message,httpStatus?}`，不 stringify �
 | 模型请求超时 | timeout / timeout / request_timeout |
 | 未分类业务异常 | failed / internal / internal_error，使用固定安全摘要 |
 
-success 不带 error；其余 outcome 必须带匹配分类的 error。工具 timeout 只有实现明确执行期限后才可产生；本阶段不新增工具执行超时，不因枚举存在就宣称能抢占 Node 文件调用。保存故障属于 PersistenceError，不通过这些业务错误伪装写回故障文件。
+上表完整配对用于 `turn_end`。`tool_end` 按工具上下文收窄，只允许 `failed/tool/tool_execution_failed`、`cancelled/cancellation/user_interrupt` 和 `cancelled/cancellation/cancelled_before_dispatch`。model、protocol、limit、internal 类错误只能作为 turn 终止原因，不能归到单项工具终止。
+
+success 不带 error；其余 outcome 必须带匹配分类的 error。当前读写均拒绝 `tool_end(timeout)`，包括误用 `timeout/request_timeout` 或提前使用尚未定义的 `tool_timeout`；`turn_end(timeout)` 的模型请求超时仍合法。只有以后明确工具执行期限及其独立错误码/契约后才能增加工具 timeout；本阶段不新增，不因枚举存在就宣称能抢占 Node 文件调用。保存故障属于 PersistenceError，不通过这些业务错误伪装写回故障文件。
 
 ### 正常写入器产生的完整文件示例
 
@@ -304,6 +306,9 @@ type SafeError = {
   httpStatus?: number;
 };
 type FailureEnd = { outcome: "failed" | "cancelled" | "timeout"; error: SafeError };
+type ToolEnd =
+  | { outcome: "failed"; error: SafeError & { category: "tool"; code: "tool_execution_failed" } }
+  | { outcome: "cancelled"; error: SafeError & { category: "cancellation"; code: "user_interrupt" | "cancelled_before_dispatch" } };
 type TurnEnd = { outcome: "success"; error?: never } | FailureEnd;
 type CallRef = { assistantId: string; toolCallId: string; name: string };
 
@@ -311,7 +316,7 @@ type CoreTurnFact = { turnId: string } & (
   | { type: "assistant"; assistantId: string; message: AssistantMessage }
   | { type: "tool_start"; call: CallRef }
   | { type: "tool_result"; call: CallRef; result: ToolResult }
-  | { type: "tool_end"; call: CallRef; end: FailureEnd }
+  | { type: "tool_end"; call: CallRef; end: ToolEnd }
 );
 type TurnFact = CoreTurnFact | ({ turnId: string } & (
   | { type: "user"; message: TextMessage & { role: "user" }; runtimeProfile: RuntimeProfile }
@@ -756,6 +761,8 @@ T2 已完成且无阻塞，阶段整体仍为 implementing。advisory flock 仅�
 
 #### 验证命令与结果
 
+以下为 T3 初版命令和 503 项通过记录；其工具错误上下文与单次使用保护的覆盖不足，已由后文“T3 审查修正”补测、修复并重新验证，初版通过不等于已完成审查。
+
 目标环境为 macOS arm64 + Node 24.14.0 / pnpm 10.33.2；扫描测试全部使用临时目录，没有访问真实 ~/.yucli、读取 .env 或请求真实模型。
 
 ```bash
@@ -781,3 +788,23 @@ T3 已完成；整个阶段与 B06 写恢复部分尚未完成。分块扫描不
 未验证 Linux、Windows、macOS x64、其他 Node 版本、远程文件系统和设备断电耐久性；本次没有修改真实服务或 CLI 行为，也未做真实模型联调。30 秒存储期限/5 秒退出监督继续由 T7/T9 交付。用户 research 的未提交修改保持原样，其 SHA-256 仍为 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`，不纳入 T3 提交。
 
 本次停止在 T3，T4 需下一次明确授权。T3 代码、测试及相关文档提交到 `phase/04-session-persistence`；不合并 main、不推送、不创建标签。
+
+#### T3 审查修正：工具终止上下文与校验器生命周期（2026-10-29）
+
+审查确认两项真实缺陷：初版 termination 只用布尔参数区分 success，却让 tool_end 复用了完整 turn 错误配对；B04 和部分生命周期反例误用 model/network 工具异常 fixture，固化了错误行为。SessionSequence 注释承诺单次使用，但没有失败/完成保护，导出 API 可以在错误后继续或在 finish 后改动已返回的读模型。初版“测试通过”不足以证明这两项语义正确。
+
+- `termination(payload, kind)` 现在明确区分 tool_end/turn_end，只复用安全错误的字段校验。tool_end 仅接受工具执行失败和两种取消；model/network、model/http、model/invalid_response、protocol、limit、internal 及所有工具 timeout 均拒绝。turn_end 保留原完整配对和 request_timeout。完整无 LF 尾行应用相同上下文规则，错误仍拒绝整个文件。
+- contracts 新增较窄的 ToolEnd，磁盘记录、core 事实数据声明和工具诊断使用同一类型；FailureEnd 仅保留为 turn 级异常结束。没有新增 tool_timeout 码、工具期限、运行期事实交付或 writer。
+- 测试将 turnFailure/toolFailure 分开；B04 的“旧中断含已知工具异常”及重复/越序/终止反例均使用合法工具错误，确保继续验证预期的生命周期拒绝位置。另加 8 个非法上下文/超时反例和 3 个合法工具失败/取消正例。
+- SessionSequence 新增 failed/finished 标志；accept 首次错误保留原原因并永久拒绝继续/finish；finish 成功后拒绝 accept/重复 finish。非法重用抛内部安全诊断 `validator_state`，不推进 lastSeq、不再修改已返回的数组。新增 7 项直接 API 测试，覆盖空实例完成、成功实例完成及首条/已有记录后的 seq、引用和生命周期失败，不仅依赖扫描器的正常调用顺序。
+
+先在旧实现执行新增定向用例，173 项中 14 项失败，分别复现 7 个上下文错误放行和 7 个单次使用保护缺失；`tool_timeout` 当时因机器码未定义已经被拒绝，仍加入反例防止后续提前放行。实现修正后执行：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm exec vitest run tests/sessionScan.test.ts tests/sessionSequence.test.ts'
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test'
+```
+
+目标 macOS arm64 / Node 24.14.0 下，定向 173 项通过；最终 typecheck、lint、build（test 内置）与全部测试通过：13 个文件、521 项测试，较初版新增 18 项。原扫描/前缀、原生锁子进程、CLI/REPL/wire 和架构测试全部回归通过。测试使用临时目录，不访问真实 ~/.yucli，不读取 .env 或调用真实模型。
+
+本次修正已实现并验证，供再次审查；阶段仍为 implementing，契约仍为 draft，没有进入 T4。B06 写恢复与单行/深度无硬上限的限制不变；分块扫描不能作为有界单行内存承诺。research 文件内容哈希不变，不暂存、不提交；仅将本次 T3 修正提交到阶段分支，不合并、不推送。

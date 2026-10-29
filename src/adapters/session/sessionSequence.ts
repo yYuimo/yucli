@@ -1,5 +1,5 @@
 /** adapters 层逐记录语义状态机：不读写文件，不执行工具，只依据已通过 schema 的事实推进。 */
-import type { FailureEnd, RecoveredItem, RecoveredTurn, RuntimeProfile, TurnEnd } from "../../contracts/session.js";
+import type { RecoveredItem, RecoveredTurn, RuntimeProfile, ToolEnd, TurnEnd } from "../../contracts/session.js";
 import type { ToolCall } from "../../contracts/tool.js";
 import type { ScanStatistics, ScannedCall, ScannedTurn } from "./scanTypes.js";
 import { requireSession, type DiskCallRef, type SessionRecord } from "./sessionSchema.js";
@@ -11,7 +11,7 @@ interface CallEvidence {
   /** 是否见过 tool_start；没有终止时仅凭它不能推断成功或取消。 */
   started: boolean;
   /** 真实终止事实；缺失表示未知或可证明未分派，不能合成结果。 */
-  terminal?: { kind: "result"; ok: boolean } | { kind: "end"; end: FailureEnd };
+  terminal?: { kind: "result"; ok: boolean } | { kind: "end"; end: ToolEnd };
 }
 
 /** assistant 原批次；next 是下一个允许 start 的下标，正常 result 后才推进。 */
@@ -57,6 +57,10 @@ export interface SequenceSummary {
  * 失败即拒绝整个扫描，不继续消费后续行；不重排、不补写，也不联系模型/注册表。
  */
 export class SessionSequence {
+  /** 一旦 accept/finish 失败就永久拒绝后续调用，防止把已部分变更的内存状态当成合法摘要。 */
+  private failed = false;
+  /** 第一次 finish 成功后置位；包括 header-only，均不能继续追加或再次完成。 */
+  private finished = false;
   /** 最后一条全套语义校验成功的 seq，供扫描器生成读边界，不代表 durable 确认。 */
   lastSeq = 0;
   /** 当前 turn 暂存区；换 turn 或 EOF 后释放其失败/中断正文。 */
@@ -84,6 +88,31 @@ export class SessionSequence {
    * 该状态机是单次使用：accept 失败后不能继续，finish 后也不能继续追加。
    */
   accept(record: SessionRecord): void {
+    this.requireActive();
+    try {
+      this.acceptRecord(record);
+    } catch (error) {
+      // 保留首次具体错误供扫描器定位，但不尝试回滚已经更新的临时 Map/数组。
+      // 后续 accept/finish 只能得到状态拒绝，不能靠重试同一 seq “恢复”此校验器。
+      this.failed = true;
+      throw error;
+    }
+  }
+
+  /**
+   * 为 accept/finish 检查单次使用边界；两个公开方法在任何状态变更前调用。
+   * 正常返回代表仍在本次扫描中，完成或失败后抛 validator_state，不改变已返回的读模型。
+   */
+  private requireActive(): void {
+    requireSession(!this.failed && !this.finished, "validator_state", "扫描校验器已失败或结束，不能继续使用。");
+  }
+
+  /**
+   * 在活跃扫描中执行一条记录的 seq、引用和生命周期检查，由 accept 的失败保护调用。
+   * 输入已经通过 schema，成功才推进 lastSeq；失败可能留下部分临时状态，因此必须弃用实例。
+   * 只更新内存证据，不回滚、不持久化，也不执行工具。
+   */
+  private acceptRecord(record: SessionRecord): void {
     requireSession(record.seq === this.lastSeq + 1, "sequence", "seq 必须从 1 开始连续递增。");
     const isUser = record.type === "message" && record.payload.role === "user";
 
@@ -185,8 +214,12 @@ export class SessionSequence {
       const { toolCallId, name, ok, content } = record.payload;
       turn.items.push({ type: "tool_result", result: { toolCallId, name, ok, content } });
     } else {
-      const { outcome, error } = record.payload;
-      call.terminal = { kind: "end", end: { outcome, error } };
+      // 按判别字段分别复制，既去掉磁盘引用，也保留 TS 对 outcome/category/code 的关联。
+      const payload = record.payload;
+      const end: ToolEnd = payload.outcome === "failed"
+        ? { outcome: "failed", error: payload.error }
+        : { outcome: "cancelled", error: payload.error };
+      call.terminal = { kind: "end", end };
     }
   }
 
@@ -224,19 +257,30 @@ export class SessionSequence {
   }
 
   /**
-   * EOF 时交付统计、诊断及成功业务组；调用后本实例不再接收记录。
+   * EOF 时交付统计、诊断及成功业务组；首次成功后拒绝追加及重复 finish。
+   * accept 曾失败时不能生成摘要；非法重用抛 validator_state，不能交付局部合法历史。
    * 无 I/O、修复或历史执行副作用；中断计数涵盖所有 turn，不覆盖最近 turn 的真实结果。
    */
   finish(): SequenceSummary {
-    this.finishCurrent();
-    return {
-      statistics: {
-        lastActivityAt: this.lastActivityAt, turnCount: this.turns.length,
-        interruptedTurnCount: this.turns.filter((turn) => turn.outcome === "interrupted").length,
-        lastTurnOutcome: this.turns.at(-1)?.outcome ?? null, preview: this.preview,
-        ...(this.lastUserProfile ? { lastUserProfile: this.lastUserProfile } : {}),
-      },
-      recentSuccessfulTurns: this.successes, turns: this.turns,
-    };
+    this.requireActive();
+    try {
+      this.finishCurrent();
+      const summary: SequenceSummary = {
+        statistics: {
+          lastActivityAt: this.lastActivityAt, turnCount: this.turns.length,
+          interruptedTurnCount: this.turns.filter((turn) => turn.outcome === "interrupted").length,
+          lastTurnOutcome: this.turns.at(-1)?.outcome ?? null, preview: this.preview,
+          ...(this.lastUserProfile ? { lastUserProfile: this.lastUserProfile } : {}),
+        },
+        recentSuccessfulTurns: this.successes, turns: this.turns,
+      };
+
+      // 所有收束成功后才交付；此后两个公开方法都在入口拒绝，不再改变这些数组。
+      this.finished = true;
+      return summary;
+    } catch (error) {
+      this.failed = true;
+      throw error;
+    }
   }
 }

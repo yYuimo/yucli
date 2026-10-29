@@ -11,7 +11,8 @@ const createdAt = "2026-10-29T12:00:00.000Z";
 const filename = "2026-10-29T12-00-00-000Z_session-123.jsonl";
 const header = { type: "session_meta", formatVersion: 1, sessionId: "session-123", createdAt, cwd: "/example/project" };
 const profile = { provider: "opencode-go", model: "deepseek-v4-flash" };
-const failure = { outcome: "failed", error: { category: "model", code: "network", message: "请求失败。" } };
+const turnFailure = { outcome: "failed", error: { category: "model", code: "network", message: "请求失败。" } };
+const toolFailure = { outcome: "failed", error: { category: "tool", code: "tool_execution_failed", message: "工具执行失败。" } };
 const cancellation = { outcome: "cancelled", error: { category: "cancellation", code: "user_interrupt", message: "已取消。" } };
 const timeout = { outcome: "timeout", error: { category: "timeout", code: "request_timeout", message: "请求超时。" } };
 
@@ -164,20 +165,20 @@ describe("B01/B03 JSONL schema 和完整文件", () => {
     ["工具结果 ok 类型", (r) => { r[3]!.payload.ok = "true"; }, 3],
     ["工具结果 content 类型", (r) => { r[3]!.payload.content = null; }, 3],
     ["工具引用序号非法", (r) => { r[2]!.payload.callMessageSeq = 0; }, 2],
-    ["success 带 error", (r) => { r[7]!.payload.error = failure.error; }, 7],
+    ["success 带 error", (r) => { r[7]!.payload.error = turnFailure.error; }, 7],
     ["failed 无 error", (r) => { r[7]!.payload = { outcome: "failed" }; }, 7],
     ["cancelled 无 error", (r) => { r[7]!.payload = { outcome: "cancelled" }; }, 7],
     ["timeout 无 error", (r) => { r[7]!.payload = { outcome: "timeout" }; }, 7],
     ["非法 outcome", (r) => { r[7]!.payload = { outcome: "interrupted" }; }, 7],
     ["错误分类不配对", (r) => { r[7]!.payload = { outcome: "failed", error: cancellation.error }; }, 7],
-    ["错误分类不能为数组", (r) => { r[7]!.payload = { ...failure, error: { ...failure.error, category: ["model"] } }; }, 7],
-    ["错误 code 不能为对象", (r) => { r[7]!.payload = { ...failure, error: { ...failure.error, code: { toString: "network" } } }; }, 7],
-    ["错误 code 不配对", (r) => { r[7]!.payload = { outcome: "failed", error: { ...failure.error, code: "arbitrary" } }; }, 7],
-    ["错误带 stack", (r) => { r[7]!.payload = { ...failure, error: { ...failure.error, stack: "forbidden" } }; }, 7],
-    ["错误 HTTP 范围", (r) => { r[7]!.payload = { ...failure, error: { ...failure.error, httpStatus: 600 } }; }, 7],
-    ["错误 HTTP 下界", (r) => { r[7]!.payload = { ...failure, error: { ...failure.error, httpStatus: 99 } }; }, 7],
-    ["错误 HTTP 非整数", (r) => { r[7]!.payload = { ...failure, error: { ...failure.error, httpStatus: 200.5 } }; }, 7],
-    ["tool_end 不能 success", (r) => { r[3] = tool("tool_end", "call-a", 2, { outcome: "success", error: failure.error }); }, 3],
+    ["错误分类不能为数组", (r) => { r[7]!.payload = { ...turnFailure, error: { ...turnFailure.error, category: ["model"] } }; }, 7],
+    ["错误 code 不能为对象", (r) => { r[7]!.payload = { ...turnFailure, error: { ...turnFailure.error, code: { toString: "network" } } }; }, 7],
+    ["错误 code 不配对", (r) => { r[7]!.payload = { outcome: "failed", error: { ...turnFailure.error, code: "arbitrary" } }; }, 7],
+    ["错误带 stack", (r) => { r[7]!.payload = { ...turnFailure, error: { ...turnFailure.error, stack: "forbidden" } }; }, 7],
+    ["错误 HTTP 范围", (r) => { r[7]!.payload = { ...turnFailure, error: { ...turnFailure.error, httpStatus: 600 } }; }, 7],
+    ["错误 HTTP 下界", (r) => { r[7]!.payload = { ...turnFailure, error: { ...turnFailure.error, httpStatus: 99 } }; }, 7],
+    ["错误 HTTP 非整数", (r) => { r[7]!.payload = { ...turnFailure, error: { ...turnFailure.error, httpStatus: 200.5 } }; }, 7],
+    ["tool_end 不能 success", (r) => { r[3] = tool("tool_end", "call-a", 2, { outcome: "success", error: turnFailure.error }); }, 3],
   ];
   it.each(schemaCases)("拒绝非法 schema：%s", async (_label, change, index) => {
     const rows = batchTurn();
@@ -212,9 +213,39 @@ describe("B01/B03 JSONL schema 和完整文件", () => {
     expect(result.recentSuccessfulTurns).toEqual([]);
   });
 
-  it.each([failure, cancellation, timeout, { ...cancellation, error: { ...cancellation.error, code: "cancelled_before_dispatch" } }])("允许合法非成功终止 %j", async (termination) => {
+  it.each([turnFailure, cancellation, timeout, { ...cancellation, error: { ...cancellation.error, code: "cancelled_before_dispatch" } }])("允许合法非成功终止 %j", async (termination) => {
     const result = valid(await scanBytes(encoded([user(), end(termination)])));
     expect(result).toMatchObject({ logState: "complete", statistics: { lastTurnOutcome: termination.outcome, interruptedTurnCount: 0 } });
+  });
+
+  it.each([
+    ["model/network", turnFailure],
+    ["model/http", { ...turnFailure, error: { ...turnFailure.error, code: "http" } }],
+    ["model/invalid_response", { ...turnFailure, error: { ...turnFailure.error, code: "invalid_response" } }],
+    ["limit/loop_limit", { ...turnFailure, error: { ...turnFailure.error, category: "limit", code: "loop_limit" } }],
+    ["protocol/protocol_error", { ...turnFailure, error: { ...turnFailure.error, category: "protocol", code: "protocol_error" } }],
+    ["internal/internal_error", { ...turnFailure, error: { ...turnFailure.error, category: "internal", code: "internal_error" } }],
+    ["timeout/request_timeout", timeout],
+    ["未定义工具 timeout", { ...timeout, error: { ...timeout.error, code: "tool_timeout" } }],
+  ])("tool_end 拒绝 turn 级或未定义错误：%s", async (_label, termination) => {
+    const rows = [...batchTurn().slice(0, 3), tool("tool_end", "call-a", 2, termination)];
+    await rejectRows(rows, 3, "schema");
+
+    // 完整 JSON 即使没有最终 LF，也必须走相同的上下文校验，不能降为可修复残片。
+    expect(await scanBytes(encoded(rows, header, false))).toMatchObject({
+      status: "rejected", logState: "corrupt", diagnostic: { code: "schema", line: 5, seq: 4, callMessageSeq: 2 },
+    });
+  });
+
+  it.each([
+    toolFailure, cancellation,
+    { ...cancellation, error: { ...cancellation.error, code: "cancelled_before_dispatch" } },
+  ])("tool_end 只允许工具失败或两种取消：%j", async (termination) => {
+    const rows = [...batchTurn().slice(0, 3), tool("tool_end", "call-a", 2, termination), end(termination)];
+    const result = valid(await scanBytes(encoded(rows)));
+    expect(result.turns[0]?.calls).toMatchObject([{ state: "ended", end: termination }, { state: "not_started" }]);
+    expect(result.statistics.lastTurnOutcome).toBe(termination.outcome);
+    expect(result.recentSuccessfulTurns).toEqual([]);
   });
 });
 
@@ -243,21 +274,21 @@ describe("B01/B02/B03 seq、引用和生命周期", () => {
     ["名称不匹配", (r) => { r[2]!.payload.name = "other"; }, 2, "reference"],
     ["调用 ID 不匹配", (r) => { r[2]!.payload.toolCallId = "other"; }, 2, "reference"],
     ["result 无 start", (r) => { r.splice(2, 1); }, 2, "lifecycle"],
-    ["end 无 start", (r) => { r[2] = tool("tool_end", "call-a", 2, failure); }, 2, "lifecycle"],
+    ["end 无 start", (r) => { r[2] = tool("tool_end", "call-a", 2, toolFailure); }, 2, "lifecycle"],
     ["start 重复", (r) => { r.splice(3, 0, tool("tool_start")); }, 3, "lifecycle"],
     ["result 重复", (r) => { r.splice(4, 0, tool("tool_result", "call-a", 2, { ok: true, content: "" })); }, 4, "lifecycle"],
-    ["result 后又 end", (r) => { r.splice(4, 0, tool("tool_end", "call-a", 2, failure)); }, 4, "lifecycle"],
+    ["result 后又 end", (r) => { r.splice(4, 0, tool("tool_end", "call-a", 2, toolFailure)); }, 4, "lifecycle"],
     ["工具越序开始", (r) => { r[2]!.payload.toolCallId = "call-b"; }, 2, "lifecycle"],
     ["前项无 result 就开始后项", (r) => { r[3] = tool("tool_start", "call-b"); }, 3, "lifecycle"],
-    ["tool_end 后开始后项", (r) => { r[3] = tool("tool_end", "call-a", 2, failure); }, 4, "lifecycle"],
-    ["tool_end 后 result", (r) => { r[3] = tool("tool_end", "call-a", 2, failure); r[4] = tool("tool_result", "call-a", 2, { ok: true, content: "" }); }, 4, "lifecycle"],
-    ["tool_end 重复", (r) => { r[3] = tool("tool_end", "call-a", 2, failure); r[4] = tool("tool_end", "call-a", 2, failure); }, 4, "lifecycle"],
+    ["tool_end 后开始后项", (r) => { r[3] = tool("tool_end", "call-a", 2, toolFailure); }, 4, "lifecycle"],
+    ["tool_end 后 result", (r) => { r[3] = tool("tool_end", "call-a", 2, toolFailure); r[4] = tool("tool_result", "call-a", 2, { ok: true, content: "" }); }, 4, "lifecycle"],
+    ["tool_end 重复", (r) => { r[3] = tool("tool_end", "call-a", 2, toolFailure); r[4] = tool("tool_end", "call-a", 2, toolFailure); }, 4, "lifecycle"],
     ["工具未完就 assistant", (r) => { r[3] = assistant(); }, 3, "lifecycle"],
     ["最终回答后又 assistant", (r) => { r.splice(7, 0, assistant()); }, 7, "lifecycle"],
     ["最终回答后又工具", (r) => { r.splice(7, 0, tool("tool_start")); }, 7, "lifecycle"],
     ["success 缺最终回答", (r) => { r.splice(6, 1); }, 6, "lifecycle"],
     ["success 缺工具结果", (r) => { r[3] = end(); }, 3, "lifecycle"],
-    ["success 含 tool_end", (r) => { r[3] = tool("tool_end", "call-a", 2, failure); r[4] = end(); }, 4, "lifecycle"],
+    ["success 含 tool_end", (r) => { r[3] = tool("tool_end", "call-a", 2, toolFailure); r[4] = end(); }, 4, "lifecycle"],
     ["turn_end 后仍有记录", (r) => { r.push(assistant()); }, 8, "lifecycle"],
     ["turn_end 重复", (r) => { r.push(end()); }, 8, "lifecycle"],
   ];
@@ -268,7 +299,7 @@ describe("B01/B02/B03 seq、引用和生命周期", () => {
   });
 
   it("切换新 turn 后不能复用旧 turnId，也不能交错补旧 end", async () => {
-    for (const old of [user(), end(failure)]) {
+    for (const old of [user(), end(turnFailure)]) {
       const rows = [user(), user("新问题", "turn-b"), old];
       await rejectRows(rows, 2, "lifecycle");
     }
@@ -330,10 +361,10 @@ describe("B04 诊断和成功窗口", () => {
   });
 
   it("旧中断含已知工具异常，新成功不覆盖 interruption", async () => {
-    const rows = [...batchTurn().slice(0, 3), tool("tool_end", "call-a", 2, failure), ...textTurn().map((row) => ({ ...row, turnId: "new-turn" }))];
+    const rows = [...batchTurn().slice(0, 3), tool("tool_end", "call-a", 2, toolFailure), ...textTurn().map((row) => ({ ...row, turnId: "new-turn" }))];
     const result = valid(await scanBytes(encoded(rows)));
     expect(result).toMatchObject({ logState: "interrupted", statistics: { interruptedTurnCount: 1, lastTurnOutcome: "success" } });
-    expect(result.turns[0]?.calls).toMatchObject([{ state: "ended", end: failure }, { state: "unknown" }]);
+    expect(result.turns[0]?.calls).toMatchObject([{ state: "ended", end: toolFailure }, { state: "unknown" }]);
     expect(result.recentSuccessfulTurns.map((turn) => turn.turnId)).toEqual(["new-turn"]);
   });
 
@@ -341,7 +372,7 @@ describe("B04 诊断和成功窗口", () => {
     const rows: Row[] = [];
     for (let index = 0; index < 25; index++) {
       rows.push(...textTurn().map((row) => ({ ...row, turnId: `success-${index}` })));
-      rows.push(user("失败问题", `failed-${index}`), { ...end(failure), turnId: `failed-${index}` });
+      rows.push(user("失败问题", `failed-${index}`), { ...end(turnFailure), turnId: `failed-${index}` });
     }
     const result = valid(await scanBytes(encoded(rows), 1024));
     expect(result.recentSuccessfulTurns).toHaveLength(20);

@@ -1,5 +1,5 @@
 /** adapters 内部只读扫描结果；与未来 SessionStore 的列表/可写快照不同，不授予执行或写入权。 */
-import type { FailureEnd, RecoveredTurn, RuntimeProfile, SessionErrorContext, SessionMeta, TurnEnd } from "../../contracts/session.js";
+import type { RecoveredTurn, RuntimeProfile, SessionErrorContext, SessionMeta, ToolEnd, TurnEnd } from "../../contracts/session.js";
 import type { DiskCallRef } from "./sessionSchema.js";
 
 /** 从 fstat 取得的稳定来源快照；bigint 防止 dev/ino 经过 number 丢失精度。 */
@@ -32,7 +32,7 @@ export interface ScanDiagnostic extends SessionErrorContext {
  */
 export type ScannedCall = DiskCallRef & (
   | { state: "result"; ok: boolean }
-  | { state: "ended"; end: FailureEnd }
+  | { state: "ended"; end: ToolEnd }
   | { state: "not_started" }
   | { state: "unknown" }
 );

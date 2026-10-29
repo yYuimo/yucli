@@ -50,7 +50,7 @@ header 后每条记录都包含 `seq`、`type`、`timestamp`、`turnId` 和 `pay
 | `message` + `role:assistant` | 完整 `AssistantMessage` | 保留文本和工具调用；最终无调用回答不得为空白 |
 | `tool_start` | `{callMessageSeq,toolCallId,name}` | 表示准备分派，不保证已进入工具实现 |
 | `tool_result` | `{callMessageSeq,toolCallId,name,ok,content}` | 已取得的正常 `ToolResult`；`ok:false` 仍是合法结果 |
-| `tool_end` | `{callMessageSeq,toolCallId,name,outcome,error}` | 没有正常结果的异常终止 |
+| `tool_end` | `{callMessageSeq,toolCallId,name,outcome,error}` | 没有正常结果的工具失败/取消；当前不允许工具 timeout |
 | `turn_end` | `{outcome,error?}` | 唯一的 turn 终止事实，决定历史提交资格 |
 
 `user` 记录外层的 `runtimeProfile` 只包含非空的 `provider` 和 `model`。不保存 API key、endpoint、环境变量、工具配置或摘要。模型的 `tool` 消息由恢复投影从 `tool_result` 生成，不在日志中重复保存。
@@ -68,6 +68,8 @@ type SafeError = {
 
 不得 stringify 原始 Error、保存堆栈、认证头或未经限制的响应正文。`turn_end` 的 `success` 不带 error；`failed`、`cancelled` 和 `timeout` 必须带匹配分类的 error。
 
+`tool_end` 只接受 `failed/tool/tool_execution_failed`、`cancelled/cancellation/user_interrupt` 和 `cancelled/cancellation/cancelled_before_dispatch`。模型、协议、额度和未分类内部错误属于 turn，不能作为工具异常终止；`turn_end` 继续接受规格的完整配对。当前读写均拒绝 `tool_end(timeout)`，不能误用模型的 `request_timeout`，也不提前接受尚未定义的 `tool_timeout`。以后增加工具超时必须先定义执行期限及独立错误码/契约。
+
 ## 跨层接口
 
 以下是实现必须提供的业务边界。TypeScript 类型检查不能替代运行时 JSON、顺序、引用和 cwd 校验。
@@ -79,6 +81,10 @@ type FailureEnd = {
   outcome: "failed" | "cancelled" | "timeout";
   error: SafeError;
 };
+
+type ToolEnd =
+  | { outcome: "failed"; error: SafeError & { category: "tool"; code: "tool_execution_failed" } }
+  | { outcome: "cancelled"; error: SafeError & { category: "cancellation"; code: "user_interrupt" | "cancelled_before_dispatch" } };
 
 type TurnEnd = { outcome: "success" } | FailureEnd;
 
@@ -92,7 +98,7 @@ type CoreTurnFact = { turnId: string } & (
   | { type: "assistant"; assistantId: string; message: AssistantMessage }
   | { type: "tool_start"; call: CallRef }
   | { type: "tool_result"; call: CallRef; result: ToolResult }
-  | { type: "tool_end"; call: CallRef; end: FailureEnd }
+  | { type: "tool_end"; call: CallRef; end: ToolEnd }
 );
 
 type TurnFact = CoreTurnFact | ({ turnId: string } & (
@@ -230,6 +236,7 @@ T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描；本文整
 - [scanSession.ts](../../src/adapters/session/scanSession.ts) 的 scanSessionFile 拥有并关闭只读 fd；scanSessionHandle 借用已有 fd，不替调用方关闭。初次 fstat 固定 dev/ino/S，显式 read 只解释 `[0,S)`，0x0A 分行、fatal UTF-8；返回 [scanTypes.ts](../../src/adapters/session/scanTypes.ts) 中的 status 判别联合。
 - valid 分支包含 validEndBytes、lastLfEndBytes、lastSeq、tailKind、列表统计、无正文 turn/工具证据及最近 20 个完整成功业务组；rejected 分支仅含来源和安全位置/原因，不交付可局部恢复的历史或边界。missing_lf 的完整记录计入 seq/S，incomplete 保留到上一合法 LF 后的 P；仅完整且全套校验合法的记录进入状态机。
 - schema 和状态机严格执行第 5 节字段、序号、完整引用/批内顺序/终止边界；独立 JSON 前缀识别器结合 UTF-8 状态判断可完成性，不读取 JSON.parse 错误文字。unknown/not_started 与旧 interruption 由证据推导，不补写事件或重跑工具。
+- T3 审查修正将 tool_end 类型/运行时配对收窄为工具失败或取消；turn 级错误和工具 timeout 拒绝。SessionSequence 明确为单次使用，accept 失败后或 finish 成功后继续 accept/finish 均抛安全的 validator_state，不返回失败后的局部历史，也不改变已交付摘要。直接 API 和文件扫描反例已验证，详见阶段实际结果中的“T3 审查修正”。
 - changing 是前后 fstat 的变化观察，不是原子快照或锁许可。当前 cwd 的 realpath 归属和完整受管目录/文件权限检查仍属 T4/T5；只有未来持锁重扫及必要修复后才能继续执行。T3 不创建日志、不 fsync、不备份/截断/补 LF、不实现列表入口或模型历史投影。
 
 本机目标工具链下 B01–B05 和 B06 只读子集通过，完整结果及未验证平台见[阶段 04 的 T3 实际结果](../specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。B06 的备份修复/sync 重验仍待 T5；整体契约状态保持 draft。
