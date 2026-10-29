@@ -190,7 +190,7 @@ type SessionList = {
 };
 ```
 
-合法条目按 `lastActivityAt`、`createdAt`、`sessionId` 降序/字典序排序。默认隐藏 header-only 会话；`--all` 只改变初始列表范围，不放宽 cwd 恢复边界。`preview` 是首条 user 的单行安全摘要，最多 80 个 Unicode 码点，不展示工具原文。
+合法条目按 `lastActivityAt`、`createdAt`、`sessionId` 降序/字典序排序。`--sessions` 输出完整 `sessionId`，供 `--resume <sessionId>` 和脚本使用；共享 picker 只展示编号，不显示或要求复制 ID。默认隐藏 header-only 会话；`--all` 只改变初始列表范围，不放宽 cwd 恢复边界。`preview` 是首条 user 的单行安全摘要，最多 80 个 Unicode 码点，不展示工具原文。
 
 ## 文件、锁和生命周期
 

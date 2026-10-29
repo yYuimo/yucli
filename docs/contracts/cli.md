@@ -90,7 +90,7 @@ yucli --continue
 yucli --resume [sessionId] [--all]
 ```
 
-`--sessions` 只读列出当前 cwd 的会话，`--all` 扩展初始列表范围但不放宽恢复时的 cwd realpath 约束；无 ID 的 `--resume` 打开共享行式 picker，完整 ID 直接恢复，`--continue` 选择当前 cwd 最近的有效非空候选。picker 只在 stdin/stdout 都是 TTY 时可用，编号映射来自一次列表快照；直接 ID 和 `--continue` 不要求 TTY。列表和 picker 不加载模型配置、不创建会话、不修复文件。
+`--sessions` 只读列出当前 cwd 的会话，并显示可复制的完整 sessionId；`--all` 扩展初始列表范围但不放宽恢复时的 cwd realpath 约束。无 ID 的 `--resume` 打开共享行式 picker，picker 只按编号选择且不显示 ID；完整 ID 直接恢复，`--continue` 选择当前 cwd 最近的有效非空候选。picker 只在 stdin/stdout 都是 TTY 时可用，编号映射来自一次列表快照；直接 ID 和 `--continue` 不要求 TTY。列表和 picker 不加载模型配置、不创建会话、不修复文件。
 
 阶段 04 的参数互斥和退出码扩展为：参数错误 2、配置错误 3、模型/业务 turn 错误 4、会话访问或持久化/关闭故障 5、等待输入 Ctrl+C 130。`--resume` 的位置参数是可选完整 sessionId；`--all` 只允许搭配 `--sessions` 或不带 ID 的 `--resume`。`--continue` 不接受位置参数。
 
