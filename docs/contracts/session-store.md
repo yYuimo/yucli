@@ -212,17 +212,27 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-仅 T2 已实现，本文整体仍为 draft；没有 SessionStore/SessionWriter、JSONL、扫描修复、持久化 CLI 或 core 事实交付。
+T2 锁能力已实现，下节 T3 追加 JSONL 类型和只读扫描；本文整体仍为 draft，没有 SessionStore/SessionWriter、备份修复、持久化 CLI 或 core 事实交付。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
 - probe(sessionId) 的清理是存储屏障：shnb/所有权检查结束后必须关闭只读 fd；关闭失败不降级为 `unknown`，而是抛 `PersistenceError`（`code: "close_failed"`、`operation: "probe_cleanup"`）。上层列表或恢复将该故障按存储失败收尾，最终退出码为 5；`unknown` 只表示状态/能力无法可靠判断且本次资源清理成功。
 - [lockPlatform](../../src/adapters/session/lockPlatform.ts) 精确检查 macOS arm64 + Node 24.14.0，再按需加载 fs-ext，并只读检查本地挂载；失败在创建前抛 platform_unsupported 或 lock_unavailable。没有 mkdir/心跳/无锁降级。
-- T2 的最小稳定错误与锁接口放在 [session-lock.ts](../../src/contracts/session-lock.ts)，未提前声明 T3 日志业务类型；后续扩展须沿用同一异常身份。已有占用为 session_busy，取锁后身份变更为 ownership_lost，任一锁描述符（包括 probe 的只读 fd）关闭失败为 close_failed。
+- T2 的锁接口放在 [session-lock.ts](../../src/contracts/session-lock.ts)；T3 将稳定错误统一至 [session.ts](../../src/contracts/session.ts)，旧入口重导出同一个类以保留 instanceof 身份。已有占用为 session_busy，取锁后身份变更为 ownership_lost，任一锁描述符（包括 probe 的只读 fd）关闭失败为 close_failed。
 - local 检查使用 macOS mount 的显式 local 标记、最近已存在祖先和最长路径段匹配；未知/非 local 拒绝，不声称识别所有共享挂载或隔离并发父目录替换。只验证本机 APFS，不承诺其他环境。
 - T2 不提供 create/openWrite/list/appendDurable/close 的 30 秒期限与 5 秒故障退出；这些依然是完整 SessionStore/writer/T7 的待实现要求。锁适配器不会在 native 调用未 settle 时提前关闭或解锁。
 
 安装工具链、原生构建授权和 D01–D03/D06 子集的实际验证见[阶段 04 的 T2 实际结果](../specs/phase-04-session-persistence.md#t2-依赖与锁实际结果2026-10-29)。锁测试全部在临时目录，未访问真实 ~/.yucli。
+
+## T3 只读格式与扫描实现状态（2026-10-29）
+
+- [session.ts](../../src/contracts/session.ts) 提供运行摘要、安全错误、事实数据、恢复业务组及稳定异常；声明事实数据不表示已经接入 core 交付。SessionStore/SessionWriter 和保存屏障仍待后续任务。
+- [scanSession.ts](../../src/adapters/session/scanSession.ts) 的 scanSessionFile 拥有并关闭只读 fd；scanSessionHandle 借用已有 fd，不替调用方关闭。初次 fstat 固定 dev/ino/S，显式 read 只解释 `[0,S)`，0x0A 分行、fatal UTF-8；返回 [scanTypes.ts](../../src/adapters/session/scanTypes.ts) 中的 status 判别联合。
+- valid 分支包含 validEndBytes、lastLfEndBytes、lastSeq、tailKind、列表统计、无正文 turn/工具证据及最近 20 个完整成功业务组；rejected 分支仅含来源和安全位置/原因，不交付可局部恢复的历史或边界。missing_lf 的完整记录计入 seq/S，incomplete 保留到上一合法 LF 后的 P；仅完整且全套校验合法的记录进入状态机。
+- schema 和状态机严格执行第 5 节字段、序号、完整引用/批内顺序/终止边界；独立 JSON 前缀识别器结合 UTF-8 状态判断可完成性，不读取 JSON.parse 错误文字。unknown/not_started 与旧 interruption 由证据推导，不补写事件或重跑工具。
+- changing 是前后 fstat 的变化观察，不是原子快照或锁许可。当前 cwd 的 realpath 归属和完整受管目录/文件权限检查仍属 T4/T5；只有未来持锁重扫及必要修复后才能继续执行。T3 不创建日志、不 fsync、不备份/截断/补 LF、不实现列表入口或模型历史投影。
+
+本机目标工具链下 B01–B05 和 B06 只读子集通过，完整结果及未验证平台见[阶段 04 的 T3 实际结果](../specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。B06 的备份修复/sync 重验仍待 T5；整体契约状态保持 draft。
 
 ## 错误和退出映射
 
@@ -245,5 +255,5 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 计划实现：`src/contracts/session.ts`、`src/core/runPersistentTurn.ts`、`src/adapters/session/`
+- 已实现 T2/T3：`src/contracts/session.ts`、`src/contracts/session-lock.ts` 及 `src/adapters/session/` 内锁/只读扫描；其余 writer/store、`src/core/runPersistentTurn.ts` 和 CLI 接线待后续任务
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收

@@ -4,9 +4,9 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按本轮授权仅实现 T2，阶段进入 `implementing`，T3–T10 未开始。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 先完成 T2，随后按独立授权完成 T3 只读格式与扫描，阶段保持 `implementing`，T4–T10 未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前仅完成 T1 文档及 T2 锁能力，不将调研中的类型检查/锁探针或 T2 子集验证视为整个阶段的应用验收。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前完成 T1 文档、T2 锁能力及 T3 只读扫描，不将调研探针或 T2/T3 子集验证视为整个阶段的应用验收。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -564,7 +564,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 
 - [x] **T1 规格与契约**：完成规格评审和 ADR-006 接受；新增 docs/contracts/session-store.md，固定格式、接口、扫描结果、错误与生命周期；CLI/REPL/tool-execution 契约登记阶段 04 draft 扩展，包括可选 ID、continue、共享 picker、new/clear 和输入/取消所有权；更新 architecture、文档入口和 legacy-paths 的实际影响。
 - [x] **T2 依赖与锁**：以 optionalDependencies 固定 fs-ext@2.1.1，在目标 Node/平台完成实际安装、构建授权、本机工具链和按需加载验证；实现稳定锁、占用探测和进程内登记，重复应用级双进程互斥、暂停、关闭与 SIGKILL 验证，禁止静默回退。托管 CI 的矩阵与流水线验证移交 T9。
-- [ ] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。
+- [x] **T3 格式与扫描**：新增 contracts/session.ts 业务类型/错误、adapter JSONL schema/语义校验与字节扫描、JSON/UTF-8 前缀识别器；完整覆盖合法组合表和诊断位置。B06 的只读分类/原件不变已验证，备份修复与 sync 重验仍归 T5。
 - [ ] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。
 - [ ] **T5 恢复与修复**：持锁重新扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 快照和纯模型投影；失败不发模型请求、不自动重放。
 - [ ] **T6 core 交付**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError，保持整批预检、顺序、额度和兼容路径。
@@ -738,3 +738,46 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'for attempt
 T2 已完成且无阻塞，阶段整体仍为 implementing。advisory flock 仅协调遵守协议的写者，assertOwnership 是检查点而非文件系统事务，不对外部编辑器/父目录并发替换提供 OS 沙箱隔离。local 判定依赖 macOS mount 输出与最近存在祖先的保守匹配，拒绝已知非 local/未知结果，但不声称识别所有共享/用户态挂载或防止检查后的挂载变化；未在真实 NFS/SMB 或其他平台做安装/行为验收。
 
 本次停止在 T2；下一次获得明确任务后才进入 T3。阶段分支提交仅含 T2 源码、测试、依赖与相关记录，保留用户 research 未提交修改，不合并 main、不推送、不创建标签。
+
+### T3 格式与只读扫描：实际结果（2026-10-29）
+
+本轮仅完成 T3，无阻塞；阶段保持 `implementing`，会话存储契约保持 `draft`。T4–T10 未勾选：没有 writer、fsync、备份/修复、SessionStore、picker、coordinator 或 CLI 接线；没有生成、补写或重跑业务事实。
+
+#### 代码与实现选择
+
+- [session.ts](../../src/contracts/session.ts) 新增运行摘要、安全错误、终止结果、业务事实数据、恢复业务组及完整稳定访问/存储错误。未实现事实 sink 或 writer/store 能力。原 [session-lock.ts](../../src/contracts/session-lock.ts) 重导出同一异常类，保留 T2 导入入口与 `instanceof` 身份。
+- [sessionSchema.ts](../../src/adapters/session/sessionSchema.ts) 检查唯一 header、受管文件名/身份/创建时间、UTC 时间、精确字段集合、user 外层可选摘要、assistant 文本/最多 4 项调用及 `{path:string}` 参数、安全错误/outcome 配对。允许非空未知工具名，不查询注册表或执行工具。cwd 只校验规范绝对路径形状；当前 realpath 归属、目录权限与完整文件所有权规则留给 T4/T5。
+- [sessionSequence.ts](../../src/adapters/session/sessionSequence.ts) 按物理顺序校验连续 seq、新 turn 唯一 user、turn 连续/身份不复用、终止边界、批内顺序及完整 `(turnId,callMessageSeq,toolCallId)` 引用。result/end 必须有 start 且唯一；end/悬空 start 不放行后项，前批全有正常结果才接受下一条 assistant。success 必须有最终回答和全部结果，`ok:false` 不阻止 success。
+- 状态机推导工具 result/ended/not_started/unknown 与 interrupted turn；只保留最近 20 个完整成功业务组。失败/中断不进入成功窗口，旧 interruption 不覆盖后续真实结果，不在这里转换模型消息。预览只取第一条 user，清除控制字符、合并空白、按 80 个 Unicode 码点裁剪；原消息保留原文。
+- [scanSession.ts](../../src/adapters/session/scanSession.ts) 提供 `scanSessionFile`（拥有并关闭只读 fd）和 `scanSessionHandle`（借用 fd，调用方关闭）；初次 fstat 固定 dev/ino/S，显式 read 位置仅解释 `[0,S)`，按 0x0A 分行并 fatal UTF-8 解码。所有偏移均为字节右开边界；后续追加只影响 changing 观察，不扩大本次范围。关闭失败为 `PersistenceError(close_failed)`。
+- [scanTypes.ts](../../src/adapters/session/scanTypes.ts) 用 `status` 区分合法前缀与整个文件拒绝：合法分支提供 S/P、lastLfEndBytes、lastSeq、tailKind、列表统计及成功业务组；拒绝分支只提供来源与安全诊断，刻意不交付局部可恢复历史/边界。错误记录含物理行起点/右边界及可解析 seq/turn/调用引用，不输出正文。
+- [jsonPrefix.ts](../../src/adapters/session/jsonPrefix.ts) 独立识别 complete/incomplete/invalid；显式维护对象/数组、字符串/转义/Unicode、数字和字面量状态，并先验证 UTF-8 continuation/码点范围。残缺 UTF-8 仅在普通字符串内容处可判 incomplete；不匹配 JSON.parse 错误文字、不只数括号。完整尾行仍通过全部业务校验。
+- 本次新增/修改的函数、接口与关键状态均补充中文职责、输入输出/失败边界和步骤注释；复杂校验和资源清理分段说明。没有新增依赖或修改锁算法。
+
+#### 验证命令与结果
+
+目标环境为 macOS arm64 + Node 24.14.0 / pnpm 10.33.2；扫描测试全部使用临时目录，没有访问真实 ~/.yucli、读取 .env 或请求真实模型。
+
+```bash
+# 开发期间先运行 T3 定向验证：
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm exec vitest run tests/jsonPrefix.test.ts tests/sessionScan.test.ts'
+# 最终运行项目检查；pnpm test 自带 clean/build：
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test'
+```
+
+- typecheck、lint、test 及 test 内置 build 通过；共 12 个文件、503 项测试，其中 T3 两个文件新增 258 项。原 245 项（含 T2 原生锁真实子进程、CLI/REPL/wire 和四层架构约束）全部回归通过。
+- B01：第 5 节合法组合逐条覆盖正反例；额外/缺字段、未知类型/角色、版本/文件名身份、序号、时间和非法运行摘要均拒绝。语义错误即使位于 EOF，或者前面已有 success，也拒绝整个文件。逐项断言物理行号、字节起点/右边界与必要引用，不跳行、不纠正。
+- B02：跨批复用 ID、未知工具名合法；未来/非 assistant/旧 turn/旧批引用、名称/ID 错配、无 start、重复 start/result/end、result/end 双重终止和乱序/重叠均拒绝。
+- B03：空白最终回答、success 缺结果/最终回答或带 error、非成功缺 error、错误分类/机器码及 HTTP 状态非法均拒绝。现有运行路径未修改，原 invalid_response 测试继续通过。
+- B04：user-only、最终回答后缺 end、调用尚未开始/仅 start/前项已有结果/异常终止、合法非成功 end、旧中断后新 success 均验证。已知结果和异常保留；有 end 且无 start 才是 not_started；无 end 或已有 start 而无终止为 unknown。仅完整 success 进入最近 20 组窗口，失败不占窗口。
+- B05：1/2/3/7/65536 字节读取、中文/emoji 跨块、对象/数组与所有 token 阶段、合法 UTF-8 边界/残片及过长/代理区/越界编码均覆盖。字符串内外同样残片分类不同，有 LF 的坏行与完整但 schema/seq/引用/生命周期非法的无 LF 尾行拒绝；测试逐字节遍历复杂合法对象的前缀。
+- B06 **只读子集通过**：missing_lf 计入该记录与 lastSeq，validEndBytes=S；incomplete 不计残片，validEndBytes/lastLfEndBytes=P。每次文件测试扫描前后比对原始 Buffer，并断言临时目录仅保留原日志，无补 LF、截断、备份或新目录。持锁备份、修改、sync 和重验属于 T5，本轮未实现/未验收，不宣称完整 B06 通过。
+- 显式借用真实 fd，在首次 read 前追加数据，验证初始 S 边界/changing；模拟初始范围提前 EOF 拒绝，模拟读取异常脱敏且不提前关闭借用 fd。缺路径不建目录，目录/末端符号链接拒绝。
+
+#### 限制与下一步
+
+T3 已完成；整个阶段与 B06 写恢复部分尚未完成。分块扫描不代表单行内存有界，JSON.parse 仍需完整行，当前 turn/最近成功业务组可能较大，turn/调用诊断数量也无硬上限。只读 S 和前后 fstat 不是原子快照；changing=false 不构成可写许可或排除同大小并发改写的保证。后续可写恢复必须持独占锁重新定位/扫描并按 T5 备份修复，不能复用本次只读边界直接续写。
+
+未验证 Linux、Windows、macOS x64、其他 Node 版本、远程文件系统和设备断电耐久性；本次没有修改真实服务或 CLI 行为，也未做真实模型联调。30 秒存储期限/5 秒退出监督继续由 T7/T9 交付。用户 research 的未提交修改保持原样，其 SHA-256 仍为 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`，不纳入 T3 提交。
+
+本次停止在 T3，T4 需下一次明确授权。T3 代码、测试及相关文档提交到 `phase/04-session-persistence`；不合并 main、不推送、不创建标签。

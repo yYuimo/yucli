@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 进入 `implementing`，仅 T2 原生锁/预检已实现并验证；会话日志、恢复及 CLI 接线尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 进入 `implementing`，T2 原生锁/预检与 T3 JSONL 类型/只读扫描已实现并验证；writer、修复、SessionStore 及 CLI 接线尚未实现。
 
 ## 目标场景
 
@@ -114,7 +114,7 @@ src/
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
 
-### 阶段 04 的设计边界（仅 T2 锁已实现）
+### 阶段 04 的设计边界（T2 锁与 T3 只读扫描已实现）
 
 阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
 
@@ -125,6 +125,8 @@ src/
 阶段 04 T2 已新增 `contracts/session-lock.ts`、`adapters/session/lockPlatform.ts` 与 `SessionLockAdapter.ts`：精确平台/local/native 预检、exnb 写锁、已有文件的 shnb 探测、进程内登记及 dev/ino 所有权复核。release 通过关闭描述符释放，不删除 sidecar；不会提前解锁未 settle 的操作。只有锁调用路径加载 fs-ext，普通 CLI/REPL 当前仍沿阶段 03 路径，未接入持久化。
 
 fs-ext@2.1.1 放 optionalDependencies，pnpm 构建脚本仅授权该包；构建前提和目标 Node 24.14.0 + macOS arm64 的子进程/隔离安装验证见[阶段 04 T2 实际结果](specs/phase-04-session-persistence.md#t2-依赖与锁实际结果2026-10-29)。T2 完成不等于整个存储契约已实现，30 秒存储期限与 5 秒退出监督仍由 T7/T9 后续交付。
+
+T3 新增 `contracts/session.ts` 的业务数据/稳定错误（锁入口重导出同一异常），以及 adapter 内的 `sessionSchema → sessionSequence` 校验、`jsonPrefix` 与 `scanSession` 字节扫描。扫描器以初始 fstat 固定 `[0,S)`，严格 UTF-8，提供 none/missing_lf/incomplete 与全文件 corrupt/unsupported 拒绝；损坏结果不暴露局部可执行历史。合法结果返回列表统计、工具证据及最近 20 个完整成功业务组，由未来 core 再转模型消息；只读观察不授予写入或恢复执行权。当前 CLI 没有调用扫描器，扫描不创建目录、不修改正文、不备份、不 fsync；T4/T5 仍负责文件创建/权限、writer 和持锁修复。T3 验证与内存/并发限制见[阶段 04 T3 实际结果](specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。
 
 ### 依赖检查
 
