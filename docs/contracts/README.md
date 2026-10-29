@@ -10,6 +10,7 @@
 - [工具执行契约](tool-execution.md)：工具定义、调用 ID、`read_file` 边界和 AgentLoop 消息顺序。
 - [流式模型与 SSE 契约](streaming.md)：SSE 字节边界、内部流式事件和工具调用拼装。
 - [REPL 与内存会话契约](repl.md)：内置命令、历史所有权、输出和取消语义。
+- [会话存储契约](session-store.md)：JSONL v1、事实交付、恢复投影、锁、修复和存储错误（阶段 04，`draft`）。
 
 ## 适合建立契约的内容
 

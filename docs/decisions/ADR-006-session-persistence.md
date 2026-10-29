@@ -1,10 +1,10 @@
 # ADR-006：会话使用严格 JSONL 日志和单写者恢复
 
-状态：`proposed`
+状态：`accepted`
 
-日期：2026-10-27（Asia/Shanghai）。调研已收口，本记录随阶段 04 规格提交评审，尚未实现。
+日期：2026-10-27（Asia/Shanghai）。调研已收口，本记录随阶段 04 规格提交评审；用户已完成评审并接受该设计，尚未实现。
 
-入口修订：2026-10-28（Asia/Shanghai）。按用户建议参考 Codex CLI/Pi，增加默认 picker、continue 最近会话和 /new 主命令，保持 proposed。
+入口修订：2026-10-28（Asia/Shanghai）。按用户建议参考 Codex CLI/Pi，增加默认 picker、continue 最近会话和 /new 主命令；这些入口已纳入本次 accepted 决策。
 
 ## 背景与问题
 
@@ -44,4 +44,5 @@ mkdir 占位锁无需原生依赖，但崩溃后自动接管与清理竞态未�
 - [阶段 04 规格](../specs/phase-04-session-persistence.md)
 - [会话持久化调研报告](../research/session-persistence-research.md)
 - [现有 REPL 契约](../contracts/repl.md)、[工具执行契约](../contracts/tool-execution.md)、[CLI 契约](../contracts/cli.md)：阶段 04 扩展待实现同步。
-- 计划新增 session-store 契约及 contracts/session、core 协调/投影和 adapters/session；尚未创建生产实现。
+- [会话存储契约](../contracts/session-store.md)已固定阶段 04 的跨层边界，状态为 `draft`，待实现和运行时验证后接受。
+- 计划新增 contracts/session、core 协调/投影和 adapters/session；尚未创建生产实现。

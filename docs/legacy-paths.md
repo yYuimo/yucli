@@ -53,7 +53,13 @@ bootstrap/cli.ts
 | `executeToolBatch()` / `validateToolBatch()`（`core/toolRegistry.ts`） | 两条循环共用 |
 | `toWireMessage()`、工具与消息契约 | `complete()` 与 `stream()` 共用 |
 
-## 4. 维护规则
+## 4. 阶段 04 设计影响（实现前）
+
+阶段 04 已确定持久化只接入 REPL 主流程；普通 `--prompt` 继续保持无会话副作用。实现开始后，`runTurnStream`、`executeToolBatch` 和工具注册表会增加可选的有序事实交付，但它们不能因此被列为非主流程；阶段 04 的 `runPersistentTurn` 将作为持久化协调入口，只有在 `turn_end(success)` 保存确认后才允许 REPL 提交历史。
+
+计划新增的 `contracts/session.ts`、`core/runPersistentTurn.ts`、`core/sessionHistory.ts`、`core/toolMessage.ts` 和 `adapters/session/` 当前尚不存在，不应在本表中伪造为已接入或已验证的主流程。实现过程中如果某条旧路径退出主流程，仍按本文件的新增/删除规则记录。
+
+## 5. 维护规则
 
 1. **新增**：任何代码退出主流程时，在本表加一行，写明位置、角色、使用方、保留原因和去留条件。
 2. **主流程变化**：入口、调用链或阶段范围变化后，检查本表是否仍然准确。
@@ -61,7 +67,7 @@ bootstrap/cli.ts
 4. **恢复**：路径回到主流程时，更新本表并注明恢复原因；不要只删表格行。
 5. **阶段收尾**：每个阶段完成时顺手核对一次；本表与 `docs/README.md` 入口保持同步。
 
-## 5. 自检命令
+## 6. 自检命令
 
 以下命令用于快速核对引用关系；注释中的提及也会出现在结果中，需要人工区分：
 
@@ -73,8 +79,9 @@ grep -rn "runTurnStream\|displayTurn\|runRepl" src
 grep -rn "agentLoop\|runPrompt\|\.complete(" src tests
 ```
 
-## 6. 变更记录
+## 7. 变更记录
 
 | 日期 | 变更 |
 | --- | --- |
 | 2026-10-19 | 初版：阶段 03 的 CLI 全部切到 `stream()` 后，`complete()`、`agentLoop`、`runPrompt` 退出主流程；记录为兼容/测试/降级路径 |
+| 2026-10-29 | 阶段 04 设计收口：记录持久化 REPL 的预期入口和待新增模块；实现前不改变现有主流程清单 |

@@ -6,7 +6,9 @@
 
 阶段 03 扩展状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
-适用阶段：阶段 01 单次模型问答；阶段 02 单次工具往返；阶段 03 REPL 与流式输出。
+阶段 04 扩展状态：`draft`（规格已评审，持久化实现和运行时验收尚未完成）
+
+适用阶段：阶段 01 单次模型问答；阶段 02 单次工具往返；阶段 03 REPL 与流式输出；阶段 04 会话保存与恢复。
 
 ## 运行模式与命令形式
 
@@ -76,6 +78,25 @@ yucli --help
 ## 阶段 03 REPL 与流式路径
 
 无 `--prompt` 时，REPL 读取一行普通文本并调用流式 turn；成功后提交历史并显示下一次提示。`/clear` 清空全部内存历史（历史上限为最近 20 个完整 turn），`/exit`、`/quit`、EOF 返回 0。turn 执行中不读取新输入；流式请求中 Ctrl+C 取消当前 turn、丢弃半截消息并回到提示；等待输入时 Ctrl+C 返回 130。单次 `--prompt` 的取消、超时和流协议错误返回 4。
+
+## 阶段 04 CLI 扩展（draft）
+
+阶段 04 保留 `--prompt` 的无会话副作用，并将无参数入口扩展为惰性创建会话的持久化 REPL。新增入口如下：
+
+```text
+yucli
+yucli --sessions [--all]
+yucli --continue
+yucli --resume [sessionId] [--all]
+```
+
+`--sessions` 只读列出当前 cwd 的会话，`--all` 扩展初始列表范围但不放宽恢复时的 cwd realpath 约束；无 ID 的 `--resume` 打开共享行式 picker，完整 ID 直接恢复，`--continue` 选择当前 cwd 最近的有效非空候选。picker 只在 stdin/stdout 都是 TTY 时可用，编号映射来自一次列表快照；直接 ID 和 `--continue` 不要求 TTY。列表和 picker 不加载模型配置、不创建会话、不修复文件。
+
+阶段 04 的参数互斥和退出码扩展为：参数错误 2、配置错误 3、模型/业务 turn 错误 4、会话访问或持久化/关闭故障 5、等待输入 Ctrl+C 130。`--resume` 的位置参数是可选完整 sessionId；`--all` 只允许搭配 `--sessions` 或不带 ID 的 `--resume`。`--continue` 不接受位置参数。
+
+REPL 增加 `/resume [sessionId]`、`/new` 和同义别名 `/clear`。`/resume` 无参数复用 picker；恢复候选失败时保留当前健康会话并回到 picker。`/new`/`/clear` 关闭旧 writer、清空内存历史并使下一次普通输入惰性创建新会话。picker 中的输入不会被当作普通问题消费；关闭、保存或锁故障优先于正常退出码。
+
+阶段 04 的扩展目前是 `draft`：实现前不得把以上命令、退出码或持久化行为当作已交付能力。具体 JSONL、锁、修复、保存确认和资源所有权见[会话存储契约](session-store.md)。
 
 ## 阶段 03 实现与验证
 

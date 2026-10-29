@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 主体已实现；usage-only 兼容补丁已修复并验证，本次重开状态保持 `implementing`，等待修复审查。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 规格完成评审并进入 `designed`，持久化实现尚未开始。
 
 ## 目标场景
 
@@ -103,7 +103,7 @@ src/
 
 文件工具先检查词法路径和真实路径的包含关系，再 stat、打开句柄并有界读取；fatal UTF-8 解码保留原文，空文件允许。真实路径按路径段比较，末端打开使用 O_NOFOLLOW，并再次检查句柄类型与大小；这些检查不能代替操作系统沙箱，也不保证面对工作区父目录并发替换时的原子隔离。
 
-阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。阶段 03 已在 `core` 增加流式 turn/assembler，在 adapter 增加 SSE 解析，在 bootstrap 增加 REPL 和朴素 stdout 渲染；历史只存内存，最多保留 20 个完整 user turn。`session` 在阶段 4 按需加入；没有拆分多包 workspace，也没有新增生产假模型客户端。
+阶段 02 不加入写文件、命令执行、REPL、流式输出或会话存储。阶段 03 已在 `core` 增加流式 turn/assembler，在 adapter 增加 SSE 解析，在 bootstrap 增加 REPL 和朴素 stdout 渲染；历史只存内存，最多保留 20 个完整 user turn。阶段 04 按已评审规格加入会话存储，但仍不拆分多包 workspace，也不新增生产假模型客户端。
 
 ### 阶段 03 的流与历史边界
 
@@ -113,6 +113,14 @@ src/
 - `runTurnStream` 接收旧历史快照，独占当前 turn 的临时消息；失败只抛稳定异常。`appendedMessages` 仅在完整成功时返回，REPL 将它作为一组保存，超限整组丢弃最旧 turn。
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
+
+### 阶段 04 的设计边界（尚未实现）
+
+阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
+
+规划中的分层保持现有依赖方向：`contracts/session.ts` 定义事实、快照、列表和稳定存储错误；`core` 负责唯一 user/turn_end、取消边界和 `ToolResult → ToolMessage` 投影；`adapters/session` 负责 JSONL 校验、字节扫描、锁、fsync、备份修复和恢复读模型；`bootstrap` 负责模式分流、共享 picker、会话切换和 5 秒故障收尾。adapter 不反向 import core，存储不感知 picker。
+
+会话日志是事实来源，成功模型历史是恢复投影；只有确认 `turn_end(success)` 后，REPL 才提交一组完整消息。失败、取消和中断事实保留在日志，但不自动重跑工具或把未完成 turn 送回模型。具体格式和生命周期见[会话存储契约](contracts/session-store.md)，阶段 04 仍处于设计阶段。
 
 ### 依赖检查
 

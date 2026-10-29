@@ -2,7 +2,9 @@
 
 状态：`accepted`
 
-适用阶段：阶段 02/03，只读 `read_file`、非流式 AgentLoop 与流式 turn。
+阶段 04 扩展状态：`draft`（持久化事实交付和恢复投影尚未实现）
+
+适用阶段：阶段 02/03，只读 `read_file`、非流式 AgentLoop 与流式 turn；阶段 04，带持久化事实交付的流式 turn。
 
 本文定义模型工具调用如何转换为 yucli 的内部请求、如何执行工具以及如何把结果放回消息历史。它不定义文件编辑、命令执行、MCP 或用户审批。
 
@@ -158,6 +160,22 @@ interface AgentLoopResult {
 ```
 
 `AgentLoopResult` 只表示成功完成并得到最终文本。循环上限、工具批次协议错误、模型请求错误和取消都不返回 result，而是抛出相应的稳定错误；阶段 02 的循环和协议失败抛 `AgentLoopError`。
+
+## 阶段 04 持久化事实交付（draft）
+
+阶段 04 不把工具执行过程改成任意事件总线。持久化路径由 coordinator 为每个 turn 创建 `TurnExecutionContext`，把以下已校验事实按顺序交给 `TurnFactSink.record()`，并等待 `SessionWriter.appendDurable()` 完整写入和同步确认：
+
+```text
+user → assistant → tool_start → tool_result 或 tool_end → … → turn_end
+```
+
+每个 assistant 在 turn 内生成临时 `assistantId`（如 `a1`、`a2`）；工具事实携带同一响应的 `CallRef`。存储 adapter 将已确认的 `(turnId, assistantId)` 映射为文件中的 `callMessageSeq`，未知引用、重复 assistantId、调用名/ID 不一致或越序都是 `PersistenceError(contract_violation)`，不能猜测最近一条 assistant。
+
+`tool_start` 确认后如果在进入注册表前收到取消，必须先保存 `tool_end`，其安全错误码为 `cancelled_before_dispatch`，确认后才结束业务 turn；注册表已经开始后按实际异常或取消原因保存结果。完整 `ToolResult` 已交付时只保存 `tool_result`，不能再为同一调用追加重复的 `tool_end`。
+
+只有 coordinator 保存并确认 `turn_end(success)` 后，REPL 才提交 `StreamTurnResult.appendedMessages` 到内存历史。失败、取消、超时或保存故障不提交半截历史；保存故障原样穿透 core，不转成 `ok:false` 工具结果、协议错误或普通取消。普通 `--prompt` 不注入 sink，继续保持无会话副作用。
+
+该扩展仍保留本文件前述的整批参数预检、顺序执行、4 个工具调用和 8 次模型调用上限；扩展接口、保存屏障、错误分类和恢复投影见[会话存储契约](session-store.md)。实现和验收完成前不得将本节的持久化行为当作已交付能力。
 
 ## OpenCode Go 映射
 
