@@ -9,7 +9,7 @@
 - [阶段 01：单次模型问答与四层实现结果](specs/phase-01-single-model.md)
 - [阶段 02：只读文件工具与最小 Agent Loop](specs/phase-02-read-file-agent-loop.md)
 - [阶段 03：持续对话与流式输出](specs/phase-03-repl-streaming.md)
-- [阶段 04：会话保存与恢复（implementing；T9 本机证据已补、复核未签收；测试修订后原 SIGINT 超限仍待定位，托管 CI 未运行，T10 未开始）](specs/phase-04-session-persistence.md)
+- [阶段 04：会话保存与恢复（implementing；T9 partial、未签收；原 SIGINT 超限仍待定位，托管 CI 未运行；T10 本地预收口完成，最终签收待 CI）](specs/phase-04-session-persistence.md)
 - [会话持久化调研报告（已收口）](research/session-persistence-research.md)
 - [接口与契约规范](contracts/README.md)
   - [LlmClient 契约](contracts/llm-client.md)

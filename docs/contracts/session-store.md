@@ -233,7 +233,7 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-T2–T8 已实现锁、扫描、writer、恢复修复、core 交付/投影/协调、操作期限/监督，以及 SessionStore/list 与 CLI/REPL 接线。本文整体仍为 draft，T9 完整矩阵/真实退出和重启恢复验收、T10 完成审查尚未执行。各任务交付时的范围与历史验证见下文。
+T2–T8 已实现锁、扫描、writer、恢复修复、core 交付/投影/协调、操作期限/监督，以及 SessionStore/list 与 CLI/REPL 接线。本文整体仍为 `draft`；T9 当前为 `partial`，本机矩阵和真实进程证据已补，但原 SIGINT 超限未定位、托管 CI 未运行；T10 本地预收口完成，最终签收待 CI。各任务交付时的范围与历史验证见下文。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
@@ -318,7 +318,7 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 已实现 T2–T8：会话 contracts、锁/扫描/writer/修复/操作期限、core 事实/投影/协调，以及 bootstrap 监督、完整 store/list 和 CLI/REPL 接线；T9 完整矩阵/真实退出及重启恢复验收、T10 完成审查仍待后续任务
+- 已实现 T2–T8：会话 contracts、锁/扫描/writer/修复/操作期限、core 事实/投影/协调，以及 bootstrap 监督、完整 store/list 和 CLI/REPL 接线；T9 为 `partial`，本机矩阵/真实退出及重启恢复证据已补，原 SIGINT 超限和托管 CI 仍待收口；T10 本地预收口完成，最终签收待 CI
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收
 
 
