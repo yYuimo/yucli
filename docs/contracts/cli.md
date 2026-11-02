@@ -109,3 +109,10 @@ T8 实际接线：参数解析在配置/会话读取之前；无 ID picker 的�
 ## 阶段 03 实现与验证
 
 入口 [cli.ts](../../src/bootstrap/cli.ts) 使用 [repl.ts](../../src/bootstrap/repl.ts) 持有历史，用 [output.ts](../../src/bootstrap/output.ts) 写文本和安全状态。[cli.test.ts](../../tests/cli.test.ts) 与 [repl.test.ts](../../tests/repl.test.ts) 分别运行源码和构建产物；模型请求由本地 SSE 服务接收，断言 stream:true。非流式 stream:false 的兼容断言继续由 client/toolHttp 测试覆盖。
+
+
+## T9 本机集成验收记录（2026-10-30）
+
+本机新增 `sessionProcess`、`sessionProcessFault`、`sessionTerminal` 三个测试文件、56 项；目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 全套 **27 文件/1057 项**及 typecheck/lint/build 通过。源码与构建产物均覆盖真实重启/恢复、SIGSTOP/SIGKILL 锁、30 秒超时后保持锁、迟到 I/O 的完成/拒绝、5 秒关闭失败的应急退出、备份/truncate/补 LF 中断后二次打开，以及真实 PTY picker/Ctrl+C/EOF/单边 TTY。模型仅使用本地 mock SSE，存储只使用临时 HOME；故障注入仅存在于 tests preload，没有生产故障开关。
+
+目标机还由 Agent 逐步操作真实终端完成源码创建与构建产物恢复冒烟，验证历史、seq 和释放锁。详细 46 行矩阵、命令、实际文件和限制见[阶段规格 T9 报告](../specs/phase-04-session-persistence.md#t9-集成验收实际结果与开发报告2026-10-30)。用户首轮复核1056/1057，已修正测试共享60 ms请求期限和跨输出管道等待，新增受控管道乱序回归与真实I/O settle诊断；原源码SIGINT 4秒超限仍未定位，托管CI workflow未运行，T9保持partial/尚不能签收；T10/整个阶段完成审查尚未执行，扩展契约仍为 draft。本记录不改变上文接口、存储格式或历史交付语义。

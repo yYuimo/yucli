@@ -92,3 +92,10 @@ T7 子集已验证：core/runPersistentTurn 交付保存确认后的 CommittedTu
 显式恢复只显示 ID、成功/中断计数与尾部动作；provider/model 只比较最近成功 turn 的 runtimeProfile，无成功 turn 才回退最近 user。所选记录缺摘要保持未知，不借用其他记录；差异或缺摘要在首次新请求前 stderr 提示一次，不要求确认、不进模型、不重读 .env。历史只保留最近 20 个成功完整组，不重跑旧请求或工具。
 
 T8 目标环境 typecheck/lint/build 及 24 文件/1000 项通过，新增 4 文件/172 项；含真实临时 writer、T5 尾部修复、本地 SSE、源码/构建产物 D07 管道停止，以及可控候选准备/旧 close 屏障和取消测试。T9 完整矩阵、真实强制退出/重启故障子进程与人工 TTY 验收、T10 完成审查不在本轮结果内。
+
+
+## T9 本机集成验收记录（2026-10-30）
+
+本机新增 `sessionProcess`、`sessionProcessFault`、`sessionTerminal` 三个测试文件、56 项；目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 全套 **27 文件/1057 项**及 typecheck/lint/build 通过。源码与构建产物均覆盖真实重启/恢复、SIGSTOP/SIGKILL 锁、30 秒超时后保持锁、迟到 I/O 的完成/拒绝、5 秒关闭失败的应急退出、备份/truncate/补 LF 中断后二次打开，以及真实 PTY picker/Ctrl+C/EOF/单边 TTY。模型仅使用本地 mock SSE，存储只使用临时 HOME；故障注入仅存在于 tests preload，没有生产故障开关。
+
+目标机还由 Agent 逐步操作真实终端完成源码创建与构建产物恢复冒烟，验证历史、seq 和释放锁。详细 46 行矩阵、命令、实际文件和限制见[阶段规格 T9 报告](../specs/phase-04-session-persistence.md#t9-集成验收实际结果与开发报告2026-10-30)。用户首轮复核1056/1057，已修正测试共享60 ms请求期限和跨输出管道等待，新增受控管道乱序回归与真实I/O settle诊断；原源码SIGINT 4秒超限仍未定位，托管CI workflow未运行，T9保持partial/尚不能签收；T10/整个阶段完成审查尚未执行，扩展契约仍为 draft。本记录不改变上文接口、存储格式或历史交付语义。

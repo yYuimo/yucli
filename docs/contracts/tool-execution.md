@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-阶段 04 扩展状态：`draft`（T6 已提交；T7 协调器/期限/可注入监督已验证、待审查；T8 CLI 接线尚未实现）
+阶段 04 扩展状态：`draft`（T6 已提交；T7 协调器/期限/监督和 T8 CLI/REPL 凭证接线已验证，T7/T8/T9 已按2026-11-02授权分批提交；T9仍partial、未签收）
 
 适用阶段：阶段 02/03，只读 `read_file`、非流式 AgentLoop 与流式 turn；阶段 04，带持久化事实交付的流式 turn。
 
@@ -190,7 +190,7 @@ user → assistant → tool_start → tool_result 或 tool_end → … → turn_
 
 ### T7 协调边界（2026-10-29）
 
-`runPersistentTurn` 已成为 user 和唯一 turn_end 的所有者，T6 的逐项工具事实与结果取消边界保持不变。任何保存点的 PersistenceError 直接终止协调，不递归写 tool_end/turn_end；普通工具内部错误在 tool_end 确认后由协调方固定 failed/tool/tool_execution_failed，保存唯一 turn_end 后重抛原 ToolExecutionError。成功终止确认后只交付 CommittedTurnResult，当前 CLI/REPL 尚未使用该凭证接线。30 秒操作期限、5 秒故障监督及实际验证范围见会话契约/阶段规格；不新增工具执行期限或 tool_timeout。
+`runPersistentTurn` 已成为 user 和唯一 turn_end 的所有者，T6 的逐项工具事实与结果取消边界保持不变。任何保存点的 PersistenceError 直接终止协调，不递归写 tool_end/turn_end；普通工具内部错误在 tool_end 确认后由协调方固定 failed/tool/tool_execution_failed，保存唯一 turn_end 后重抛原 ToolExecutionError。成功终止确认后只交付 CommittedTurnResult；T7交付时尚未接入CLI/REPL，T8现已使用该凭证作为历史提交的唯一依据。30 秒操作期限、5 秒故障监督及实际验证范围见会话契约/阶段规格；不新增工具执行期限或 tool_timeout。
 
 ## OpenCode Go 映射
 

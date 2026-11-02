@@ -287,7 +287,7 @@ T2–T8 已实现锁、扫描、writer、恢复修复、core 交付/投影/协�
 - [sessionOperation.ts](../../src/adapters/session/sessionOperation.ts) 的 SessionOperations 给 create/openWrite/appendDurable/close 设置固定 30,000 ms 总等待，单调时钟及 schedule 可注入，默认定时器不 unref。T7 交付时只保留 list 操作名；T8 已接入同一总等待与真实资源登记。计时含排队与内部步骤；超时永久固定共享 io_timeout、阻止后继 I/O，保留原 Promise 并观察晚到成功/拒绝，不取消底层调用、不确认迟到写入。
 - 文件 adapter 的 preparing 和 writer 的 tail 继续登记原 Promise；不能改为登记已超时的等待 Promise。SessionCleanup.closeSettled 是故障/内部清理专用能力：停止新操作，等待真实 settle，再关正文/备份/目录 fd、最后释放锁。它不受业务 close 的 30 秒等待 Promise 影响，必须由 bootstrap 的 5 秒监督约束；不是供业务绕过期限的第二个普通 close。
 - [persistenceSupervisor.ts](../../src/bootstrap/persistenceSupervisor.ts) 首次故障固定原异常、唯一 5,000 ms 总期限和重入结果，调用注入的 stopInput/cancel/真实 close 回调。资源证实关闭则返回 5；挂起或关闭失败到期输出固定安全摘要并调用注入 exit(5)，不提前解锁。迟到拒绝持续观察；输出/取消失败不覆盖初始故障。T8 已在组合根注入 process.exit、输入控制和信号接线；真实强制退出子进程验收仍归 T9，单元测试使用退出替身。
-- 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下新增 79 项、3 个测试文件，全部 20 文件/828 项及 typecheck/lint/build 通过。验证含真实临时文件/T2 锁、本地 mock SSE、可控 Promise/时钟；T7 未提交待审查，不表示 T8 产品持久化入口或 T9 真实退出子进程已验收。
+- 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下新增 79 项、3 个测试文件，全部 20 文件/828 项及 typecheck/lint/build 通过。验证含真实临时文件/T2 锁、本地 mock SSE、可控 Promise/时钟；这是T7交付时的验证记录；T7/T8/T9现已按2026-11-02授权分批提交到阶段分支，不表示 T8 产品持久化入口或 T9 真实退出子进程已验收。
 
 ## T8 store/list 与产品接线实现状态（2026-10-29）
 
@@ -320,3 +320,10 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
 - 已实现 T2–T8：会话 contracts、锁/扫描/writer/修复/操作期限、core 事实/投影/协调，以及 bootstrap 监督、完整 store/list 和 CLI/REPL 接线；T9 完整矩阵/真实退出及重启恢复验收、T10 完成审查仍待后续任务
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收
+
+
+## T9 本机集成验收记录（2026-10-30）
+
+本机新增 `sessionProcess`、`sessionProcessFault`、`sessionTerminal` 三个测试文件、56 项；目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 全套 **27 文件/1057 项**及 typecheck/lint/build 通过。源码与构建产物均覆盖真实重启/恢复、SIGSTOP/SIGKILL 锁、30 秒超时后保持锁、迟到 I/O 的完成/拒绝、5 秒关闭失败的应急退出、备份/truncate/补 LF 中断后二次打开，以及真实 PTY picker/Ctrl+C/EOF/单边 TTY。模型仅使用本地 mock SSE，存储只使用临时 HOME；故障注入仅存在于 tests preload，没有生产故障开关。
+
+目标机还由 Agent 逐步操作真实终端完成源码创建与构建产物恢复冒烟，验证历史、seq 和释放锁。详细 46 行矩阵、命令、实际文件和限制见[阶段规格 T9 报告](../specs/phase-04-session-persistence.md#t9-集成验收实际结果与开发报告2026-10-30)。用户首轮复核1056/1057，已修正测试共享60 ms请求期限和跨输出管道等待，新增受控管道乱序回归与真实I/O settle诊断；原源码SIGINT 4秒超限仍未定位，托管CI workflow未运行，T9保持partial/尚不能签收；T10/整个阶段完成审查尚未执行，扩展契约仍为 draft。本记录不改变上文接口、存储格式或历史交付语义。

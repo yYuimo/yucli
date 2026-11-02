@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调/期限/监督与 T8 SessionStore/list、CLI/picker/持久化 REPL 已实现并通过目标环境验证，未提交待审查；T9 完整矩阵/真实故障退出及重启恢复、T10 完成审查未进行。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调/期限/监督与 T8 SessionStore/list、CLI/picker/持久化 REPL 已实现并通过目标环境验证；T7/T8/T9 已于2026-11-02按用户授权分批提交到阶段分支，尚未推送。T9 已补本机矩阵、真实故障退出/重启恢复及终端证据，复核尚未签收，原 SIGINT 超限未定位、托管 CI 尚未运行；T10 完成审查未进行。
 
 ## 目标场景
 
@@ -161,6 +161,13 @@ T8 的生产调用链现在为：`cliOptions → cli → sessionApp → SessionS
 
 T8 新增 4 个测试文件、172 项，目标 macOS arm64/Node 24.14.0/pnpm 10.33.2 全部 24 文件/1000 项及 typecheck/lint/build 通过。源码/构建路径验证只读列表、参数/配置顺序、非 TTY 恢复、真实 busy、D07 故障后停止管道；可控模块测试覆盖共享 picker、候选 I/O/取消、旧 close 屏障和注入退出。真实 5 秒强制退出、重启/崩溃恢复、完整阶段矩阵与人工 TTY 验收仍留 T9，T10 审查未开始。
 
+
+
+T9 只增加测试与 CI 定义，生产模块、存储格式和四层依赖不变。`sessionProcess` 用源码/构建 CLI 和真实临时存储做跨进程恢复、成功窗口、配置/目录/worktree 与暂停/死亡锁验收；`sessionProcessFault` 用 tests 专用 preload 注入真实 I/O 确认丢失、未 settle/迟到结果以及修复边界 SIGKILL。公开 30 秒和故障 5 秒计时使用生产实现，确认底层未结束时锁仍 busy、进程退出后可接管；没有给生产 CLI 增加故障环境开关或假模型。
+
+`sessionTerminal` 通过 Python 标准库 PTY 驱动真实 stdin/stdout，验证 picker 编号/刷新、访问竞争、current/all、Ctrl+C/EOF 及只有单边 TTY 时的拒绝。Agent 另用真实终端逐步执行源码建会话→退出→构建产物 picker 恢复和取消，原工具结果未重读、两正文扫描合法且锁已释放；不把它描述为用户本人已操作。
+
+T9 新增 3 个测试文件、56 项，本机全套 27 文件/1057 项及 typecheck/lint/build 通过。新增 `.github/workflows/verify.yml` 固定 macos-15 arm64、Node 24.14.0/pnpm 10.33.2，显式检查 Python/Xcode/native，平台不符直接失败而非 skip；配置通过本地 YAML 解析，托管 job 尚未执行；非目标兼容矩阵覆盖Linux/Windows/macOS Intel/Node22，Node22.22.0反例已在本机单独实跑。用户首轮复核1056/1057，已修正共享60 ms请求期限和跨stdout/stderr管道的测试等待，并增加真实I/O settle阶段诊断与受控管道乱序回归；没有改生产算法或4秒观察窗口。原并行SIGINT超限仍未定位、CI待验，T9保持partial/不能签收，T10 未进入，阶段保持 implementing。
 
 ### 依赖检查
 

@@ -4,9 +4,9 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调/期限/监督与 T8 list/picker/持久化 CLI/REPL。T5/T6 已提交，T7/T8 通过目标验证、未提交待审查，阶段保持 `implementing`，T9/T10 未开始。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调/期限/监督与 T8 list/picker/持久化 CLI/REPL。T5/T6 已提交；T7/T8 通过目标验证，2026-11-02按用户授权将T7/T8/T9分批提交到阶段分支，尚未推送，阶段保持 `implementing`。T8 已通过用户验收；T9 本机矩阵/真实进程与终端证据已补，复核未签收；测试修订后原SIGINT超限仍未定位，托管CI未运行，T10未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T8 的授权范围，不将调研探针、存储、core、监督和 T8 产品子集验证视为 T9 完整阶段验收；T5 交付成功 turn 业务快照，T6 交付纯模型投影，T7 交付唯一终止协调和期限监督能力，T8 接入 CLI/REPL；本轮不包含 T9 真实故障退出子进程/完整矩阵。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前已获 T1–T9 授权，T10 尚未进入，不将调研探针、存储、core、监督和 T8 产品子集验证视为 T9 完整阶段验收；T5 交付成功 turn 业务快照，T6 交付纯模型投影，T7 交付唯一终止协调和期限监督能力，T8 接入 CLI/REPL；T9 已补真实故障退出子进程与本机完整矩阵，托管 CI 保持未执行。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -575,16 +575,16 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 - [x] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。目标 Node 下新增 69 项测试，T3 双扫描入口验证实际字节；创建资源收尾已覆盖，恢复/修复、core 屏障和退出监督仍属 T5–T7。
 - [x] **T5 恢复与修复（存储范围）**：持锁重新定位/扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 业务快照、已有文件续写与资源收尾；失败不发模型请求、不自动重放。成功 turn 的纯模型投影不在本任务，已正式移至 T6。新增 102 项测试，目标 Node 下全部 692 项通过；实现已获用户授权独立提交。
 - [x] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。新增 57 项、2 个测试文件，目标环境全部 17 文件/749 项及 typecheck/lint/build 通过；已获用户授权独立提交，不含 T7/T8。
-- [x] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出能力。新增 79 项、3 个测试文件，目标环境 20 文件/828 项及 typecheck/lint/build 通过；未提交待审查。监督通过注入回调/退出能力验证，实际 CLI/REPL 接线和真实退出子进程仍归 T8/T9。
-- [x] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。目标环境新增 172 项、4 个测试文件，全部 24 文件/1000 项及 typecheck/lint/build 通过；未提交待审查，完整矩阵/真实强制退出与重启恢复留 T9。
-- [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。
+- [x] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出能力。新增 79 项、3 个测试文件，目标环境 20 文件/828 项及 typecheck/lint/build 通过；2026-11-02按用户授权提交。监督通过注入回调/退出能力验证，实际 CLI/REPL 接线和真实退出子进程仍归 T8/T9。
+- [x] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。目标环境新增 172 项、4 个测试文件，全部 24 文件/1000 项及 typecheck/lint/build 通过；2026-11-02按用户授权提交，完整矩阵/真实强制退出与重启恢复留 T9。
+- [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。已完成本机 46 行矩阵映射、真实进程/PTY 与 Agent 逐步终端冒烟，新增 56 项；有 27 文件/1057 项全绿记录，但用户首轮复核为 1056/1057，不能用重跑覆盖。已修正共享 60 ms 请求期限和跨输出管道观察条件，详见下文复核记录；原并行 SIGINT 的 4 秒超限仍未定位，托管 CI 未运行，故保持 partial/未勾选，尚不能签收。
 - [ ] **T10 文档与完成审查**：按实测结果更新本文件、README、architecture、契约与依赖说明；报告保留限制和未验证环境，审核中文注释、Git diff 和阶段分支。只有验证完成才转 verified，用户审查后再转 done/申请集成。
 
 规划新增模块为 contracts/session.ts、core/runPersistentTurn.ts、core/sessionHistory.ts、core/toolMessage.ts，以及 adapters/session 下的 store/writer/scanner/repair/lock/prefix 组件；具体文件拆分可随实现规模合并，但职责、依赖方向和验收不能省略。bootstrap 可新增共享 sessionPicker 与小型会话生命周期/退出监督模块，不把交互放入存储 adapter 或业务过程堆入参数解析器，不新建事件总线、插件平台或未使用抽象。
 
 ## 12. 验收矩阵与验证计划
 
-以下均为待实现的真实运行时验收；类型声明通过不能替代。延迟与竞态测试使用可控 Promise、IPC 和时钟，不靠固定 sleep 猜时序。SSE 集成使用真实 adapter + 本地 HTTP 服务，落盘使用临时目录；生产 home 不参与测试。
+以下固定 46 个真实运行时验收场景；T9 本机执行证据见文末，托管 CI 尚未运行，类型声明通过不能替代行为验证。延迟与竞态测试使用可控 Promise、IPC 和时钟，不靠固定 sleep 猜时序。SSE 集成使用真实 adapter + 本地 HTTP 服务，落盘使用临时目录；生产 home 不参与测试。
 
 ### 成功路径与用户模式
 
@@ -1014,7 +1014,7 @@ T6 无部分项或阻塞。未实现 T7 的 runPersistentTurn/user/唯一 turn_e
 
 ### T7 协调与退出监督实际结果（2026-10-29）
 
-状态：`completed`（以下为 T7 交付记录，未提交待审查）。已完成：持久化 turn 协调、当前公开存储操作的 30 秒等待、可注入的 5 秒故障监督；部分完成：无；阻塞：无。T7 交付时阶段仍为 implementing、扩展契约仍为 draft，T8/T9 当时未实现；当前 T8 结果见下节。
+状态：`completed`（以下为 T7 交付时记录；2026-11-02按用户授权提交，见末尾补记）。已完成：持久化 turn 协调、当前公开存储操作的 30 秒等待、可注入的 5 秒故障监督；部分完成：无；阻塞：无。T7 交付时阶段仍为 implementing、扩展契约仍为 draft，T8/T9 当时未实现；当前 T8 结果见下节。
 
 #### 完成内容
 
@@ -1089,7 +1089,7 @@ T9 的完整阶段矩阵、真实 CLI 5 秒强制退出子进程、实际进程�
 
 ### T8 CLI/REPL 实际结果与开发报告（2026-10-29）
 
-状态：`completed`（仅 T8，未提交待审查）。已完成：SessionStore/list、CLI 模式、共享行式 picker、持久化 REPL 和组合根监督接线；部分完成：无；阻塞：无。阶段保持 `implementing`，阶段 04 扩展契约保持 `draft`，T9/T10 不勾选。
+状态：`completed`（仅 T8，交付时未提交；2026-11-02按用户授权提交，见末尾补记）。已完成：SessionStore/list、CLI 模式、共享行式 picker、持久化 REPL 和组合根监督接线；部分完成：无；阻塞：无。阶段保持 `implementing`，阶段 04 扩展契约保持 `draft`，T9/T10 不勾选。
 
 #### 完成内容与设计选择
 
@@ -1144,3 +1144,147 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
 本次仅修改 `src/bootstrap/repl.ts`、`tests/sessionRepl.test.ts`、`docs/contracts/repl.md` 和本规格；接口、历史内容和存储格式不变。新增一条“较早配置不同、最近相同不提示”的回归测试，先在旧实现复现失败；同时在既有用例补断言，验证最近成功 turn 缺摘要时不回退 user。
 
 目标 Node 24.14.0 / pnpm 10.33.2 下实际执行 `npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test'`：typecheck、lint、build 与 **24 文件/1001 项测试全部通过**（较 T8 首次交付新增 1 项，较 T7 基线累计新增 173 项）。`git diff --check` 通过；未进入 T9/T10，没有真实模型请求、真实 home 访问或新平台验收。保留既有工作区，未暂存/提交；research 和上级 plan.md 的 SHA-256 均与上节相同。
+
+### T9 集成验收实际结果与开发报告（2026-10-30）
+
+状态：`partial`，**尚不能签收**。**已完成**：本机 46 行验收矩阵证据归档、源码/构建产物真实重启/取消/锁/故障退出/修复中断、真实 PTY 及 Agent 逐步终端冒烟；复核后修正测试的请求期限与跨管道观察条件。**部分完成**：托管 CI workflow 已准备并通过本地 YAML 解析，尚无托管运行结果。**验收阻塞**：用户首跑 1056/1057 的失败保留记录；原并行 SIGINT 超过4秒观察窗仍未定位，修订测试后的绿色结果不能证明它已修复。开发时未获提交/推送授权；2026-11-02用户已授权提交T7/T8/T9到阶段分支，尚未授权推送或明确接受CI延后。提交不代表签收，T9不勾选、不将阶段转为verified。T10 完成审查未进入。
+
+#### 完成内容与关键设计选择
+
+- 新增 `sessionProcess.test.ts`：16 项（源码/产物各 8），用真实 CLI、本地 SSE 和临时 HOME 验证跨进程成功历史/工具结果、seq/新 turnId、20 组窗口、失败/被杀中断排除、new/clear 旧文件再打开、当前模型摘要、父子/其他/改名 cwd、符号链接和真实 Git worktree。worktree 只在临时 shared clone 中创建，借用已有 HEAD 对象，不创建提交、不改被测仓库 Git 元数据。
+- 新增 `sessionProcessFault.test.ts`：18 项。真实 CLI 通过 tests 专用 preload 在创建前注入原有 `nodeSessionFileIO`；源码/产物均验证写入未 settle 时 30 秒 io_timeout、随后 5 秒应急 process.exit(5)，正文关闭拒绝后 5 秒强退，以及实际 sync 后确认丢失。中途两次 SIGINT 不改错误、不重置期限；I/O 尚未 settle 或正文未关闭时父进程探测仍 busy，进程退出后可接管，sidecar inode 保留。
+- D06 额外包含真实 30 秒超时后迟到 resolve（源码）/reject（构建产物）：父进程先观察 io_timeout 和 busy，再通过 IPC 释放底层调用；此后真实清理完成、退出 5，不触发强退、不再追加、不产生未处理拒绝。使用生产 30,000/5,000 ms 计时器，未缩短常量、未替换时钟；其他每操作精确边界继续由 T7 可控时钟测试覆盖。
+- 修复中断覆盖两种动作修改前/修改后，以及备份复制中间的真实 SIGKILL。下一进程只按实际字节重扫；完整备份与清单大小/SHA-256 匹配，旧 JSON 保留，半备份不删除，已经健康的正文不重做旧修复。不以进程死亡测试证明设备断电耐久性。
+- 新增 `sessionTerminal.test.ts`：22 项（源码/产物各 11）。Python 标准库 PTY 运行真实 CLI，覆盖无密钥浏览与选后配置失败、编号快照不因消失/竞争取锁而重排、只有 r/a 刷新、header-only current/all、当前会话选择、其他 cwd 仅预览、真实 Ctrl+C/EOF、单边 TTY 拒绝和取消后历史保留。Python 只充当终端桥，不模拟模型；模型仍走真实 HTTP adapter + 本地 SSE。
+- 子进程测试按 IPC、输出、真实退出、ps 停止态和锁探测推进；不 sleep 猜时序。仅测试 watch-dog 防意外挂死，生产操作/监督期限不变。测试退出全部发生在隔离 CLI 子进程，父 Vitest 不退出；finally 等真实进程退出后再清理临时目录。
+- CI 使用官方 runner-images 列出的 `macos-15` arm64 标签（[来源](https://github.com/actions/runner-images#available-images)），锁定 Node 24.14.0/pnpm 10.33.2；平台/版本不符直接失败，native 缺失不降级/skip。安装仅沿用 pnpm-workspace 的 fs-ext 构建授权，显式检查 native、Python 和 Xcode，产出类型/Lint/测试日志与 JSON artifact。另设 Ubuntu、Windows、macOS Intel、macOS arm64+Node22 的明确反例任务：help/version/prompt应为0，持久化预检应为5，不把不支持平台的正例 skip 当通过。PR/workflow_dispatch 才触发，权限 contents:read；本轮没有创建 PR、推送或运行托管 job。
+
+#### 第 12 节矩阵逐项证据（本机）
+
+“通过”表示本轮完整运行的相关断言通过；模块注入、临时真实文件、CLI/PTY/故障子进程的证据层次分别列出，不声称每个变体都运行过独立 CLI，也不把注入的平台/owner 条件写成已验证其他真实平台/用户。
+
+| 场景 | 结果 | 执行证据 |
+| --- | --- | --- |
+| A01 | 通过 | `sessionProcess` A01：帮助/版本/参数/空 REPL/help/prompt 的真实源码/产物，无新目录；`cli` 既有协议/退出断言 |
+| A02 | 通过 | `sessionRepl` 两题同文件 seq=6，`repl` 源码/产物两轮，`sessionProcess` 退出后重开 |
+| A03 | 通过 | `sessionWriter` 同毫秒 UUID、三次身份碰撞、readdir/wx 竞态；`sessionRepl`/`repl` 首次 create 失败无后续请求 |
+| A04 | 通过 | `sessionProcess` 两次独立进程，原前缀/inode 保留、新 seq/new turnId、投影旧工具结果且无重放 |
+| A05 | 通过 | `coreFacts` 正常 ok:false/未知工具、`sessionWriter` 空结果/引用、`sessionHistory` 纯转换；`sessionProcess` 真实工具后重启 |
+| A06 | 通过 | `sessionProcess` 22 个 success、普通失败与真实被杀中断，重启仅20组、磁盘前缀不裁剪；`sessionRecovery` 成功窗口 |
+| A07 | 通过 | `sessionProcess` new/clear 后三文件、另一进程重新恢复旧文件；`sessionRepl` old close 失败不换新 |
+| A08 | 通过 | `sessionProcess` 父子/其他/改名/alias、临时真实 Git worktree；`sessionRecovery` 规范 cwd/归属拒绝 |
+| A09 | 通过 | `sessionProcess` 重启新模型与 user 摘要/一次提示；`sessionRepl` 最近成功 profile、缺摘要/回退、不污染模型消息 |
+| A10 | 通过 | `sessionList` 只读/空/诊断/排序/unknown/changing/隐藏数，`sessionTerminal` 空视图/empty/只预览；`sessionCli` continue 不跳过状态 |
+| B01 | 通过 | `sessionScan` schemaCases/semanticCases、`sessionSequence` 生命周期，损坏拒绝且不交付局部历史 |
+| B02 | 通过 | `sessionScan` 引用反例、`sessionWriter` 两批复用 ID、`sessionRecovery` 新批次引用及旧 turnId 拒绝 |
+| B03 | 通过 | `sessionScan` success/error/最终内容组合，`coreFacts` 空白/截断/非法收尾不保存伪造 assistant |
+| B04 | 通过 | `sessionScan` user/start/结果截点/unknown/not_started，`sessionRecovery` 中断工具，`sessionProcess` 被杀中断后成功 |
+| B05 | 通过 | `jsonPrefix` 103 项、`sessionScan` 严格 UTF-8/跨块/完整坏行与可完成残片；T9 中断尾部含中文/emoji |
+| B06 | 通过 | `sessionScan` 只读不改、`sessionRecovery` 精确 S/P/备份/续写；`sessionProcessFault` 两类修复前后重启 |
+| B07 | 通过 | `sessionRecovery` 备份/复制/清单/sync/源摘要与身份失败，修改前不实施本方修复；`sessionRepl` 备份失败无后续请求 |
+| B08 | 通过 | `sessionRecovery` 修改后 sync/重验失败保留实际字节；`sessionProcessFault` backup/truncate/补 LF 边界真实 SIGKILL/二次打开 |
+| B09 | 通过 | `sessionRecovery` 原始 UTF-8 字节、短读/短写与摘要；`sessionProcessFault` 原件/备份/清单大小和 SHA-256 |
+| C01 | 通过 | `sessionWriter` header/目录/追加屏障、`persistentTurn` 每保存点可控 Promise，`coreFacts` 逐项分派；T9 user 写入未确认无模型 |
+| C02 | 通过 | `persistentTurn` 每保存点原错误身份/确认丢失、`coreFacts` 不递归结束；T9 实际 sync 后拒绝无请求、不重写 |
+| C03 | 通过 | `coreFacts` start 确认前后取消/分派，`persistentTurn` cancelled_before_dispatch 配对与终止 |
+| C04 | 通过 | `coreFacts` 注册表进入后取消/完整结果交付/结果保存期间取消；`toolRegistry` 结果优先语义回归 |
+| C05 | 通过 | `coreFacts` 第一项结果后第二取消/工具后 HTTP 失败/末轮不执行/内部异常分类，`persistentTurn` 第8次模型上限 |
+| C06 | 通过 | `persistentTurn` 固定各 outcome 后迟到取消/终止失败，`sessionRepl` success end 延迟时 Ctrl+C 仍提交已固定成功 |
+| C07 | 部分，待收口 | `persistentTurn` cancelled/timeout 终止保存与失败屏障，`repl` 模型 timeout 后继续，T9 真实 PTY 活跃 Ctrl+C；另有未定位的源码 SIGINT 4秒观察超限，不以重复通过替代定位 |
+| D01 | 通过 | `sessionLock` IPC 同/不同会话和重复句柄；`sessionProcess` 闲置/暂停 CLI busy/5、`sessionTerminal` 列举后取锁竞争 |
+| D02 | 通过 | `sessionLock` mtime 不抢占/停止态，`sessionProcess` SIGSTOP/CONT/close/KILL 后接管、inode 保留 |
+| D03 | 通过 | `sessionLock` 注入不支持平台/native 错误、inode 替换；既有真实子进程 help/prompt 不加载 native；不推断真实其他平台已支持 |
+| D04 | 通过 | `sessionWriter`/`sessionRecovery`/`sessionLock` 目录/正文/锁 symlink/type/mode/注入 owner/nlink/inode/同 ID 多文件 |
+| D05 | 通过 | `sessionWriter` 关闭重入/等待真实 I/O、`sessionRepl` 切换失败/EOF；T9 真实 close 拒绝保留锁到退出5 |
+| D06 | 通过 | `persistenceDeadline` 各操作30秒/迟到拒绝，`persistenceSupervisor` 精确5秒；T9 真实30秒→5秒退出及超时后 IPC 迟到 settle |
+| D07 | 通过 | `repl` 源码/产物真实保存故障停止管道，`sessionRepl` 各保存点拒绝；T9 user 确认丢失/挂起无后续问题或请求 |
+| D08 | 通过 | `cli` 真实参数/退出2/无密钥列表，`sessionCli` 互斥/all/空ID/continue，T9 A01/PTY 配置顺序 |
+| E01 | 通过 | `sessionCli` 全部模式/别名/互斥，`cli` 源码/产物；T9 真实启动无ID picker、直接ID和continue |
+| E02 | 通过 | `sessionCli` all 合法/非法组合、`cli` 副作用边界，T9 PTY a/current/all |
+| E03 | 通过 | `sessionPicker` 快照/a/r、`sessionTerminal` CLI/REPL 复用和真实 current/all/刷新；list 不取写锁 |
+| E04 | 通过 | `sessionTerminal` 选前删除和竞争取锁，拒绝仍是原ID，仅 r 重建；`sessionPicker` 全部访问错误和快照保留 |
+| E05 | 通过 | `sessionTerminal` 其他cwd/当前会话/busy竞争，`sessionPicker` busy/no/unknown/changing；`sessionList` changing 证据 |
+| E06 | 通过 | `sessionTerminal` current空/all header-only 可选、无虚构默认项，`sessionPicker` 全局空/a/r/q |
+| E07 | 通过 | `sessionPicker` 非整数/越界/空行/q，T9 真实 /new 仅为无效选择且无模型请求 |
+| E08 | 通过 | `sessionTerminal` 启动 Ctrl+C=130/EOF=0、REPL picker 取消保留历史/EOF结束、活跃与闲置 Ctrl+C 区分 |
+| E09 | 通过 | `cli`/`repl` 管道无ID拒绝不吃下行；T9 真实 stdin-only/stdout-only TTY 两种组合均为2 |
+| E10 | 通过 | `sessionList` 精确时间排序/诊断、`sessionCli` continue 无候选/空记录/不读配置；T9 真实被杀中断候选恢复 |
+| E11 | 通过 | `sessionCli` 最近 busy/unknown/changing 不回退；`sessionProcess` paused 最近busy退出5；TTY 选后竞争重新打开 |
+| E12 | 通过 | `sessionCli` 选后配置失败无 openWrite、`sessionRepl` 配置只加载一次/I/O取消/旧close开始后不撤销；T9 真TTY无密钥浏览/取消/选后3 |
+
+#### 实际修改文件
+
+| 本轮范围 | 文件与职责 |
+| --- | --- |
+| 新增真实进程测试 | `tests/sessionProcess.test.ts`、`sessionProcessFault.test.ts`、`sessionTerminal.test.ts` |
+| 新增测试支撑 | `tests/sessionProcessHelpers.ts`（独立沙箱/事件等待/真实退出）；`tests/fixtures/session-fault-preload.ts`（测试 I/O）；`tests/fixtures/repl-observer-preload.ts`（真实 settle 诊断/受控跨管道顺序）；`tests/fixtures/session-pty.py`（Python 标准库终端桥）；`tests/fixtures/session-platform-smoke.ts`（非目标环境的独立兼容/拒绝验证） |
+| 新增 CI 定义 | `.github/workflows/verify.yml`（目标平台/依赖门禁、全套验证、非目标反例矩阵、artifact；托管未运行） |
+| 既有测试修订 | `tests/repl.test.ts` 正常请求期限/精确终止断言、跨管道等待、等待子进程close清理；超限附安全前缀与真实I/O阶段 |
+| 同步实际结果 | 本规格、README、docs README、architecture、ADR-006、session-store/cli/repl 契约，以及提交时收口tool-execution的T8状态；状态仍 implementing/draft |
+
+T9 没有修改 `src/` 或依赖/锁文件；既有 `tests/repl.test.ts` 增加安全诊断、明确成功/失败终止断言、修正请求期限和跨管道等待，失败清理也等待子进程实际 close；4秒观察窗口不变，没有自动重试。新增 `tests/fixtures/repl-observer-preload.ts` 只在测试启动时观测真实 fetch/read/cancel/write/sync/close 的阶段、编号和相对时间，不发送路径、认证或正文；可用 IPC 暂扣取消文案，确定性构造 stdout 先于 stderr 到达。入场前 T7/T8 和 research 修改全部保留；累计新增9份测试/CI文件，另改上述既有测试及9份文档（含提交时收口tool-execution的T8状态），需按hunk审查。完整入场快照及本机 JSON 结果暂存在本轮 `/tmp` 等价目录，未加入产品或 Git。没有进行 T10 的最终完成审查、转 accepted/verified/done 或申请合并。
+
+#### 验证命令与实际结果
+
+目标实测 darwin arm64 / Node **v24.14.0** / pnpm **10.33.2**，Python **3.14.5**，Xcode Command Line Tools 路径 `/Library/Developer/CommandLineTools`；目标 Node 实际加载 fs-ext.flock 成功。先按类运行真实进程/修复与 PTY 定向验收，再执行完整命令（JSON 输出路径是本轮临时证据）：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test --reporter=default --reporter=json --outputFile=/var/folders/fx/88817gmd5vz2tz4q5s_kzn_w0000gn/T/yucli-t9-baseline-dqgytsn6/t9-test-results.json'
+```
+
+此前这次 typecheck、lint、build 与 **27 个测试文件、1057 项全部通过**；该次无失败、无 skipped/pending/todo。用户后续首跑复核有1项失败（见下节），不能把本次全绿视为稳定性已确认。T8 审查修正后的基线为24文件/1001项，T9 新增 **3 文件/56 项**（16+18+22）。JSON 的 describe suite 数不当作文件数；文件数取实际 testResults 数。实际 CLI 长等待测试约35秒，不是可控时钟替身。
+
+开发中的两类测试断言已修正后重新执行：原泄漏正则误匹配 assistant 的值“ok”（改为仅匹配字段键），PTY 只等待范围标题或把临时路径 folders 里的 older 当作条目（改为匹配完整编号行/实际提示到达）。未发现需修改生产接口或算法的冲突。workflow 本地 YAML 解析通过；未执行托管 job，不把配置解析或官方 runner 标签存在当作托管通过。另实际执行 `npm exec --yes --package=node@22.22.0 --call 'node --version && node --import /Users/yuimo/dev-learn/agent-lab/yucli/node_modules/tsx/dist/loader.mjs tests/fixtures/session-platform-smoke.ts'`：darwin arm64 / Node v22.22.0 下 help/version/prompt退出0、仅1次本地请求，持久化入口platform_unsupported/5，存储目录项0。它只证明非目标Node兼容/拒绝边界，不是该Node通过持久化正例。
+
+#### T9 复核失败与测试修订（2026-10-30）
+
+用户首轮全套为 **1056/1057**：源码 `fail` 历史用例期望 `good/ok/next`，实际请求只有 `next`；不是 waitFor 超时。单独、分组和第二次全套通过不能抹去首跑失败。原始失败没有 good 的落盘 outcome，故不能倒推确认当次原因。
+
+本轮用临时 HOME、真实源码 CLI 和本地 SSE 受控保留 good 响应，等待原来的60 ms请求期限；复现完全相同的下一请求差异，并取得 `fetch:abort` 与落盘 `timeout/request_timeout`，随后 fail 为 `failed/invalid_response`、next 为 success。这证实共享短期限能够让正常前置 turn 失败，不能证明用户当次一定发生了同一事件。已从 fail/timeout 用例移除 `launch([], "60")`：两者沿用该文件正常的2000 ms请求期限，timeout 仍等待真实不结束的 SSE，不扩大4秒观察 watchdog。增加 good 屏幕成功断言、目标错误分类及三次精确 turn_end 断言；模型历史期望仍为 good/ok/next，没有降低断言。
+
+SIGINT 另做8并发、10批次的诊断实验：80案例中26次先收到 stdout 下一提示，stderr 取消文案尚未被父进程读到，造成过早分类断言；80例落盘均为 cancelled，没有4秒超限。等待两条管道后另80例全部通过，最大取消观察耗时60 ms。此为测试观察竞态，不是生产取消失败，也不能解释此前连下一提示都未出现的4秒超限。源码/产物的既有 SIGINT 测试现在用 tests 专用 preload 暂扣 stderr 文案、IPC 放行，确定性回归跨管道等待；不靠 sleep 或重试碰时序。观察超限时附带实际 I/O settle 阶段和安全记录前缀，以便下次分辨网络清理和持久化屏障；**原4秒超限仍未定位**。
+
+受控60 ms复现和两组80例诊断的脚本/JSON/日志分别保存在入场证据目录 `yucli-t9-baseline-dqgytsn6` 的 `review-controlled-60ms.*`、`review-sigint-stress.*`、`review-sigint-stress-2.*`，保留失败结果；这些诊断实验不计入 Vitest 的1057项正式用例。修订既有用例，未新增测试项或生产代码。
+
+最终代码（含IPC暂扣文案回归和等待真实子进程close清理）分别实际执行两次：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test --reporter=default --reporter=json --outputFile=/var/folders/fx/88817gmd5vz2tz4q5s_kzn_w0000gn/T/yucli-t9-baseline-dqgytsn6/review-final-full-1.json'
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test --reporter=default --reporter=json --outputFile=/var/folders/fx/88817gmd5vz2tz4q5s_kzn_w0000gn/T/yucli-t9-baseline-dqgytsn6/review-final-full-2.json'
+```
+
+两次均 typecheck/lint/build 通过，**27文件/1057项通过，失败/跳过/pending/todo均为0**，Vitest耗时分别36.68秒、36.65秒；各有独立JSON及同名.log，没有重试/skip。定向 `pnpm exec vitest run tests/repl.test.ts` 为1文件/24项通过。此次只加强既有用例，正式测试数不增加；T9累计新增仍为3文件/56项。入场原代码的本轮完整复核、增加诊断后的完整复核也各为1057通过，保留在 `review-before-1.*`、`review-observed-full-1.*`，不能据此否认用户首跑1056/1057或原SIGINT超限。这些结果不代表上述未定位项已修复，不改变partial结论。
+
+#### 目标机逐步终端冒烟（Agent 操作）
+
+在独立临时 HOME/realpath cwd 启动本地 SSE，逐步操作真实终端：源码 REPL 输入 `read`，确认只读文件工具返回中文/emoji后回答；`/new` 后输入新问题、`/exit`，再用构建产物 `--resume` 选择旧会话编号2，输入 `after restart`；在 REPL `/resume` 中 Ctrl+C 返回原提示，最终 `/exit` 为0。整个过程仅4次本地模型请求（原工具往返2、新会话1、恢复后1），恢复请求保留原 tool 内容，未重放旧请求。实际扫描两文件合法、seq分别9/3、成功组2/1，两个锁均available。会话临时目录已在检查后清理，过程摘要与请求断言证据留本轮临时验证目录；不是用户本人独立操作或真实服务联调。
+
+#### 未完成事项、限制与 Git
+
+- **并行 SIGINT 验收阻塞**：一轮全量中，既有 `repl.test.ts` 源码 SIGINT 用例等待提示超过4秒；之后重复和全套通过，未再次拿到该次超限的根因证据。本轮已受控回归独立输出管道竞态、增加真实 I/O settle 诊断，但它们不能解释原始无下一提示的现象。未延长4秒窗口、未设置自动重试、未声称原超限已修复；在完成定位前T9不能签收。
+- **托管 CI 待执行**：已有可审查workflow，T7/T8/T9现按用户授权提交到阶段分支，尚未推送或运行托管CI，也未明确接受CI延后。T9保持partial/未勾选。T10、阶段状态收口、合并main、标签与发布都未进行。
+- 持久化正例只验证macOS arm64/Node24.14.0/本地文件系统；另验证真实Node22.22.0的非持久化兼容与持久化拒绝，未验证其他真实OS、共享挂载、硬件断电或真实模型；注入I/O不表示真实磁盘设备挂死，SIGKILL不证明断电耐久。advisory锁、非原子列表、无单行字节硬上限、事件循环须可运行等限制保持。
+- 提交前的开发交付快照：分支 `phase/04-session-persistence`、HEAD `c3cef76`；git status 为21个已跟踪修改、26个未跟踪文件（合计47），包括继承的T7/T8及research内容；T9新增9文件，改动8份结果文档及1份既有测试。暂存区为空，git diff --check通过；未提交/推送/合并/tag。research SHA-256仍为 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`，上级plan.md仍为 `f2960054989e3d2f6f28658eb8508d01e40bf8b2eca33de814d49a24bbab353b`；不访问真实~/.yucli，不读取项目.env，不产生付费请求。
+
+
+### T7/T8/T9 提交补记（2026-11-02）
+
+用户明确授权“把T7/8/9提交到阶段分支”。本次按入场快照拆分提交，不改生产实现、不重写已有历史：
+
+- T7：`57b7a27`，持久化turn协调、30秒操作期限、5秒故障收尾监督及对应测试/文档，含超时后取锁前守卫修正。
+- T8：`7879725`，SessionStore/list、CLI/picker/持久化REPL及对应测试/文档，含最近成功turn的profile提示修正。
+- T9：本次提交真实进程/PTY/故障验收、CI定义、测试观察修订及实际结果；提交hash在交付回复中报告。T9仍为partial/未勾选，原SIGINT 4秒观察超限未定位、托管CI未运行；本次提交授权不代表签收或接受CI延后。T10未进入。
+
+提交前在目标macOS arm64 / Node24.14.0 / pnpm10.33.2再次实际执行：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test --reporter=default --reporter=json --outputFile=/var/folders/fx/88817gmd5vz2tz4q5s_kzn_w0000gn/T/yucli-t789-commit-73pplbr9/commit-verification.json'
+```
+
+typecheck/lint/build通过，27文件/1057项全部通过，失败/跳过/pending/todo均0，Vitest耗时36.87秒；git diff --check和本地文档链接检查通过。没有重试、skip或改生产行为；本次全绿不改变原SIGINT超限仍未定位、CI未运行的partial结论。
+
+README的既有阶段03状态hunk只保留在工作区，不纳入T7/T8/T9；research原有修改不编辑、不暂存、不提交，上级plan.md不修改。仅在phase/04-session-persistence本地提交，未推送、合并main或创建标签；历史报告中的“未提交”均指当时交付状态。

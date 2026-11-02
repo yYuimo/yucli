@@ -1,0 +1,91 @@
+name: Verify yucli on macOS arm64
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    # runner-images 的 macos-15 是 arm64；运行时再断言，禁止换到 Intel 后 skip 冒充通过。
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      OPENCODE_GO_API_KEY: ""
+      OPENCODE_GO_BASE_URL: http://127.0.0.1:1/v1
+      YUCLI_VERIFY_OUTPUT: ${{ runner.temp }}/yucli-verification
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.14.0
+          architecture: arm64
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - name: Verify target platform and test prerequisites
+        shell: bash
+        run: |
+          node --input-type=module -e 'import assert from "node:assert/strict"; assert.equal(process.platform, "darwin"); assert.equal(process.arch, "arm64"); assert.equal(process.versions.node, "24.14.0");'
+          test "$(pnpm --version)" = "10.33.2"
+          python3 --version
+          xcode-select -p
+      - name: Install and confirm native flock
+        shell: bash
+        run: |
+          pnpm install --frozen-lockfile
+          node -e 'const assert = require("node:assert/strict"); assert.equal(typeof require("fs-ext").flock, "function");'
+      - name: Typecheck, lint, build and run all tests
+        shell: bash
+        run: |
+          mkdir -p "$YUCLI_VERIFY_OUTPUT"
+          pnpm typecheck 2>&1 | tee "$YUCLI_VERIFY_OUTPUT/typecheck.log"
+          pnpm lint 2>&1 | tee "$YUCLI_VERIFY_OUTPUT/lint.log"
+          pnpm test --reporter=default --reporter=json --outputFile="$YUCLI_VERIFY_OUTPUT/vitest.json" 2>&1 | tee "$YUCLI_VERIFY_OUTPUT/test.log"
+      - name: Retain verification results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yucli-macos-arm64-verification
+          path: ${{ env.YUCLI_VERIFY_OUTPUT }}
+          if-no-files-found: warn
+
+  unsupported-environment:
+    # 明确验证非目标环境的兼容/拒绝行为；不在这些环境 skip 后冒充完整持久化验收。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            node: 24.14.0
+          - runner: windows-2025
+            node: 24.14.0
+          - runner: macos-15-intel
+            node: 24.14.0
+          - runner: macos-15
+            node: 22.22.0
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    env:
+      OPENCODE_GO_API_KEY: ""
+      OPENCODE_GO_BASE_URL: http://127.0.0.1:1/v1
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+      - name: Install optional native dependency and build
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Verify help/prompt and explicit persistence rejection
+        run: pnpm exec tsx tests/fixtures/session-platform-smoke.ts

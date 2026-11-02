@@ -1,6 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,13 +9,14 @@ import { completion, completionSse, readJson, sseFrame, startServer, streamChunk
 const source = fileURLToPath(new URL("../src/bootstrap/cli.ts", import.meta.url));
 const built = fileURLToPath(new URL("../dist/bootstrap/cli.js", import.meta.url));
 const tsx = fileURLToPath(new URL("../node_modules/tsx/dist/loader.mjs", import.meta.url));
+const observer = fileURLToPath(new URL("./fixtures/repl-observer-preload.ts", import.meta.url));
 type WireMessage = { role: string; content?: string; tool_call_id?: string; tool_calls?: { id: string }[] };
 
 describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
   let cwd: string;
   let server: Awaited<ReturnType<typeof startServer>>;
   let requests: { messages: WireMessage[]; stream: boolean }[];
-  const children: ReturnType<typeof spawn>[] = [];
+  const children: { child: ChildProcessWithoutNullStreams; done: Promise<number | null> }[] = [];
   beforeEach(async () => {
     cwd = await mkdtemp(join(tmpdir(), "yucli-repl-"));
     await writeFile(join(cwd, "README.md"), "fixture file");
@@ -36,27 +37,43 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
     });
   });
   afterEach(async () => {
-    for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
+    for (const { child } of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    // 发送 SIGKILL 只提出终止请求；等真实 close 后再删除正文/锁，失败用例也不遗留写入者。
+    await Promise.all(children.map(({ done }) => done));
     children.length = 0;
     await server.close();
     await rm(cwd, { recursive: true, force: true });
   });
 
-  function launch(args: string[] = [], timeoutMs = "2000") {
-    const child = spawn(process.execPath, [...(mode === "source" ? ["--import", tsx, source] : [built]), ...args], {
+  function launch(args: string[] = [], holdCancellation = false) {
+    const child = spawn(process.execPath, [...(mode === "source" ? ["--import", tsx] : []), "--import", observer, mode === "source" ? source : built, ...args], {
       cwd, env: { PATH: process.env.PATH, HOME: cwd, OPENCODE_GO_API_KEY: "fake-key", OPENCODE_GO_BASE_URL: server.baseUrl,
-        YUCLI_REQUEST_TIMEOUT_MS: timeoutMs }, stdio: ["pipe", "pipe", "pipe"],
-    });
-    children.push(child);
+        YUCLI_REQUEST_TIMEOUT_MS: "2000", YUCLI_TEST_TARGET: mode,
+        ...(holdCancellation ? { YUCLI_TEST_HOLD_CANCEL: "1" } : {}) }, stdio: ["pipe", "pipe", "pipe", "ipc"],
+    }) as ChildProcessWithoutNullStreams; // 三条标准流显式为 pipe；IPC 不改变它们的非空保证。
     let stdout = "";
     let stderr = "";
+    const stages: { stage: string; id: number; ms: number }[] = [];
+    child.on("message", (stage: typeof stages[number]) => { stages.push(stage); });
     child.stdout.setEncoding("utf8").on("data", (data: string) => { stdout += data; });
     child.stderr.setEncoding("utf8").on("data", (data: string) => { stderr += data; });
     const done = new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    void done.catch(() => {});
+    children.push({ child, done });
     async function waitFor(predicate: () => boolean) {
       const until = Date.now() + 4000;
       while (!predicate()) {
-        if (Date.now() > until) throw new Error(`child observation timed out: ${stdout} / ${stderr}`);
+        if (Date.now() > until) {
+          const names = await readdir(join(cwd, ".yucli", "sessions")).catch(() => []);
+          const records = await Promise.all(names.map(async (name) => {
+            const bytes = await readFile(join(cwd, ".yucli", "sessions", name), "utf8");
+            return bytes.trimEnd().split("\n").map((line) => {
+              try { const row = JSON.parse(line); return { seq: row.seq, type: row.type, role: row.payload?.role, outcome: row.payload?.outcome }; }
+              catch { return { type: "incomplete_record" }; }
+            });
+          }));
+          throw new Error(`child observation timed out: ${stdout} / ${stderr} / exit ${child.exitCode}/${child.signalCode} / observed-prefix ${JSON.stringify(records)} / stages ${JSON.stringify(stages)}`);
+        }
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
     }
@@ -66,7 +83,7 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
       child.stdin.write(`${text}\n`);
       await waitFor(() => prompts() > before);
     }
-    return { child, done, waitFor, line, prompts, out: () => stdout, err: () => stderr };
+    return { child, done, waitFor, line, prompts, out: () => stdout, err: () => stderr, stages };
   }
 
   it("连续两轮携带完整历史，命令/空行不请求；clear 后丢弃历史", async () => {
@@ -121,11 +138,17 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
   });
 
   it.each(["fail", "timeout"])("%s 保留部分屏幕文本，失败 turn 不提交历史，下一轮可用", async (kind) => {
-    const ctx = launch([], "60");
+    // 协议失败与请求期限分开验证；正常 good/next 不能共用原来的 60 ms 竞速预算。
+    // timeout 用真实挂起的响应等待本文件共用的 2000 ms 期限，不延长 4 秒观察 watchdog。
+    const ctx = launch();
     await ctx.waitFor(() => ctx.prompts() === 1);
     await ctx.line("good");
+    expect(ctx.out()).toContain("ok\nyucli> ");
+    expect(ctx.err()).not.toMatch(/超时|缺少 message end/u);
     await ctx.line(kind === "fail" ? "fail" : "hang");
-    expect(ctx.err()).not.toBe("");
+    const expectedError = kind === "fail" ? "流式响应缺少 message end。" : "模型请求超时（2000 ms）。";
+    // stdout/stderr 是两条独立管道，下一提示到达不保证安全错误文本也已被父进程读到。
+    await ctx.waitFor(() => ctx.err().includes(expectedError));
     expect(ctx.out()).toContain("partial\nyucli> ");
     await ctx.line("next");
     expect(requests.at(-1)?.messages).toEqual([
@@ -133,15 +156,31 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
     ]);
     ctx.child.stdin.write("/exit\n");
     expect(await ctx.done).toBe(0);
+    const names = await readdir(join(cwd, ".yucli", "sessions"));
+    const rows = (await readFile(join(cwd, ".yucli", "sessions", names[0]!), "utf8"))
+      .trimEnd().split("\n").map((line) => JSON.parse(line) as { type: string; payload: unknown });
+    expect(rows.filter((row) => row.type === "turn_end").map((row) => row.payload)).toEqual([
+      { outcome: "success" },
+      { outcome: kind === "fail" ? "failed" : "timeout", error: {
+        category: kind === "fail" ? "model" : "timeout",
+        code: kind === "fail" ? "invalid_response" : "request_timeout",
+        message: kind === "fail" ? "模型响应不符合契约。" : "模型请求超时。",
+      } },
+      { outcome: "success" },
+    ]);
   });
 
   it("活跃 SIGINT 取消并恢复提示，半截 turn 不提交；闲置 SIGINT 退出 130", async () => {
-    const ctx = launch();
+    const ctx = launch([], true);
     await ctx.waitFor(() => ctx.prompts() === 1);
     ctx.child.stdin.write("hang\n");
     await ctx.waitFor(() => ctx.out().includes("partial"));
     ctx.child.kill("SIGINT");
-    await ctx.waitFor(() => ctx.prompts() === 2);
+    // 明确构造 stdout 先到、stderr 后到；不靠负载或固定 sleep 碰运气复现管道乱序。
+    await ctx.waitFor(() => ctx.prompts() === 2 && ctx.stages.some((item) => item.stage === "stderr:held"));
+    expect(ctx.err()).not.toContain("取消");
+    ctx.child.send({ release: "cancel_notice" });
+    await ctx.waitFor(() => ctx.prompts() === 2 && ctx.err().includes("取消"));
     expect(ctx.err()).toContain("取消");
     await ctx.line("next");
     expect(requests.at(-1)?.messages).toEqual([{ role: "user", content: "next" }]);
