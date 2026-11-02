@@ -72,6 +72,8 @@ interface StreamTurnResult {
 
 上述扩展在实现和验收前保持 `draft`，阶段 03 的 accepted 行为仍以本文件前文为准。
 
+T7 子集已验证：core/runPersistentTurn 交付保存确认后的 CommittedTurnResult；bootstrap/PersistenceSupervisor 提供可注入的停止输入、业务取消、真实关闭及 5 秒应急退出监督。当前 repl.ts 仍是阶段 03 的内存路径，尚未接入凭证、SessionCleanup 或监督回调；这些输入/信号/历史替换的产品接线归 T8，不把单元级监督验证视为 REPL 已持久化。
+
 关联文档：[阶段 03 规格](../specs/phase-03-repl-streaming.md)、[CLI 契约](cli.md)。
 
 ## 实现与验证

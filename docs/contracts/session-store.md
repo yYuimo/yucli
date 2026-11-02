@@ -120,6 +120,12 @@ interface SessionWriter {
   close(): Promise<void>;
 }
 
+type CommittedTurnResult = {
+  status: "committed";
+  turnId: string;
+  result: StreamTurnResult;
+};
+
 interface SessionStore {
   create(cwd: string): Promise<OpenedSession>;
   openWrite(input: { sessionId: string; cwd: string }): Promise<OpenedSession>;
@@ -227,7 +233,7 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存储恢复/修复，T6 追加 core 事实交付/纯模型投影；本文整体仍为 draft，完整 SessionStore/list、协调器和持久化 CLI 仍待后续任务。
+T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存储恢复/修复，T6 追加 core 事实交付/纯模型投影，T7 追加协调器/操作期限/可注入故障监督；本文整体仍为 draft，完整 SessionStore/list、产品 CLI 接线和真实退出子进程验收仍待后续任务。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
@@ -274,6 +280,15 @@ T2 锁能力已实现，后续 T3/T4/T5 分别追加扫描、文件/writer、存
 - [toolMessage.ts](../../src/core/toolMessage.ts) 提供实时/兼容路径和恢复共用的 `toolResultToMessage`；[sessionHistory.ts](../../src/core/sessionHistory.ts) 的 `projectSessionHistory(turns: readonly RecoveredTurn[]): Message[][]` 只消费 T5 已验证的成功组，按文件顺序整组取最后 20 个，显式复制模型字段与嵌套调用。失败/取消/超时/中断由 T5 排除，不另造 outcome，不把 seq/assistantId/profile/ok 送入模型，不重跑工具或请求。
 - adapter 继续只返回业务快照，不 import core；当前没有 bootstrap 恢复/持久化接线。目标环境新增 57 项测试，17 个文件、749 项及 typecheck/lint/build 全部通过；T6 已获用户授权独立提交，完整报告见阶段规格。
 
+## T7 协调与操作/收尾期限实现状态（2026-10-29）
+
+- [runPersistentTurn.ts](../../src/core/runPersistentTurn.ts) 接收对象输入（writer、turnId、runtimeProfile、client、registry、model、history、prompt、onText、可选 signal），不生成身份。它是唯一 user/turn_end 所有者：先确认 user，再用 T6 sink 桥接 writer；最终 assistant 确认后观察取消并固定 outcome，只在唯一 turn_end(success) 确认后返回 CommittedTurnResult。终止保存等待期间不再观察/改写 outcome；业务失败保存安全终止后重抛原异常，PersistenceError 在每个保存点原样穿透、不补终止/重试。history 始终由调用方持有。
+- 安全错误配对严格使用规格 §6 的既定码。所有落盘 message 为固定安全摘要，不复制原始 Error.message/stack/responseSummary；HTTP 状态仅在 http 且为 100–599 整数时复制。已取消的 signal 不传入 append；最终 assistant 保存期间发生取消仍可在固定终止前生效，固定后不再变更。
+- [sessionOperation.ts](../../src/adapters/session/sessionOperation.ts) 的 SessionOperations 给 create/openWrite/appendDurable/close 设置固定 30,000 ms 总等待，单调时钟及 schedule 可注入，默认定时器不 unref。list 只保留同一操作名类型，无列表实现。计时含排队与内部步骤；超时永久固定共享 io_timeout、阻止后继 I/O，保留原 Promise 并观察晚到成功/拒绝，不取消底层调用、不确认迟到写入。
+- 文件 adapter 的 preparing 和 writer 的 tail 继续登记原 Promise；不能改为登记已超时的等待 Promise。SessionCleanup.closeSettled 是故障/内部清理专用能力：停止新操作，等待真实 settle，再关正文/备份/目录 fd、最后释放锁。它不受业务 close 的 30 秒等待 Promise 影响，必须由 bootstrap 的 5 秒监督约束；不是供业务绕过期限的第二个普通 close。
+- [persistenceSupervisor.ts](../../src/bootstrap/persistenceSupervisor.ts) 首次故障固定原异常、唯一 5,000 ms 总期限和重入结果，调用注入的 stopInput/cancel/真实 close 回调。资源证实关闭则返回 5；挂起或关闭失败到期输出固定安全摘要并调用注入 exit(5)，不提前解锁。迟到拒绝持续观察；输出/取消失败不覆盖初始故障。生产组合根实际注入 process.exit、输入控制与信号接线留 T8/T9，本轮单元测试使用退出替身。
+- 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下新增 79 项、3 个测试文件，全部 20 文件/828 项及 typecheck/lint/build 通过。验证含真实临时文件/T2 锁、本地 mock SSE、可控 Promise/时钟；T7 未提交待审查，不表示 T8 产品持久化入口或 T9 真实退出子进程已验收。
+
 ## 错误和退出映射
 
 `SessionAccessError` 表示尚未取得写入权或会话本身不可恢复，例如 `session_busy`、`not_found`、`cwd_mismatch`、`unsupported`、`corrupt`、`invalid_identity`、`permission_denied` 和 `platform_unsupported`。直接 ID 或 `--continue` 失败退出 5；picker 中的候选访问拒绝回到选择器并保留原会话。
@@ -295,5 +310,5 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 已实现 T2–T6：`src/contracts/session.ts`、`src/contracts/session-lock.ts`、`src/adapters/session/` 内锁/扫描/writer/恢复修复，以及 core 事实交付/纯模型投影；完整 store/list、`src/core/runPersistentTurn.ts` 和 CLI 接线待后续任务
+- 已实现 T2–T7 子集：contracts 会话业务数据/提交凭证、adapters 的锁/扫描/writer/恢复修复/操作期限，以及 core 事实交付/纯投影/持久化协调和 bootstrap 可注入故障监督；完整 store/list、实际 CLI 接线及退出子进程验收待后续任务
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收

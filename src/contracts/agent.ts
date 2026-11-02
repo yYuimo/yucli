@@ -45,7 +45,8 @@ export interface AgentLoopResult {
 }
 
 /**
- * 流式 turn 完整成功的交付结果，由 runTurnStream 创建、REPL 提交到内存历史。
+ * 流式 turn 完整成功的临时交付结果，由 runTurnStream 创建；非持久化 REPL 可以直接提交。
+ * 持久化路径必须等 runPersistentTurn 保存 turn_end 后交付 CommittedTurnResult，才可提交历史。
  * 继承阶段 02 成功结果的文本、次数、工具结果与停止原因，不增加失败状态。
  * 流中途失败会抛异常，没有可提交结果；屏幕已经显示的片段不会自动变成历史。
  */

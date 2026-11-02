@@ -14,7 +14,7 @@ import { toolResultToMessage } from "./toolMessage.js";
  * 在已有完整历史之后完成一个用户 turn，必要时执行多批只读工具，直到生成最终文本。
  * CLI/REPL 调用；history 是旧消息快照，prompt 保留原文，onText 将每个文本片段交给 bootstrap。
  * client/registry 为注入能力，options 默认 8/4，signal 覆盖该 turn 的全部模型和工具操作。
- * context 可选，存在时逐条 await assistant/工具事实屏障；user/turn_end 由后续协调方保存。
+ * context 可选，存在时逐条 await assistant/工具事实屏障；user/turn_end 由 runPersistentTurn 保存。
  * 返回完整 StreamTurnResult（含本 turn 新增消息），成功之前不修改 history、不提交半截结果。
  * 异步迭代完整成功后才允许执行工具；全批预检、按序执行、最后一轮不执行工具沿用阶段 02。
  * 协议/额度、工具内部错误、模型失败和取消通过稳定异常传播；保存故障原样穿透。
@@ -72,7 +72,7 @@ export async function runTurnStream(
     if (context) await context.facts.record({ type: "assistant", turnId: context.turnId, assistantId, message });
 
     // 5. 没有工具调用意味着模型已完成回答。把最终 assistant 也纳入消息组后，
-    // 一次性返回完整结果；持久化路径仍须由后续协调方固定 outcome、保存 turn_end 才可提交。
+    // 一次性返回完整结果；持久化路径仍须由协调方固定 outcome、保存 turn_end 才可提交。
     if (!calls.length) {
       appendedMessages.push(message);
       return { finalText: message.content ?? "", modelCalls, toolResults, appendedMessages, stopKind: "final_text" };

@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-阶段 04 扩展状态：`draft`（T6 core 事实交付和纯模型投影已实现、验证并获用户授权提交；T7 协调器和 T8 CLI 接线尚未实现）
+阶段 04 扩展状态：`draft`（T6 已提交；T7 协调器/期限/可注入监督已验证、待审查；T8 CLI 接线尚未实现）
 
 适用阶段：阶段 02/03，只读 `read_file`、非流式 AgentLoop 与流式 turn；阶段 04，带持久化事实交付的流式 turn。
 
@@ -187,6 +187,10 @@ user → assistant → tool_start → tool_result 或 tool_end → … → turn_
 - 非法输出或真正内部异常使用固定安全摘要的 `ToolExecutionError`（`category=tool`、`code=tool_execution_failed`），不归 protocol_error，不保存原始 Error。已分类的取消/工具错误保持身份；PersistenceError 原样穿透。sink 的 assistant/start/result 保存位于业务 catch 外，end 保存拒绝也直接抛出，不能递归保存终止或重试。
 - [toolMessage.ts](../../src/core/toolMessage.ts) 的纯 `toolResultToMessage` 由流式、非流式兼容路径和恢复历史共用；显式复制 role/toolCallId/name/content，剔除 ok、seq、callMessageSeq、runtimeProfile 等存储字段。[sessionHistory.ts](../../src/core/sessionHistory.ts) 的 `projectSessionHistory` 接收 T5 校验后的 `readonly RecoveredTurn[]`，返回最近最多 20 个完整 success 的 `Message[][]`；组内顺序不变，独立复制嵌套调用，不读取文件或重放执行。
 - 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下新增 57 项、2 个测试文件；全部 17 个文件、749 项测试及 typecheck/lint/build 通过。使用本地 mock SSE 和临时存储，实时结果经 writer/恢复后投影与原消息组一致；无生产假模型客户端或真实模型请求。完整范围与未验证边界见阶段规格的 T6 记录。
+
+### T7 协调边界（2026-10-29）
+
+`runPersistentTurn` 已成为 user 和唯一 turn_end 的所有者，T6 的逐项工具事实与结果取消边界保持不变。任何保存点的 PersistenceError 直接终止协调，不递归写 tool_end/turn_end；普通工具内部错误在 tool_end 确认后由协调方固定 failed/tool/tool_execution_failed，保存唯一 turn_end 后重抛原 ToolExecutionError。成功终止确认后只交付 CommittedTurnResult，当前 CLI/REPL 尚未使用该凭证接线。30 秒操作期限、5 秒故障监督及实际验证范围见会话契约/阶段规格；不新增工具执行期限或 tool_timeout。
 
 ## OpenCode Go 映射
 

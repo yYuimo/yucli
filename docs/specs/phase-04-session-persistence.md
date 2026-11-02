@@ -4,9 +4,9 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2 锁、T3 扫描、T4 文件/writer、T5 存储恢复/修复及 T6 core 交付/纯模型投影。T5/T6 已通过验证，并获用户授权分开提交，阶段保持 `implementing`，T7–T10 未开始。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调、操作期限及可注入故障监督。T5/T6 已提交，T7 通过目标验证、未提交待审查，阶段保持 `implementing`，T8–T10 未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T6 的授权范围，不将调研探针、存储或 core 子集验证视为整个阶段的应用验收；T5 仅交付成功 turn 的业务快照，T6 交付纯模型消息投影，不包含 T7 协调器或 T8 接线。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T7 的授权范围，不将调研探针、存储、core 或监督模块子集验证视为整个阶段的应用验收；T5 交付成功 turn 业务快照，T6 交付纯模型投影，T7 交付唯一终止协调和期限监督能力，不包含 T8 CLI/REPL 接线或 T9 退出子进程/完整矩阵。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -295,7 +295,7 @@ success 不带 error；其余 outcome 必须带匹配分类的 error。当前读
 
 ### 有序事实及跨层接口
 
-以下声明是待实现接口，正式代码应放入 contracts，并按项目规范补中文职责、字段与方法注释。现有 AssistantMessage、TextMessage、ToolResult、StreamTurnResult 的定义继续使用；类型声明不代替运行时校验。
+以下声明包含已实现与后续规划的接口，具体状态以任务清单/实际结果为准；正式代码放入 contracts，并按项目规范补中文职责、字段与方法注释。现有 AssistantMessage、TextMessage、ToolResult、StreamTurnResult 的定义继续使用；类型声明不代替运行时校验，尚无完整 SessionStore/list 实现。
 
 ```ts
 type RuntimeProfile = { provider: string; model: string };
@@ -575,7 +575,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 - [x] **T4 文件与 writer**：实现目录/身份/权限、wx 创建、短写与 sync、seq/assistantId 映射、失败状态及 close；新增可控 I/O/时钟注入，不引入生产假模型客户端。目标 Node 下新增 69 项测试，T3 双扫描入口验证实际字节；创建资源收尾已覆盖，恢复/修复、core 屏障和退出监督仍属 T5–T7。
 - [x] **T5 恢复与修复（存储范围）**：持锁重新定位/扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 业务快照、已有文件续写与资源收尾；失败不发模型请求、不自动重放。成功 turn 的纯模型投影不在本任务，已正式移至 T6。新增 102 项测试，目标 Node 下全部 692 项通过；实现已获用户授权独立提交。
 - [x] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。新增 57 项、2 个测试文件，目标环境全部 17 文件/749 项及 typecheck/lint/build 通过；已获用户授权独立提交，不含 T7/T8。
-- [ ] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出。
+- [x] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出能力。新增 79 项、3 个测试文件，目标环境 20 文件/828 项及 typecheck/lint/build 通过；未提交待审查。监督通过注入回调/退出能力验证，实际 CLI/REPL 接线和真实退出子进程仍归 T8/T9。
 - [ ] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。
 - [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。
 - [ ] **T10 文档与完成审查**：按实测结果更新本文件、README、architecture、契约与依赖说明；报告保留限制和未验证环境，审核中文注释、Git diff 和阶段分支。只有验证完成才转 verified，用户审查后再转 done/申请集成。
@@ -1011,3 +1011,77 @@ T6 无部分项或阻塞。未实现 T7 的 runPersistentTurn/user/唯一 turn_e
 - T6 以独立提交记录 core 交付/纯模型投影、对应测试与契约/架构/规格。实现范围仍为上述 14 文件；提交收口另同步 README.md、docs/README.md 的任务进度，共 16 文件，不改变代码。
 - T6 的准确暂存树也导出到独立临时目录，目标 Node 24.14.0/pnpm 10.33.2 下重新通过 typecheck、lint、build 和 17 文件/749 项测试；两个提交的阶段边界均已独立验证。
 - README 中与阶段 03 集成说明相关的既有 hunk、research 原有修改和上级 plan.md 保留不提交。T5/T6 共享文件按任务边界拆分，原有 T5 adapter/测试内容保持不变。
+
+### T7 协调与退出监督实际结果（2026-10-29）
+
+状态：`completed`（仅本轮 T7 范围，未提交待审查）。已完成：持久化 turn 协调、当前公开存储操作的 30 秒等待、可注入的 5 秒故障监督；部分完成：无；阻塞：无。阶段仍为 implementing，扩展契约仍为 draft；T8/T9 未实现、未勾选。
+
+#### 完成内容
+
+- `runPersistentTurn` 不生成身份，先确认含 runtimeProfile 的 user，再用 T6 的简单 sink 逐条 await writer。最终业务返回后、固定终止前检查取消；唯一 turn_end 保存确认后才返回 CommittedTurnResult，不直接提交或修改 history。
+- 普通业务失败使用规格既有配对，固定安全摘要后保存唯一非成功 turn_end，再重抛原异常；HTTP 状态只保留合法整数。PersistenceError 在 user/assistant/start/result/end/turn_end 全路径原样穿透，不递归终止、不重试，不用业务 signal 中断必要保存。终止保存期间的新取消不改变已固定 outcome。
+- SessionOperations 给 create/openWrite/appendDurable/close 的整个操作（含队列/内部 I/O）设置 30,000 ms 等待。首次超时固定共享 io_timeout 并拒绝后继操作/I/O，观察真实 Promise 晚到成功/拒绝，不把超时理解为已取消。list 仅保留同一操作名类型，没有伪造列表接口/实现。
+- 继续沿用准备登记、真实 tail、短写、同步和 T2 锁生命周期；超时 Promise 不替代原队列。公开 close 仍是 30 秒有界且幂等的等待，内部及故障监督用 SessionCleanup.closeSettled 等实际 I/O，再关正文/备份/目录、最后放锁；不提前解锁、不重试不确定关闭。
+- PersistenceSupervisor 在 bootstrap 层注入停止输入、取消、真实 close、时钟/计时器、输出和 exit。首次故障固定原分类、一个结果和 5,000 ms 总期限，重入/信号不重置；及时清理返回 5，挂起/关闭失败到期尽力输出固定安全摘要并调用注入 exit(5)。晚到失败仍观察，计时器不 unref。
+
+#### 实际修改文件
+
+T7 共 21 个文件：7 个新增、14 个修改；README 同时含入口前已有的阶段 03 说明 hunk，原样保留。另有 research 原有修改，不属于本轮改动。
+
+| 文件 | 变更 |
+| --- | --- |
+| `src/core/runPersistentTurn.ts`（新增） | 业务错误映射、唯一 user/turn_end、提交凭证及存储错误分流 |
+| `src/adapters/session/sessionOperation.ts`（新增） | 可复用操作等待、单调时钟/计时器、未决登记和故障 I/O 守卫 |
+| `src/bootstrap/persistenceSupervisor.ts`（新增） | 可注入 5 秒总收尾、保持原故障、应急退出调用及幂等重入 |
+| `src/contracts/session.ts`、`src/contracts/agent.ts` | CommittedTurnResult、PersistenceClock、操作名、SessionCleanup，以及临时结果/提交凭证职责 |
+| `src/adapters/session/SessionFileAdapter.ts`、`SessionWriterAdapter.ts` | 接入公开操作期限，保留真实准备/队列/关闭 Promise，实际收尾与公开等待分离 |
+| `src/core/runTurnStream.ts` | 仅同步协调方的中文职责注释，T6 执行算法不变 |
+| `tests/persistentTurn.test.ts`（新增） | 46 项协调/错误/取消/保存确认及真实 writer 恢复测试 |
+| `tests/persistenceDeadline.test.ts`（新增） | 26 项固定期限、迟到结果、真实 I/O/锁及 30 秒+5 秒组合测试 |
+| `tests/persistenceSupervisor.test.ts`（新增） | 7 项监督重入、关闭失败、迟到拒绝、时钟和应急退出测试 |
+| `tests/persistenceHelpers.ts`（新增） | 手动单调时钟、可控 Promise 和继续点测试辅助，无生产假客户端 |
+| `docs/specs/phase-04-session-persistence.md`、`docs/contracts/session-store.md`、`docs/architecture.md`、`docs/decisions/ADR-006-session-persistence.md` | T7 勾选、能力/资源边界和实际结果 |
+| `docs/contracts/tool-execution.md`、`docs/contracts/repl.md`、`docs/contracts/cli.md` | 同步协调器/凭证/监督的已实现子集，明确实际产品接线仍待 T8 |
+| `README.md`、`docs/README.md` | 仅更新 T7 任务状态，保留阶段 03 既有说明 |
+
+#### 关键设计选择
+
+- 协调器使用单个对象输入，身份/模型/摘要全部来自调用方；sink 严格只 await writer，不增加保存取消、重试或副作用。唯一终止保存放在业务 catch 外，避免保存失败被重新归类或触发第二次终止。
+- 安全日志统一使用固定文字，即便稳定业务异常自身含 message/responseSummary 也不复制；保留原异常对象仅用于向调用方重抛。unknown 甚至可以不是 Error，内部失败统一为 failed/internal/internal_error。
+- 30 秒是公开操作等待期限，5 秒是真实资源收尾总期限。为了让已超时的 close 仍能在后续 5 秒内真实完成，增加窄 SessionCleanup.closeSettled 能力；它只供内部/监督使用，由 5 秒计时保护，不绕过普通业务 close 的上限。
+- 创建器与 writer 共享首次超时状态，队列/短写/备份的下一 I/O 检查点拒绝后继工作；已发出的系统调用不被取消，不猜测其结果。实际 tail/preparing 保持到 settle，fd 尚在使用时不能关闭/放锁。
+- 5 秒监督先缓存唯一 Promise 再调用外部能力，保证同步重入也不重复启动。关闭拒绝不等于资源已释放，继续监督到期；应急退出只能由注入组合根能力执行，core/adapter 不调用 process.exit。
+- 未发现阻止实现的规格/契约缺失或冲突。没有更改磁盘格式、T2 锁算法、T3 扫描语义或 T6 工具执行算法。
+
+#### 验证命令与结果
+
+目标环境：macOS arm64、Node 24.14.0、pnpm 10.33.2。本轮完整执行：
+
+```sh
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test'
+```
+
+结果：typecheck、lint、build（clean 后 TypeScript 构建）和 **20 个测试文件、828 项测试全部通过**。T6 基线 17 文件/749 项；本轮新增 3 文件/79 项测试（另有 1 个非测试文件的辅助模块）。
+
+定向检查：改动接入后，既有 coreFacts/sessionRecovery/sessionWriter 的 3 文件/219 项通过；新增测试早期 3 文件/69 项通过，随后补齐最终 assistant 保存拒绝、确认丢失、真实失败投影及迟到 I/O 拒绝，用上述完整检查覆盖全部新增 79 项。初次新增测试 lint 报 prefer-const，修正测试重入 fixture 的声明后通过，没有忽略错误。
+
+本轮实际覆盖 C01–C07 的模块边界：user 未确认不请求模型，assistant/start/result/end 的保存等待不越界，success 未确认不交付凭证；所有稳定错误仅写一个正确终止并重抛原对象；每个保存点 PersistenceError 在并发取消时仍原样传播。模型/工具后失败、8 次模型额度、分派前取消、结果后取消、最终 assistant 保存中取消、固定 success/failed/cancelled/timeout 后的迟到取消均验证。实际 success 已落盘但确认丢失时不返回凭证、不重试，之后恢复依据真实磁盘证据。
+
+D06 存储/监督子集使用可控时钟和真实临时文件/T2 锁：create/openWrite/append/close 到期拒绝仍持锁，真实 I/O settle 前不关正文；迟到成功/失败均观察、排队/短写/备份不在超时后开始后继写入。公开 close 已超时后真实关闭若在 5 秒内完成可返回 5；永不 settle 的 append 经 30 秒+5 秒调用退出替身期间不解锁，重复故障不重置期限。默认计时器仍保持事件循环存活。
+
+审查修正：用户指出最后一次目录 I/O 迟到后，锁适配器不受文件 I/O 守卫覆盖，仍可能开始 acquire；创建 busy/身份碰撞重试也可能继续生成身份和取锁。新增 4 项回归测试先复现失败，再在 openFile/createFile 每次 acquire 前和创建重试循环顶部补 assertActive。验证取锁前超时后 acquire/UUID 不再调用、无 locks 容器/sidecar 或新正文；既有正文逐字节不变。重试只保留超时前已发出的取锁，碰撞清理仍正常释放原锁，不再开始新一轮。修正后目标环境完整 typecheck/lint/build、20 文件/828 项通过，T2 算法不变。
+
+全部测试使用本地 mock SSE、可控 Promise/时钟和显式临时存储。未读取项目 .env、访问真实 ~/.yucli、请求真实模型或新增生产假模型客户端；已有 CLI 子进程测试只是阶段 03 回归，不算 T7/T9 真实故障退出验收。
+
+#### 未完成事项与未验证边界
+
+T7 范围无部分项或阻塞。没有实现 T8 的完整 SessionStore/list、picker、--resume/--continue、/new、CLI/REPL 输入和信号接线或历史替换；没有修改 cli.ts/repl.ts/output.ts。当前 CLI 仍沿内存路径，生产 exit 能力和 stopInput/closeSettled 回调需要 T8 实际组装，ToolExecutionError/存储错误的输出映射仍待接线。
+
+T9 的完整阶段矩阵、真实 CLI 5 秒强制退出子进程、实际进程挂起/崩溃恢复均未验收；单元测试注入退出能力，不结束测试进程。只验证 macOS arm64/目标 Node/本地文件系统，未验证其他平台/Node、共享挂载或设备断电；JS 计时依赖事件循环可运行，不提供同步阻塞代码的抢占中断保证。既有 T3–T5 的无单行硬上限、advisory 锁和备份限制保持不变。
+
+#### Git 状态与保留修改
+
+- 分支保持 phase/04-session-persistence，入口 HEAD 为 `c3cef76`（T5/T6 文档收口），本轮没有暂存、commit、push、merge 或创建标签；全部 T7 改动留工作区待审查。
+- 工作树共 22 项：15 个已修改、7 个未跟踪，其中 T7 为上述 21 文件；research 的原有未提交修改保留，README 的阶段 03 既有 hunk 保留。
+- research SHA-256 保持 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`；上级 plan.md SHA-256 保持 `f2960054989e3d2f6f28658eb8508d01e40bf8b2eca33de814d49a24bbab353b`，未编辑上级文件。T5/T6 提交不改写。

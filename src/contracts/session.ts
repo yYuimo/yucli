@@ -1,10 +1,38 @@
 /**
  * contracts 层的会话业务数据、写入能力与稳定异常。存储 adapter 校验 JSON 后创建恢复数据，
- * T6 core 只消费这里的业务消息，不接触磁盘 seq、文件句柄或 JSONL。
+ * core 通过业务事实/提交凭证协调保存，不接触磁盘 seq、文件句柄或 JSONL。
  * 类型声明在运行时会被擦除；它们不能替代 T3 扫描器的 schema/生命周期检查。
  */
 import type { AssistantMessage, TextMessage } from "./message.js";
 import type { ToolResult } from "./tool.js";
+import type { StreamTurnResult } from "./agent.js";
+
+/** 持久化协调方在唯一成功 turn_end 同步确认后创建；调用方只有取得此凭证才可提交历史。 */
+export interface CommittedTurnResult {
+  /** 固定成功提交状态，不能用裸 StreamTurnResult 代替保存确认。 */
+  status: "committed";
+  /** 调用方提供的新 turn 身份；协调方不生成身份或继续旧执行。 */
+  turnId: string;
+  /** 已完成的业务消息组；凭证不直接修改 REPL 的历史数组。 */
+  result: StreamTurnResult;
+}
+
+/** adapter 的操作期限与 bootstrap 的故障监督共用的时间能力；测试提供可控实现。 */
+export interface PersistenceClock {
+  /** 返回单调毫秒时间，仅用于期限；不能用日志 ISO 展示时间代替。 */
+  now(): number;
+  /** 安排仍能保持进程存活的定时回调，返回取消该定时器的函数；不得 unref。 */
+  schedule(delayMs: number, callback: () => void): () => void;
+}
+
+/** 公开存储操作的机器名；list 只预留同一期限类型，不表示产品列表已实现。 */
+export type SessionOperation = "create" | "open_write" | "append" | "close" | "list";
+
+/** 故障监督使用的真实资源收尾能力，区别于有 30 秒等待上限的业务 close。 */
+export interface SessionCleanup {
+  /** 停止新操作，等实际 I/O settle 后关闭资源/释放锁；由外层 5 秒监督，不另设等待期限。 */
+  closeSettled(): Promise<void>;
+}
 
 /** user 外层的运行摘要；创建方显式提供，读取旧记录时允许整个摘要缺失。 */
 export interface RuntimeProfile {
@@ -75,7 +103,7 @@ export type CoreTurnFact = { turnId: string } & (
 );
 
 /**
- * 执行 core 交付已校验事实的保存能力，由未来协调方桥接 SessionWriter。
+ * 执行 core 交付已校验事实的保存能力，由 runPersistentTurn 桥接 SessionWriter。
  * 不接收取消 signal：已取得结果或固定终止事实必须等待保存，不因业务取消丢失。
  */
 export interface TurnFactSink {
@@ -94,14 +122,14 @@ export interface TurnExecutionContext {
   facts: TurnFactSink;
 }
 
-/** user/turn_end 的业务所有者是后续协调方；writer 消费此数据，不负责执行业务。 */
+/** user/turn_end 的唯一业务所有者是 runPersistentTurn；writer 消费数据，不负责执行业务。 */
 export type TurnFact = CoreTurnFact | ({ turnId: string } & (
   | { type: "user"; message: TextMessage & { role: "user" }; runtimeProfile: RuntimeProfile }
   | { type: "turn_end"; end: TurnEnd }
 ));
 
 /**
- * 会话的有序保存能力，由文件 adapter 创建，后续协调方逐条 await 使用。
+ * 会话的有序保存能力，由文件 adapter 创建，协调方逐条 await 使用。
  * 不暴露文件句柄、锁或取消 signal；类型检查不能替代 writer 的运行时契约校验。
  */
 export interface SessionWriter {
@@ -114,7 +142,8 @@ export interface SessionWriter {
 
   /**
    * 首次调用停止接受新事实，等待已发出的 I/O，关闭正文后才释放写锁。
-   * 重复调用等待同一结果；关闭失败抛 close_failed，不能假装锁已安全释放。
+   * 重复调用等待同一结果；关闭失败抛 close_failed，30 秒未确认抛 io_timeout。
+   * 超时不表示资源已关闭；bootstrap 用 SessionCleanup 的真实 settle 能力继续监督。
    */
   close(): Promise<void>;
 }

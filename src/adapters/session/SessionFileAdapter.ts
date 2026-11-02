@@ -2,13 +2,14 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { OpenedSession, SessionMeta } from "../../contracts/session.js";
+import type { OpenedSession, PersistenceClock, SessionCleanup, SessionMeta } from "../../contracts/session.js";
 import { PersistenceError, SessionAccessError } from "../../contracts/session.js";
 import { SessionLockAdapter } from "./SessionLockAdapter.js";
 import { SessionWriterAdapter, type SessionDirectories } from "./SessionWriterAdapter.js";
 import { fileErrorCode, nodeSessionFileIO, requirePrivateSessionPath, SessionIdentityCollision, type SessionFileIO } from "./sessionFileIO.js";
 import { validateSessionHeader } from "./sessionSchema.js";
 import { parseSessionBasename, requireSessionId } from "./sessionFilename.js";
+import { SessionOperations } from "./sessionOperation.js";
 
 /** bootstrap/临时目录测试的组装项；不新增 CLI/env 覆盖项，不注入模型或业务执行器。 */
 export interface SessionFileOptions {
@@ -22,13 +23,15 @@ export interface SessionFileOptions {
   uuid?: () => string;
   /** Pick 只暴露已有 T2 的预检/取锁能力，须组装相同根；默认使用真实 adapter，不复制锁算法。 */
   locks?: Pick<SessionLockAdapter, "preflight" | "acquire">;
+  /** T7 操作期限的单调时钟/计时器；固定 30 秒，不是用户可配置时长。 */
+  clock?: PersistenceClock;
 }
 
 /**
  * 管理创建中及已交付的全部文件资源；创建失败也不能遗漏未返回句柄的锁/正文。
- * 提供 T4 创建与 T5 恢复边界；列表和超时监督不在这里预设假实现。
+ * 提供 T4/T5 存储与 T7 操作期限；实际进程退出由 bootstrap 监督，列表不预设假实现。
  */
-export class SessionFileAdapter {
+export class SessionFileAdapter implements SessionCleanup {
   private readonly root: string;
   private readonly io: SessionFileIO;
   private readonly now: () => Date;
@@ -37,11 +40,14 @@ export class SessionFileAdapter {
   private readonly resources = new Set<SessionWriterAdapter>();
   private readonly preparing = new Set<Promise<OpenedSession>>();
   private closing: Promise<void> | undefined;
+  private closeWait: Promise<void> | undefined;
+  private readonly operations: SessionOperations;
 
   /** 保存注入依赖，构造不加载 native 或创建目录；默认时钟/UUID 在实际操作时才取值。 */
   constructor(options: SessionFileOptions = {}) {
     this.root = resolve(options.storageRoot ?? join(homedir(), ".yucli"));
-    this.io = { ...nodeSessionFileIO, ...options.io };
+    this.operations = new SessionOperations(options.clock);
+    this.io = this.operations.guard({ ...nodeSessionFileIO, ...options.io });
     this.now = options.now ?? (() => new Date());
     this.uuid = options.uuid ?? randomUUID;
     this.locks = options.locks ?? new SessionLockAdapter({ storageRoot: this.root });
@@ -54,11 +60,7 @@ export class SessionFileAdapter {
    */
   create(cwd: string): Promise<OpenedSession> {
     if (this.closing) return Promise.reject(new PersistenceError("contract_violation", "create", "文件 adapter 已开始关闭。"));
-    const task = this.createFile(cwd);
-    this.preparing.add(task);
-    // 两个分支都只移除已经 settle 的登记，保留原 Promise 给调用方观察失败。
-    void task.then(() => this.preparing.delete(task), () => this.preparing.delete(task));
-    return task;
+    return this.operations.run("create", () => this.prepare(this.createFile(cwd)));
   }
 
   /**
@@ -68,7 +70,11 @@ export class SessionFileAdapter {
    */
   openWrite(input: { sessionId: string; cwd: string }): Promise<OpenedSession> {
     if (this.closing) return Promise.reject(new PersistenceError("contract_violation", "open_write", "文件 adapter 已开始关闭。"));
-    const task = this.openFile(input.sessionId, input.cwd);
+    return this.operations.run("open_write", () => this.prepare(this.openFile(input.sessionId, input.cwd)));
+  }
+
+  /** 登记原准备 Promise 而非 30 秒等待 Promise；晚到的成功/失败都观察并在真实 settle 后移除。 */
+  private prepare(task: Promise<OpenedSession>): Promise<OpenedSession> {
     this.preparing.add(task);
     void task.then(() => this.preparing.delete(task), () => this.preparing.delete(task));
     return task;
@@ -98,16 +104,19 @@ export class SessionFileAdapter {
       if (identities.length === 0) throw new SessionAccessError("not_found", "open_write", "找不到指定会话正文。");
       if (identities.length !== 1) throw new SessionAccessError("invalid_identity", "open_write", "同一身份对应多个正文文件。");
 
+      // 最后一次只读 I/O 等待期间可能已超时；T2 不受文件 I/O 守卫覆盖，取锁前单独复核。
+      this.operations.assertActive();
       const lock = await this.locks.acquire(sessionId);
       const meta: SessionMeta = { ...identities[0]!, cwd };
-      const writer = new SessionWriterAdapter(this.root, meta, lock, this.io, this.now, () => { this.resources.delete(writer); });
+      const writer = new SessionWriterAdapter(this.root, meta, lock, this.io, this.now, () => { this.resources.delete(writer); }, this.operations);
       this.resources.add(writer);
       try {
         const snapshot = await writer.initializeExisting({ root, sessions }, this.uuid);
+        this.operations.assertActive();
         return { writer, snapshot };
       } catch (error) {
         // 借用正文的扫描已经 settle；正文/修复临时 fd 确认关闭后才放锁，失败资源仍被登记。
-        await writer.close();
+        await writer.closeSettled();
         throw error;
       }
     } catch (error) {
@@ -131,12 +140,16 @@ export class SessionFileAdapter {
       }
       const directories = await this.ensureDirectories();
       for (let attempt = 0; attempt < 3; attempt++) {
+        // 目录准备或上轮碰撞/关闭可能在超时后才 settle，不能生成新身份或开始下一轮取锁。
+        this.operations.assertActive();
         const meta = this.newMeta(cwd);
         let writer: SessionWriterAdapter;
         try {
+          // 锁适配器有自己的 I/O；即便文件守卫已故障，也必须在调用 acquire 前明确阻止它。
+          this.operations.assertActive();
           const lock = await this.locks.acquire(meta.sessionId);
           // 成功关闭才撤销资源登记，避免长期 adapter 保留已关闭会话的正文和校验状态。
-          writer = new SessionWriterAdapter(this.root, meta, lock, this.io, this.now, () => { this.resources.delete(writer); });
+          writer = new SessionWriterAdapter(this.root, meta, lock, this.io, this.now, () => { this.resources.delete(writer); }, this.operations);
           this.resources.add(writer);
         } catch (error) {
           // 新 UUID 正好被占用也属于新身份碰撞；其余能力/权限故障不能降级或重试。
@@ -145,13 +158,14 @@ export class SessionFileAdapter {
         }
         try {
           await writer.initialize(directories);
+          this.operations.assertActive();
           return {
             writer,
             snapshot: { meta: { ...meta }, recentSuccessfulTurns: [], interruptedTurnCount: 0, repair: "none" },
           };
         } catch (error) {
           // initialize 的全部 I/O 已 settle；先真正关闭正文再解锁，关闭失败则继续保留资源登记。
-          await writer.close();
+          await writer.closeSettled();
           if (error instanceof SessionIdentityCollision) continue;
           throw error;
         }
@@ -199,13 +213,22 @@ export class SessionFileAdapter {
   /**
    * 停止新建/恢复，等待全部 create/openWrite 底层操作 settle，再幂等关闭全部已登记 writer。
    * 单个 writer 自行先关正文再放锁；任何关闭失败都上抛且资源仍被登记，不伪装关闭成功。
-   * 本边界没有 T7 的 30 秒/5 秒计时器；不会因不再等待而提前解锁。
+   * 公开等待固定 30 秒且重入同一结果；到期仍保留真实收尾，由 bootstrap 另行监督 5 秒。
    */
   close(): Promise<void> {
+    this.closeWait ??= this.operations.run("close", () => this.closeSettled());
+    return this.closeWait;
+  }
+
+  /**
+   * 监督层使用的真实收尾能力，或内部准备失败清理；不把超时的公开 Promise 当成资源已关闭。
+   * 首次调用停止新操作并等 preparing/writer 实际 settle；不另设计时，失败保持锁与资源登记。
+   */
+  closeSettled(): Promise<void> {
     this.closing ??= (async () => {
       await Promise.allSettled([...this.preparing]);
       // 不同会话可独立收尾；writer 只在实际关闭正文且放锁成功后撤销自己的登记。
-      const results = await Promise.allSettled([...this.resources].map((writer) => writer.close()));
+      const results = await Promise.allSettled([...this.resources].map((writer) => writer.closeSettled()));
       const failure = results.find((result) => result.status === "rejected");
       if (failure?.status === "rejected") throw failure.reason;
     })();

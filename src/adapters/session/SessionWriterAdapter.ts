@@ -3,7 +3,7 @@ import { constants, type BigIntStats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { PersistenceError, SessionAccessError } from "../../contracts/session.js";
-import type { SessionMeta, SessionSnapshot, SessionWriter, TurnFact } from "../../contracts/session.js";
+import type { SessionCleanup, SessionMeta, SessionSnapshot, SessionWriter, TurnFact } from "../../contracts/session.js";
 import type { SessionLock } from "../../contracts/session-lock.js";
 import { prepareSessionFact, SessionFactEncoder } from "./sessionFact.js";
 import {
@@ -15,6 +15,7 @@ import { repairSessionTail } from "./repairSession.js";
 import { scanSessionHandle } from "./scanSession.js";
 import { SessionSequence } from "./sessionSequence.js";
 import { validateSessionHeader } from "./sessionSchema.js";
+import { SessionOperations } from "./sessionOperation.js";
 
 /** 创建前已检查的受管目录身份；运行中持续复核，不将 lstat 当成原子沙箱。 */
 export interface SessionDirectories {
@@ -28,7 +29,7 @@ export interface SessionDirectories {
  * 新建或恢复会话的底层资源所有者，由 SessionFileAdapter 在取得锁后立即登记。
  * initialize/initializeExisting 成功前不交付 SessionWriter；失败保留产物，close 实际结束后才解锁。
  */
-export class SessionWriterAdapter implements SessionWriter {
+export class SessionWriterAdapter implements SessionWriter, SessionCleanup {
   private readonly handles = new Set<FileHandle>();
   private readonly handleCloses = new Map<FileHandle, Promise<void>>();
   private readonly encoder = new SessionFactEncoder();
@@ -44,6 +45,7 @@ export class SessionWriterAdapter implements SessionWriter {
   /** tail 始终 fulfilled，仅表示实际操作已 settle，原失败通过对应 append Promise 交付。 */
   private tail: Promise<void> = Promise.resolve();
   private closing: Promise<void> | undefined;
+  private closeWait: Promise<void> | undefined;
   readonly basename: string;
   private readonly path: string;
 
@@ -51,6 +53,7 @@ export class SessionWriterAdapter implements SessionWriter {
    * 保存已取得的锁及注入 I/O/时钟/身份，由创建器调用；构造不打开文件、不写 header。
    * 后续资源均登记在 handles 中；meta 是创建器独立对象，用户快照不能反向修改；
    * onClosed 仅在正文关闭和放锁成功后通知创建器撤销登记，失败则仍由创建器持有资源。
+   * operations 与创建器共用操作期限/永久超时状态，公开等待到期不会替换真实 I/O 队列。
    */
   constructor(
     private readonly root: string,
@@ -59,6 +62,7 @@ export class SessionWriterAdapter implements SessionWriter {
     private readonly io: SessionFileIO,
     private readonly now: () => Date,
     private readonly onClosed: () => void,
+    private readonly operations: SessionOperations,
   ) {
     this.basename = sessionBasename(meta);
     this.path = join(root, "sessions", this.basename);
@@ -269,6 +273,13 @@ export class SessionWriterAdapter implements SessionWriter {
    */
   appendDurable(fact: TurnFact): Promise<{ confirmedSeq: number }> {
     if (this.fault) return Promise.reject(this.fault);
+    return this.operations.run("append", () => this.appendFact(fact));
+  }
+
+  /** 期限从公开入口开始；此内部流程快照事实、排队并保留真实 I/O tail，不单独计时。 */
+  private appendFact(fact: TurnFact): Promise<{ confirmedSeq: number }> {
+    if (this.fault) return Promise.reject(this.fault);
+    if (this.operations.failure) return Promise.reject(this.operations.failure);
     if (this.closing || !this.initialized) {
       return Promise.reject(new PersistenceError("contract_violation", "append", "会话尚未就绪或已开始关闭，不能追加。"));
     }
@@ -277,8 +288,9 @@ export class SessionWriterAdapter implements SessionWriter {
     catch { return Promise.reject(this.failure("contract_violation", "append", "交付事实不符合会话契约。")); }
 
     // 此回调只在前一操作真正 settle 后运行；故障会阻止所有尚未发出的后继写入。
-    const task = this.tail.then(async () => {
+    const actual = this.tail.then(async () => {
       if (this.fault) throw this.fault;
+      this.operations.assertActive();
       const seq = this.confirmedSeq + 1;
       let record;
       try {
@@ -289,6 +301,7 @@ export class SessionWriterAdapter implements SessionWriter {
       }
       await this.assertOwnership();
       await this.writeLine(record, "append");
+      this.operations.assertActive();
 
       // durable 提交点：校验器的 lastSeq 只是内存游标，绝不能提前作为保存确认。
       this.confirmedSeq = seq;
@@ -296,14 +309,14 @@ export class SessionWriterAdapter implements SessionWriter {
       this.recordStart = this.position;
       return { confirmedSeq: seq };
     });
-    // 同时观察两种 settle，close 可等待它且不会制造额外未处理拒绝。
-    this.tail = task.then(() => {}, () => {});
-    return task;
+    // tail 必须等原 I/O，而不是 30 秒等待结果；否则 close 可能提前关闭仍在写的 fd。
+    this.tail = actual.then(() => {}, () => {});
+    return actual;
   }
 
   /** 生成并保留首次安全故障，附最后确认 seq 与当前已知字节位置；不写错误事件或原始异常。 */
   private failure(code: PersistenceError["code"], operation: string, message: string): PersistenceError {
-    this.fault ??= new PersistenceError(code, operation, message, { lastConfirmedSeq: this.confirmedSeq, byteOffset: this.recordStart });
+    this.fault ??= this.operations.failure ?? new PersistenceError(code, operation, message, { lastConfirmedSeq: this.confirmedSeq, byteOffset: this.recordStart });
     return this.fault;
   }
 
@@ -328,9 +341,15 @@ export class SessionWriterAdapter implements SessionWriter {
   /**
    * 首次调用立即拒绝新 append，等已发出的 I/O 实际 settle，再关闭所有正文/目录 fd 并释放锁。
    * 每条成功记录已同步，无须在故障尾部额外补写/同步；不产生 session_end。
-   * 任何 fd 关闭失败都保留锁，重复 close 等待同一拒绝结果；不进入 T7 的期限/强制退出逻辑。
+   * 任何 fd 关闭失败都保留锁，重复 close 等待同一结果；公开等待 30 秒，真实关闭不会被抢占。
    */
   close(): Promise<void> {
+    this.closeWait ??= this.operations.run("close", () => this.closeSettled());
+    return this.closeWait;
+  }
+
+  /** 内部/监督层等待真实 tail、关闭描述符再释放锁；不附加期限，防止公开超时导致提前解锁。 */
+  closeSettled(): Promise<void> {
     this.closing ??= (async () => {
       await this.tail;
       let closeError: unknown;

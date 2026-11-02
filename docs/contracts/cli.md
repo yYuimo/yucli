@@ -98,6 +98,8 @@ REPL 增加 `/resume [sessionId]`、`/new` 和同义别名 `/clear`。`/resume` 
 
 阶段 04 的扩展目前是 `draft`：实现前不得把以上命令、退出码或持久化行为当作已交付能力。具体 JSONL、锁、修复、保存确认和资源所有权见[会话存储契约](session-store.md)。
 
+T7 已实现可注入的 bootstrap/PersistenceSupervisor：首次存储故障固定分类，停止输入/取消业务后等待真实关闭；5 秒内完成返回 5，仍挂起或关闭失败则调用注入 exit(5)。本轮仅验证模块和真实临时存储的组合，不修改 cli.ts/output.ts/repl.ts，不声称当前 CLI 已具备存储退出码/真实强制退出接线；实际组合根、产品命令和退出子进程验收由 T8/T9 完成。
+
 ## 阶段 03 实现与验证
 
 入口 [cli.ts](../../src/bootstrap/cli.ts) 使用 [repl.ts](../../src/bootstrap/repl.ts) 持有历史，用 [output.ts](../../src/bootstrap/output.ts) 写文本和安全状态。[cli.test.ts](../../tests/cli.test.ts) 与 [repl.test.ts](../../tests/repl.test.ts) 分别运行源码和构建产物；模型请求由本地 SSE 服务接收，断言 stream:true。非流式 stream:false 的兼容断言继续由 client/toolHttp 测试覆盖。

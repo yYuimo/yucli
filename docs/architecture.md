@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2 原生锁、T3 扫描、T4 文件/writer 已实现，T5 存储恢复/修复与 T6 core 事实交付/纯模型投影通过目标环境测试，并获用户授权分开提交；完整 SessionStore/list、T7 协调器/监督及 T8 CLI 接线尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调器、30 秒操作期限和可注入的 5 秒故障监督通过目标环境验证、待审查且未提交；完整 SessionStore/list、T8 CLI 接线及 T9 退出子进程验收尚未实现。
 
 ## 目标场景
 
@@ -114,7 +114,7 @@ src/
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
 
-### 阶段 04 的设计边界（T2–T5 存储、T6 core 子集已实现）
+### 阶段 04 的设计边界（T2–T7 子集已实现）
 
 阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
 
@@ -145,6 +145,12 @@ T6 在 `contracts/session.ts` 增加 `TurnFactSink/TurnExecutionContext`；`runT
 `core/toolMessage.ts` 是实时、非流式兼容循环和恢复共用的纯转换，只提取模型业务字段，保留原 ToolResult 的 ok 供事实保存。`core/sessionHistory.ts` 消费 T5 的 `RecoveredTurn[]`，返回最多 20 组 success 的 `Message[][]`，整组裁剪并复制嵌套调用；不读写磁盘、不回放模型或工具。adapter 不 import core；本轮未增加 bootstrap 接线。user/唯一 turn_end、提交凭证和历史提交仍由后续 T7/T8 实现。
 
 T6 新增 2 个测试文件、57 项测试，用本地 mock SSE、可控保存 Promise 和临时 writer/恢复验证屏障及实时/恢复一致性；目标环境全部 17 个文件、749 项及 typecheck/lint/build 通过。该结果只覆盖 T6 core 子集，阶段仍 implementing，未验收 T7 的 30 秒/5 秒监督或 T8 的产品入口。
+
+T7 新增 `core/runPersistentTurn`，在保存 user 后桥接 T6 事实 sink，固定唯一 outcome 并保存 turn_end；成功仅返回 contracts 的 CommittedTurnResult，业务失败保存固定安全摘要后重抛原异常，存储失败不写终止或重试。core 不持有时钟、文件身份或退出能力，也不修改 REPL history。
+
+`adapters/session/sessionOperation` 以可注入的单调时钟/定时器提供固定 30 秒公开操作等待，创建器与 writer 共用永久超时状态和继续点 I/O 守卫。preparing/tail 保持原真实 Promise，公开超时不替代资源登记；`SessionCleanup.closeSettled` 等真实操作后关闭正文/备份/目录，再放锁。普通 close 仍有 30 秒上限，closeSettled 只供内部/故障监督使用，不能被解释为资源在超时瞬间已关闭。
+
+`bootstrap/persistenceSupervisor` 注入 stopInput/cancel/真实 close/exit，首次 PersistenceError 固定原分类与 5 秒总期限；及时关闭则返回 5，挂起/关闭失败到期通过注入能力退出 5，重复故障/取消不重置期限，晚到拒绝仍观察。bootstrap 复用 adapter 的默认单调计时能力，依赖方向不变；core/adapter 不调用 process.exit。T7 模块和真实临时存储/锁组合新增 79 项测试，目标环境共 20 文件/828 项及 typecheck/lint/build 通过。实际 CLI/REPL 接线、真实进程退出与完整矩阵归 T8/T9，本轮未进入。
 
 ### 依赖检查
 
