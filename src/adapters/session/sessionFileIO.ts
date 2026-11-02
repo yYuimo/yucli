@@ -14,7 +14,7 @@ export interface SessionFileIO {
   mkdir(path: string): Promise<void>;
   /** 按调用方明确的 flags/mode 打开；创建正文须 EXCL，目录须 NOFOLLOW。 */
   open(path: string, flags: number, mode?: number): Promise<FileHandle>;
-  /** 列出扁平 sessions 名称供新身份碰撞检查；不解析正文、不实现列表产品入口。 */
+  /** 列出扁平 sessions 名称供碰撞检查、恢复定位和只读列表；本方法不解析正文。 */
   readdir(path: string): Promise<string[]>;
   /** 解析调用方 cwd；创建要求其已经是 realpath，不默默改变归属。 */
   realpath(path: string): Promise<string>;

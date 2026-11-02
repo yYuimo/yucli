@@ -1,8 +1,9 @@
-/** adapters 层会话创建、持锁恢复与资源登记；未来完整 store 可组合它，本轮不提供 list/CLI。 */
+/** adapters 层的会话存储：创建、持锁恢复、只读列表和真实资源登记；不感知 CLI/picker。 */
 import { randomUUID } from "node:crypto";
+import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { OpenedSession, PersistenceClock, SessionCleanup, SessionMeta } from "../../contracts/session.js";
+import type { OpenedSession, PersistenceClock, SessionList, SessionMeta, SessionStore } from "../../contracts/session.js";
 import { PersistenceError, SessionAccessError } from "../../contracts/session.js";
 import { SessionLockAdapter } from "./SessionLockAdapter.js";
 import { SessionWriterAdapter, type SessionDirectories } from "./SessionWriterAdapter.js";
@@ -10,6 +11,7 @@ import { fileErrorCode, nodeSessionFileIO, requirePrivateSessionPath, SessionIde
 import { validateSessionHeader } from "./sessionSchema.js";
 import { parseSessionBasename, requireSessionId } from "./sessionFilename.js";
 import { SessionOperations } from "./sessionOperation.js";
+import { listSessions } from "./listSessions.js";
 
 /** bootstrap/临时目录测试的组装项；不新增 CLI/env 覆盖项，不注入模型或业务执行器。 */
 export interface SessionFileOptions {
@@ -21,24 +23,27 @@ export interface SessionFileOptions {
   now?: () => Date;
   /** 新会话身份来源，运行时要求 UUID v4；碰撞最多重新生成三次。 */
   uuid?: () => string;
-  /** Pick 只暴露已有 T2 的预检/取锁能力，须组装相同根；默认使用真实 adapter，不复制锁算法。 */
-  locks?: Pick<SessionLockAdapter, "preflight" | "acquire">;
+  /** T2 预检/取锁与只读 probe，须组装相同根；兼容旧写入测试省略 probe 时保守返回 unknown。 */
+  locks?: Pick<SessionLockAdapter, "preflight" | "acquire"> & Partial<Pick<SessionLockAdapter, "probe">>;
   /** T7 操作期限的单调时钟/计时器；固定 30 秒，不是用户可配置时长。 */
   clock?: PersistenceClock;
 }
 
 /**
  * 管理创建中及已交付的全部文件资源；创建失败也不能遗漏未返回句柄的锁/正文。
- * 提供 T4/T5 存储与 T7 操作期限；实际进程退出由 bootstrap 监督，列表不预设假实现。
+ * 复用 T4/T5 写入恢复、T7 操作期限，T8 列表共用资源登记；实际退出由 bootstrap 监督。
  */
-export class SessionFileAdapter implements SessionCleanup {
+export class SessionFileAdapter implements SessionStore {
   private readonly root: string;
   private readonly io: SessionFileIO;
   private readonly now: () => Date;
   private readonly uuid: () => string;
-  private readonly locks: Pick<SessionLockAdapter, "preflight" | "acquire">;
+  private readonly locks: Pick<SessionLockAdapter, "preflight" | "acquire"> & Partial<Pick<SessionLockAdapter, "probe">>;
   private readonly resources = new Set<SessionWriterAdapter>();
-  private readonly preparing = new Set<Promise<OpenedSession>>();
+  private readonly preparing = new Set<Promise<unknown>>();
+  private readonly readers = new Set<FileHandle>();
+  private readonly readerCloses = new Map<FileHandle, Promise<void>>();
+  private readerFault: PersistenceError | undefined;
   private closing: Promise<void> | undefined;
   private closeWait: Promise<void> | undefined;
   private readonly operations: SessionOperations;
@@ -74,9 +79,38 @@ export class SessionFileAdapter implements SessionCleanup {
   }
 
   /** 登记原准备 Promise 而非 30 秒等待 Promise；晚到的成功/失败都观察并在真实 settle 后移除。 */
-  private prepare(task: Promise<OpenedSession>): Promise<OpenedSession> {
+  private prepare<T>(task: Promise<T>): Promise<T> {
     this.preparing.add(task);
     void task.then(() => this.preparing.delete(task), () => this.preparing.delete(task));
+    return task;
+  }
+
+  /** 只读列表与创建共用实际操作登记和 30 秒等待；坏文件独立诊断，整体失败不返回局部列表。 */
+  list(input: { cwd: string; all: boolean }): Promise<SessionList> {
+    if (this.closing) return Promise.reject(new PersistenceError("contract_violation", "list", "文件 adapter 已开始关闭。"));
+    return this.operations.run("list", () => this.prepare(listSessions({
+      root: this.root, io: this.io, now: this.now,
+      probe: (id) => this.locks.probe?.(id) ?? Promise.resolve("unknown"),
+      own: (handle) => { this.readers.add(handle); }, close: (handle) => this.closeReader(handle),
+      assertActive: () => this.operations.assertActive(),
+    }, input).catch((error: unknown) => {
+      // 包括 T2 probe 的关闭故障；不能把无法证明已关闭的读 fd 当作已安全完成收尾。
+      if (error instanceof PersistenceError && error.code === "close_failed") this.readerFault ??= error;
+      throw error;
+    })));
+  }
+
+  /** 列表 fd 的真实幂等关闭；失败保持登记，不重试不确定的关闭结果或提前结束监督。 */
+  private closeReader(handle: FileHandle): Promise<void> {
+    let task = this.readerCloses.get(handle);
+    if (!task) {
+      task = (async () => {
+        try { await this.io.close(handle); } catch { throw new PersistenceError("close_failed", "list_cleanup", "列表描述符关闭失败。"); }
+        this.readers.delete(handle);
+      })();
+      this.readerCloses.set(handle, task);
+      void task.then(() => this.readerCloses.delete(handle), () => {});
+    }
     return task;
   }
 
@@ -229,6 +263,10 @@ export class SessionFileAdapter implements SessionCleanup {
       await Promise.allSettled([...this.preparing]);
       // 不同会话可独立收尾；writer 只在实际关闭正文且放锁成功后撤销自己的登记。
       const results = await Promise.allSettled([...this.resources].map((writer) => writer.closeSettled()));
+      const readResults = await Promise.allSettled([...this.readers].map((handle) => this.closeReader(handle)));
+      if (this.readerFault) throw this.readerFault;
+      const readFailure = readResults.find((result) => result.status === "rejected");
+      if (readFailure?.status === "rejected") throw readFailure.reason;
       const failure = results.find((result) => result.status === "rejected");
       if (failure?.status === "rejected") throw failure.reason;
     })();

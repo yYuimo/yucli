@@ -25,7 +25,7 @@ export interface PersistenceClock {
   schedule(delayMs: number, callback: () => void): () => void;
 }
 
-/** 公开存储操作的机器名；list 只预留同一期限类型，不表示产品列表已实现。 */
+/** 公开存储操作的机器名；全部共用 30 秒总等待，list 只读不取得写锁。 */
 export type SessionOperation = "create" | "open_write" | "append" | "close" | "list";
 
 /** 故障监督使用的真实资源收尾能力，区别于有 30 秒等待上限的业务 close。 */
@@ -194,6 +194,71 @@ export interface OpenedSession {
   writer: SessionWriter;
   /** 已确认的会话读模型；不能以它授权其他 writer 或重跑旧执行。 */
   snapshot: SessionSnapshot;
+}
+
+/** 只读列表条目，由完整扫描生成；即使 yes 也须 openWrite 重新取锁/校验，不是写入许可。 */
+export interface SessionListEntry extends SessionMeta {
+  /** 最后一条记录的展示时间，header-only 回退创建时间；不从 mtime 推断。 */
+  lastActivityAt: string;
+  /** 当前观察的最后序号，不表示写者收到耐久确认。 */
+  lastSeq: number;
+  /** 所有 user 起点数及最后 turn 的观察结果。 */
+  turnCount: number;
+  /** 最后 user 的已观察终止；没有终止为 interrupted，没有 user 为 null。 */
+  lastTurnOutcome: TurnEnd["outcome"] | "interrupted" | null;
+  /** 首条 user 的安全单行摘要；不含工具原文。 */
+  preview: string;
+  /** 只读锁探测状态，unknown/changing 仍允许正式打开重验。 */
+  writerState: "busy" | "available" | "unknown";
+  /** 日志观察状态，与进程是否仍持锁独立。 */
+  logState: "complete" | "interrupted" | "torn_tail" | "missing_lf" | "empty" | "corrupt" | "unsupported";
+  /** 本次观察时间及并发变化证据；不代表原子快照。 */
+  observedAt: string;
+  /** stat 或扫描发现并发变化；false 不提供原子快照保证。 */
+  changing: boolean;
+  /** 不可选、可尝试或必须正式重验；reason 为安全说明，不含正文。 */
+  resumability: "yes" | "no" | "check_on_open";
+  /** 不可选或需重验时的固定安全原因，可用且无额外说明时省略。 */
+  reason?: string;
+}
+
+/** 无法构成完整条目的单文件诊断；不补造时间/统计/可执行历史。 */
+export interface SessionListDiagnostic {
+  /** 仅受管容器内 basename，不是任意绝对路径。 */
+  sourceBasename: string;
+  /** 稳定原因与安全说明，由扫描器/存储边界创建。 */
+  code: string;
+  message: string;
+  /** 合法 header 能提供时才附身份与 cwd；缺失表示不能归属。 */
+  sessionId?: string;
+  cwd?: string;
+  /** 可用时附首处诊断位置，不包含原始 JSON。 */
+  line?: number;
+  byteOffset?: number;
+}
+
+/** 一次只读观察快照，编号/排序由调用方使用；不缓存索引或改变文件。 */
+export interface SessionList {
+  /** 合法完整读模型，按活动/创建时间降序和 ID 字典序排序。 */
+  entries: readonly SessionListEntry[];
+  /** 坏文件/身份拒绝独立诊断；没有可排序条目不等于没有观察到文件。 */
+  diagnostics: readonly SessionListDiagnostic[];
+  /** current 下隐藏的 header-only 数量；all 直接展示 empty。 */
+  hiddenEmptyCount: number;
+  /** 无法由合法 header 确认 cwd 的坏文件数量；默认显示计数，全局显示诊断。 */
+  unattributedCount: number;
+}
+
+/** bootstrap 注入的会话存储能力；普通 close 有期限，监督使用真实 closeSettled。 */
+export interface SessionStore extends SessionCleanup {
+  /** 新建并确认 header 后交付 writer；cwd 必须是真实规范目录，不接受取消 signal。 */
+  create(cwd: string): Promise<OpenedSession>;
+  /** 按 ID 持锁恢复；失败不返回半准备句柄，不自动换会话。 */
+  openWrite(input: { sessionId: string; cwd: string }): Promise<OpenedSession>;
+  /** 只读观察；current 仅完整扫描当前 cwd，all 显示全部与 empty，不加载模型配置。 */
+  list(input: { cwd: string; all: boolean }): Promise<SessionList>;
+  /** 幂等停止新操作并有界等待资源收尾；公开等待超时不表示底层已结束。 */
+  close(): Promise<void>;
 }
 
 /** 尚未取得可写会话时的稳定访问分类；锁与扫描共用同一个异常类。 */

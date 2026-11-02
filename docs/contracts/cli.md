@@ -94,11 +94,17 @@ yucli --resume [sessionId] [--all]
 
 阶段 04 的参数互斥和退出码扩展为：参数错误 2、配置错误 3、模型/业务 turn 错误 4、会话访问或持久化/关闭故障 5、等待输入 Ctrl+C 130。`--resume` 的位置参数是可选完整 sessionId；`--all` 只允许搭配 `--sessions` 或不带 ID 的 `--resume`。`--continue` 不接受位置参数。
 
-REPL 增加 `/resume [sessionId]`、`/new` 和同义别名 `/clear`。`/resume` 无参数复用 picker；恢复候选失败时保留当前健康会话并回到 picker。`/new`/`/clear` 关闭旧 writer、清空内存历史并使下一次普通输入惰性创建新会话。picker 中的输入不会被当作普通问题消费；关闭、保存或锁故障优先于正常退出码。
+REPL 增加 `/resume [sessionId]`、`/new` 和同义别名 `/clear`。`/resume` 无参数复用 picker；picker 的可重试访问拒绝保留健康旧会话与原编号快照；直接 /resume <id> 访问拒绝保留旧会话并回普通提示。`/new`/`/clear` 关闭旧 writer、清空内存历史并使下一次普通输入惰性创建新会话。picker 中的输入不会被当作普通问题消费；关闭、保存或锁故障优先于正常退出码。
 
-阶段 04 的扩展目前是 `draft`：实现前不得把以上命令、退出码或持久化行为当作已交付能力。具体 JSONL、锁、修复、保存确认和资源所有权见[会话存储契约](session-store.md)。
+阶段 04 扩展保持 `draft`：T8 已实现上述产品子集，T9 完整阶段矩阵/真实故障退出与重启恢复、T10 完成审查仍待验收。具体 JSONL、锁、修复、保存确认和资源所有权见[会话存储契约](session-store.md)。
 
-T7 已实现可注入的 bootstrap/PersistenceSupervisor：首次存储故障固定分类，停止输入/取消业务后等待真实关闭；5 秒内完成返回 5，仍挂起或关闭失败则调用注入 exit(5)。本轮仅验证模块和真实临时存储的组合，不修改 cli.ts/output.ts/repl.ts，不声称当前 CLI 已具备存储退出码/真实强制退出接线；实际组合根、产品命令和退出子进程验收由 T8/T9 完成。
+T7 已实现可注入的 bootstrap/PersistenceSupervisor：首次存储故障固定分类，停止输入/取消业务后等待真实关闭；5 秒内完成返回 5，仍挂起或关闭失败则调用注入 exit(5)。T7 交付时仅验证模块与临时存储；T8 已接入实际组合根和产品命令，真实强制退出子进程仍归 T9，不将注入退出能力测试冒充进程验收。
+
+T8 实际接线：参数解析在配置/会话读取之前；无 ID picker 的双 TTY 检查也先执行。列表/picker 浏览不加载配置；选定 ID 后才加载当前启动配置，配置失败 3 且不取写锁/修复。continue 无候选为 not_found/5、不加载配置，最近候选 busy/unknown/changing 不改选旧条目。直接 ID/continue 访问失败为 5，不弹 picker、不新建。
+
+启动 picker 的 q/空行/EOF 为 0、Ctrl+C 为 130。访问拒绝（session_busy/not_found/cwd_mismatch/corrupt/unsupported/invalid_identity/permission_denied）等待候选清理后返回选择，**保留原编号映射，仅 a/r 重建**；PersistenceError、lock_unavailable、platform_unsupported 故障收尾为 5。I/O 期取消记录意图后等实际 settle；人工输入没有 30 秒超时。同一 LineInput 从启动 picker 交给 REPL，不另建 readline。
+
+安全输出补齐 SessionAccessError/PersistenceError→5、ToolExecutionError→4；存储故障优先于正常 0/130。目标环境 T8 全部 24 测试文件/1000 项及 typecheck/lint/build 通过；含源码/构建 CLI 的参数、无密钥只读列表、真实 busy 与管道保存故障。完整报告见[阶段规格 T8 实际结果](../specs/phase-04-session-persistence.md#t8-clirepl-实际结果与开发报告2026-10-29)。
 
 ## 阶段 03 实现与验证
 

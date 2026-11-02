@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调器、30 秒操作期限和可注入的 5 秒故障监督通过目标环境验证、待审查且未提交；完整 SessionStore/list、T8 CLI 接线及 T9 退出子进程验收尚未实现。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调/期限/监督与 T8 SessionStore/list、CLI/picker/持久化 REPL 已实现并通过目标环境验证，未提交待审查；T9 完整矩阵/真实故障退出及重启恢复、T10 完成审查未进行。
 
 ## 目标场景
 
@@ -114,19 +114,19 @@ src/
 - 文本即时写 stdout，部分屏幕输出不会回滚；成功/失败均补足换行。请求中 Ctrl+C 取消整个 turn，REPL 恢复提示；等待输入时退出 130，单次模式取消退出 4。
 - usage-only 兼容缺陷已修复：先区分非空 choices 的消息帧与空 choices + 合法 usage 的统计帧。统计帧只产生独立 usage，不伪造 message_end；等值去重仍属于每请求客户端状态。纯文本和工具往返的真实重跑均收到该统计帧且成功，详情见阶段 03 实际结果。
 
-### 阶段 04 的设计边界（T2–T7 子集已实现）
+### 阶段 04 的设计边界（T2–T8 子集已实现）
 
 阶段 04 只为持久化 REPL 增加一条明确的事实交付路径：`bootstrap/repl → core/runPersistentTurn → runTurnStream/ToolRegistry → TurnFactSink → adapters/session/SessionWriter`。普通 `--prompt` 继续走无会话副作用的 `displayTurn`；列表和 picker 只调用 `SessionStore.list`，不加载模型、不创建文件、不修复正文。
 
-规划中的分层保持现有依赖方向：`contracts/session.ts` 定义事实、快照、列表和稳定存储错误；`core` 负责唯一 user/turn_end、取消边界和 `ToolResult → ToolMessage` 投影；`adapters/session` 负责 JSONL 校验、字节扫描、锁、fsync、备份修复和恢复读模型；`bootstrap` 负责模式分流、共享 picker、会话切换和 5 秒故障收尾。adapter 不反向 import core，存储不感知 picker。
+已实现分层保持现有依赖方向：`contracts/session.ts` 定义事实、快照、列表和稳定存储错误；`core` 负责唯一 user/turn_end、取消边界和 `ToolResult → ToolMessage` 投影；`adapters/session` 负责 JSONL 校验、字节扫描、锁、fsync、备份修复和恢复读模型；`bootstrap` 负责模式分流、共享 picker、会话切换和 5 秒故障收尾。adapter 不反向 import core，存储不感知 picker。
 
-会话日志是事实来源，成功模型历史是恢复投影；只有确认 `turn_end(success)` 后，REPL 才提交一组完整消息。失败、取消和中断事实保留在日志，但不自动重跑工具或把未完成 turn 送回模型。具体格式和生命周期见[会话存储契约](contracts/session-store.md)，阶段 04 其余存储与执行接线仍待实现。
+会话日志是事实来源，成功模型历史是恢复投影；只有确认 `turn_end(success)` 后，REPL 才提交一组完整消息。失败、取消和中断事实保留在日志，但不自动重跑工具或把未完成 turn 送回模型。具体格式和生命周期见[会话存储契约](contracts/session-store.md)，产品接线由下文 T8 完成，完整阶段验收仍归 T9/T10。
 
-阶段 04 T2 已新增 `contracts/session-lock.ts`、`adapters/session/lockPlatform.ts` 与 `SessionLockAdapter.ts`：精确平台/local/native 预检、exnb 写锁、已有文件的 shnb 探测、进程内登记及 dev/ino 所有权复核。release 通过关闭描述符释放，不删除 sidecar；不会提前解锁未 settle 的操作。只有锁调用路径加载 fs-ext，普通 CLI/REPL 当前仍沿阶段 03 路径，未接入持久化。
+阶段 04 T2 已新增 `contracts/session-lock.ts`、`adapters/session/lockPlatform.ts` 与 `SessionLockAdapter.ts`：精确平台/local/native 预检、exnb 写锁、已有文件的 shnb 探测、进程内登记及 dev/ino 所有权复核。release 通过关闭描述符释放，不删除 sidecar；不会提前解锁未 settle 的操作。只有锁调用路径加载 fs-ext，T2 交付时 CLI/REPL 尚未接线；T8 已接入持久化路径。
 
-fs-ext@2.1.1 放 optionalDependencies，pnpm 构建脚本仅授权该包；构建前提和目标 Node 24.14.0 + macOS arm64 的子进程/隔离安装验证见[阶段 04 T2 实际结果](specs/phase-04-session-persistence.md#t2-依赖与锁实际结果2026-10-29)。T2 完成不等于整个存储契约已实现，30 秒存储期限与 5 秒退出监督仍由 T7/T9 后续交付。
+fs-ext@2.1.1 放 optionalDependencies，pnpm 构建脚本仅授权该包；构建前提和目标 Node 24.14.0 + macOS arm64 的子进程/隔离安装验证见[阶段 04 T2 实际结果](specs/phase-04-session-persistence.md#t2-依赖与锁实际结果2026-10-29)。T2 完成不等于整个存储契约已实现，T7 已补 30 秒存储期限和可注入 5 秒监督，T8 接线；真实退出子进程仍归 T9。
 
-T3 新增 `contracts/session.ts` 的业务数据/稳定错误（锁入口重导出同一异常），以及 adapter 内的 `sessionSchema → sessionSequence` 校验、`jsonPrefix` 与 `scanSession` 字节扫描。扫描器以初始 fstat 固定 `[0,S)`，严格 UTF-8，提供 none/missing_lf/incomplete 与全文件 corrupt/unsupported 拒绝；损坏结果不暴露局部可执行历史。合法结果返回列表统计、工具证据及最近 20 个完整成功业务组，由未来 core 再转模型消息；只读观察不授予写入或恢复执行权。当前 CLI 没有调用扫描器，扫描不创建目录、不修改正文、不备份、不 fsync；T4 已补充新文件/writer，已有文件持锁修复仍属 T5。T3 验证与内存/并发限制见[阶段 04 T3 实际结果](specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。
+T3 新增 `contracts/session.ts` 的业务数据/稳定错误（锁入口重导出同一异常），以及 adapter 内的 `sessionSchema → sessionSequence` 校验、`jsonPrefix` 与 `scanSession` 字节扫描。扫描器以初始 fstat 固定 `[0,S)`，严格 UTF-8，提供 none/missing_lf/incomplete 与全文件 corrupt/unsupported 拒绝；损坏结果不暴露局部可执行历史。合法结果返回列表统计、工具证据及最近 20 个完整成功业务组，由未来 core 再转模型消息；只读观察不授予写入或恢复执行权。T3 交付时 CLI 尚未接入扫描；扫描自身始终只读。T4/T5 已补 writer/持锁修复，T8 列表复用扫描并在恢复时重新取锁重扫。T3 验证与内存/并发限制见[阶段 04 T3 实际结果](specs/phase-04-session-persistence.md#t3-格式与只读扫描实际结果2026-10-29)。
 
 T3 审查修正把工具终止收窄为 ToolEnd（工具执行失败或两种取消），turn_end 保留完整业务原因；当前不接受工具 timeout。SessionSequence 用失败/完成标志执行单次使用约束，错误后不能生成摘要，finish 后不能再修改已返回读模型。未来 writer/replay 需沿用这些类型和运行时边界；单行/前缀深度仍无硬上限，不把分块扫描当作有界内存。
 
@@ -142,15 +142,25 @@ T5 将已有会话入口限定为 `SessionFileAdapter.openWrite → T2 acquire �
 
 T6 在 `contracts/session.ts` 增加 `TurnFactSink/TurnExecutionContext`；`runTurnStream` 在 signal 后接收可选 context，无上下文的 CLI/兼容调用不变。整条流和批次校验成功后保存 assistant（当前 turn 的 a1/a2），包括最终回答和额度末次合法调用。`executeToolBatch` 逐项等待 start → 注册表 → result，确认后才越过对应屏障；分派前取消保存 cancelled_before_dispatch，已进入的执行按实际原因保存 end。`RegisteredTools` 已取得的合法输出先形成 ToolResult，后续取消不覆盖；真正内部异常用 ToolExecutionError 安全分类，PersistenceError 和 sink 拒绝直接穿透，不递归保存结束。
 
-`core/toolMessage.ts` 是实时、非流式兼容循环和恢复共用的纯转换，只提取模型业务字段，保留原 ToolResult 的 ok 供事实保存。`core/sessionHistory.ts` 消费 T5 的 `RecoveredTurn[]`，返回最多 20 组 success 的 `Message[][]`，整组裁剪并复制嵌套调用；不读写磁盘、不回放模型或工具。adapter 不 import core；本轮未增加 bootstrap 接线。user/唯一 turn_end、提交凭证和历史提交仍由后续 T7/T8 实现。
+`core/toolMessage.ts` 是实时、非流式兼容循环和恢复共用的纯转换，只提取模型业务字段，保留原 ToolResult 的 ok 供事实保存。`core/sessionHistory.ts` 消费 T5 的 `RecoveredTurn[]`，返回最多 20 组 success 的 `Message[][]`，整组裁剪并复制嵌套调用；不读写磁盘、不回放模型或工具。adapter 不 import core；T6 交付时未改 bootstrap，T7/T8 已补唯一 user/turn_end、提交凭证与产品历史提交。
 
-T6 新增 2 个测试文件、57 项测试，用本地 mock SSE、可控保存 Promise 和临时 writer/恢复验证屏障及实时/恢复一致性；目标环境全部 17 个文件、749 项及 typecheck/lint/build 通过。该结果只覆盖 T6 core 子集，阶段仍 implementing，未验收 T7 的 30 秒/5 秒监督或 T8 的产品入口。
+T6 新增 2 个测试文件、57 项测试，用本地 mock SSE、可控保存 Promise 和临时 writer/恢复验证屏障及实时/恢复一致性；目标环境全部 17 个文件、749 项及 typecheck/lint/build 通过。该结果仅是 T6 交付时的 core 子集，不能代替后续 T7/T8 验证或 T9 完整阶段验收。
 
 T7 新增 `core/runPersistentTurn`，在保存 user 后桥接 T6 事实 sink，固定唯一 outcome 并保存 turn_end；成功仅返回 contracts 的 CommittedTurnResult，业务失败保存固定安全摘要后重抛原异常，存储失败不写终止或重试。core 不持有时钟、文件身份或退出能力，也不修改 REPL history。
 
 `adapters/session/sessionOperation` 以可注入的单调时钟/定时器提供固定 30 秒公开操作等待，创建器与 writer 共用永久超时状态和继续点 I/O 守卫。preparing/tail 保持原真实 Promise，公开超时不替代资源登记；`SessionCleanup.closeSettled` 等真实操作后关闭正文/备份/目录，再放锁。普通 close 仍有 30 秒上限，closeSettled 只供内部/故障监督使用，不能被解释为资源在超时瞬间已关闭。
 
-`bootstrap/persistenceSupervisor` 注入 stopInput/cancel/真实 close/exit，首次 PersistenceError 固定原分类与 5 秒总期限；及时关闭则返回 5，挂起/关闭失败到期通过注入能力退出 5，重复故障/取消不重置期限，晚到拒绝仍观察。bootstrap 复用 adapter 的默认单调计时能力，依赖方向不变；core/adapter 不调用 process.exit。T7 模块和真实临时存储/锁组合新增 79 项测试，目标环境共 20 文件/828 项及 typecheck/lint/build 通过。实际 CLI/REPL 接线、真实进程退出与完整矩阵归 T8/T9，本轮未进入。
+`bootstrap/persistenceSupervisor` 注入 stopInput/cancel/真实 close/exit，首次 PersistenceError 固定原分类与 5 秒总期限；及时关闭则返回 5，挂起/关闭失败到期通过注入能力退出 5，重复故障/取消不重置期限，晚到拒绝仍观察。bootstrap 复用 adapter 的默认单调计时能力，依赖方向不变；core/adapter 不调用 process.exit。T7 模块和真实临时存储/锁组合新增 79 项测试，目标环境共 20 文件/828 项及 typecheck/lint/build 通过。T8 已补实际 CLI/REPL 接线，真实故障退出与完整矩阵仍归 T9，T7 本身的验证结论不变。
+
+
+T8 的生产调用链现在为：`cliOptions → cli → sessionApp → SessionStore.list / 共享 sessionPicker / runRepl`。`SessionFileAdapter.list → listSessions → T3 scanSessionHandle + T2 probe` 只读观察；不建目录/索引/锁、不修复。读 fd 和实际任务与 writer 共用 store 登记及 30 秒总等待，超时后仍等待真实 settle，清理故障不得降级为单文件诊断。header 先按 realpath cwd 过滤，坏文件独立诊断，排序不用 mtime 或伪造时间。
+
+`sessionApp` 在选择目标后才校验启动配置，再 openWrite；continue 不因 busy/unknown/changing 跳过最近有效非空候选。`--prompt` 没有 store/writer，列表与 picker 浏览没有模型配置加载。`LineInput` 独占一个 readline，启动 picker 到 REPL 保留同源队列；picker 编号来自一次快照，仅 a/r 更新，访问拒绝保留编号。I/O 期取消等候选清理，旧 close 开始后不撤销切换。
+
+`runRepl → runPersistentTurn → CommittedTurnResult → 历史整组提交` 已连通。新会话惰性创建；恢复用 core 的 projectSessionHistory，配置提示只在 stderr 首次新请求前出现。/new 与 /clear 关闭旧 writer、清历史，下题才 create；/resume 按准备/关闭/替换顺序，访问拒绝保留旧健康状态。PersistenceError 停输入/取消，由 sessionApp 调用 supervisor 与真实 closeSettled，组合根 cli 注入 process.exit(5)，core/adapter 不直接退出。
+
+T8 新增 4 个测试文件、172 项，目标 macOS arm64/Node 24.14.0/pnpm 10.33.2 全部 24 文件/1000 项及 typecheck/lint/build 通过。源码/构建路径验证只读列表、参数/配置顺序、非 TTY 恢复、真实 busy、D07 故障后停止管道；可控模块测试覆盖共享 picker、候选 I/O/取消、旧 close 屏障和注入退出。真实 5 秒强制退出、重启/崩溃恢复、完整阶段矩阵与人工 TTY 验收仍留 T9，T10 审查未开始。
+
 
 ### 依赖检查
 

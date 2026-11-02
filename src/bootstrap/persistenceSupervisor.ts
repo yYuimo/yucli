@@ -1,4 +1,4 @@
-/** bootstrap 层存储故障监督；由未来组合根接入，不实现 CLI/REPL 输入循环或命令。 */
+/** bootstrap 层存储故障监督；sessionApp 注入真实收尾/退出能力，本模块不解析交互命令。 */
 import type { PersistenceClock } from "../contracts/session.js";
 import { PersistenceError } from "../contracts/session.js";
 import { persistenceClock } from "../adapters/session/sessionOperation.js";

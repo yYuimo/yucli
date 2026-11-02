@@ -4,9 +4,9 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调、操作期限及可注入故障监督。T5/T6 已提交，T7 通过目标验证、未提交待审查，阶段保持 `implementing`，T8–T10 未开始。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调/期限/监督与 T8 list/picker/持久化 CLI/REPL。T5/T6 已提交，T7/T8 通过目标验证、未提交待审查，阶段保持 `implementing`，T9/T10 未开始。
 
-用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T7 的授权范围，不将调研探针、存储、core 或监督模块子集验证视为整个阶段的应用验收；T5 交付成功 turn 业务快照，T6 交付纯模型投影，T7 交付唯一终止协调和期限监督能力，不包含 T8 CLI/REPL 接线或 T9 退出子进程/完整矩阵。
+用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前实现 T1–T8 的授权范围，不将调研探针、存储、core、监督和 T8 产品子集验证视为 T9 完整阶段验收；T5 交付成功 turn 业务快照，T6 交付纯模型投影，T7 交付唯一终止协调和期限监督能力，T8 接入 CLI/REPL；本轮不包含 T9 真实故障退出子进程/完整矩阵。
 
 规格评审后转为 `designed`，开始实现时转为 `implementing`。格式、跨进程写者和恢复策略的理由见 [ADR-006](../decisions/ADR-006-session-persistence.md)，该决策已接受；阶段 04 的新增契约在实现和验证前保持 `draft`。现有阶段 01–03 的 accepted 契约仍描述已实现行为；本阶段实现必须同步更新受影响契约和架构，再经验证接受扩展。
 
@@ -102,7 +102,7 @@ CLI 的无 ID `--resume` 与 REPL 的无 ID `/resume` 复用同一 bootstrap 选
 
 v1 用行输入实现，暂不处理 Tab/Esc、方向键、搜索、分页或完整 transcript。选择器没有人工输入的 30 秒超时；每次 list/openWrite 的 I/O 仍受第 7 节期限约束。REPL 原会话在浏览和等待期间继续持锁；同一输入源只有一个消费者，picker 与普通问题循环不能各自创建竞争的 readline 消费者。picker 中输入 `/new` 等文字只是无效选择，必须先取消再执行 REPL 命令。
 
-选择之后沿用“准备候选 → 关闭旧会话 → 替换历史”。列表观察只用于选择：文件消失、被占用或变坏仍由正式 openWrite 判定。启动 picker 的候选访问拒绝回到 picker，显示原因并刷新，用户可重选或取消；REPL picker 同样保留旧会话。直接 ID 恢复不自动进入 picker；访问失败按原错误规则报告。锁不可用、修复或其他 PersistenceError 不留在选择器重试，按存储故障收尾。
+选择之后沿用“准备候选 → 关闭旧会话 → 替换历史”。列表观察只用于选择：文件消失、被占用或变坏仍由正式 openWrite 判定。启动 picker 的候选访问拒绝回到 picker，显示安全原因并保留当前编号快照及编号→ID 映射；只有用户输入 a/r 才重新列举并重建编号。REPL picker 同样保留旧会话及历史；直接 /resume <id> 访问拒绝保留旧会话并允许重试。直接 ID 恢复不自动进入 picker；访问失败按原错误规则报告。锁不可用、修复或其他 PersistenceError 不留在选择器重试，按存储故障收尾。
 
 上述即时取消指等待选择输入时。list 刷新或 openWrite 进行中收到 Ctrl+C，只记录取消意图，等待已开始的 I/O settle 并关闭本次准备的候选后再退出选择，不提前解锁、不消费新问题；IO 超限或清理失败仍走第 7 节故障收尾。REPL 开始关闭旧会话前检查取消，取消可保留旧会话；一旦开始关闭旧会话，切换决定固定，不因新 Ctrl+C 撤销或复活旧句柄，先按既定顺序完成切换或报告关闭故障。EOF 则请求结束整个 REPL，仍等待这些资源收尾。
 
@@ -137,7 +137,7 @@ busy 不改变“最近”的认定，unknown/changing 也不能因探测不确�
 
 新会话 header.cwd 是启动目录的 realpath 绝对路径；恢复必须与当前规范化 cwd 完全相等。父子目录、不同 worktree、目录改名后的路径均不自动兼容；符号链接入口最终指向同一真实目录时允许。`read_file` 根目录使用该规范化 cwd，不根据日志切目录或加载另一项目凭证。
 
-模型、端点、工具和 `.env` 使用当前启动环境；历史不控制当前配置。比较将进入上下文的最近成功 turn 的 runtimeProfile；无成功 turn 时回退最近 user。provider/model 不同时，在恢复完成后、首次新请求前向 stderr 提示旧值和当前值一次；纳入上下文的记录缺摘要则提示无法完整核对。提示不要求确认、不进入模型消息。相同 provider/model 不能解释为全部配置一致。
+模型、端点、工具和 `.env` 使用当前启动环境；历史不控制当前配置。比较将进入上下文的最近成功 turn 的 runtimeProfile；无成功 turn 时回退最近 user。provider/model 不同时，在恢复完成后、首次新请求前向 stderr 提示旧值和当前值一次；用于比较的最近成功 turn（或无成功 turn 时的最近 user）缺摘要则提示无法完整核对，不借用其他记录。提示不要求确认、不进入模型消息。相同 provider/model 不能解释为全部配置一致。
 
 REPL 切换按“准备候选 → 关闭旧会话 → 替换会话与历史”执行。准备期间不接受新的模型输入，旧写者继续持锁；选择当前会话为无操作。busy、not_found、cwd_mismatch、corrupt、unsupported 等访问拒绝关闭候选资源后保留旧会话和历史，允许重试。候选修复、保存或关闭发生 PersistenceError，或锁服务不可用时，不再继续交互；关闭候选和旧会话后退出 5。旧会话关闭失败同样不能提交候选历史。
 
@@ -576,7 +576,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 - [x] **T5 恢复与修复（存储范围）**：持锁重新定位/扫描、完整备份及清单同步、修改前复核、truncate/补 LF/重验、成功 turn 业务快照、已有文件续写与资源收尾；失败不发模型请求、不自动重放。成功 turn 的纯模型投影不在本任务，已正式移至 T6。新增 102 项测试，目标 Node 下全部 692 项通过；实现已获用户授权独立提交。
 - [x] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。新增 57 项、2 个测试文件，目标环境全部 17 文件/749 项及 typecheck/lint/build 通过；已获用户授权独立提交，不含 T7/T8。
 - [x] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出能力。新增 79 项、3 个测试文件，目标环境 20 文件/828 项及 typecheck/lint/build 通过；未提交待审查。监督通过注入回调/退出能力验证，实际 CLI/REPL 接线和真实退出子进程仍归 T8/T9。
-- [ ] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。
+- [x] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。目标环境新增 172 项、4 个测试文件，全部 24 文件/1000 项及 typecheck/lint/build 通过；未提交待审查，完整矩阵/真实强制退出与重启恢复留 T9。
 - [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。
 - [ ] **T10 文档与完成审查**：按实测结果更新本文件、README、architecture、契约与依赖说明；报告保留限制和未验证环境，审核中文注释、Git diff 和阶段分支。只有验证完成才转 verified，用户审查后再转 done/申请集成。
 
@@ -647,7 +647,7 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 | E01 | --resume/-r 无 ID、有 ID，--continue/-c，所有模式组合 | 无 ID 进入 picker，有 ID 直达，continue 不弹 picker；模式两两互斥，空 ID/多余参数/continue 带参为 2 |
 | E02 | --all 与 sessions、无 ID resume、直接 ID、continue、单独使用 | 仅前两种合法；REPL /resume --all 初始为全局，非法组合不加载模型配置或创建文件 |
 | E03 | CLI/REPL picker 默认、切换 a、刷新 r | 相同字段/排序与组件逻辑，复用 SessionStore.list；只读、不申请候选写锁；编号只在显式刷新/切范围后重建 |
-| E04 | 选择编号前后列表顺序变化、文件被占用/删除/损坏 | 编号仍映射原展示 ID，openWrite 必须重验；访问拒绝显示并刷新，不误恢复另一个 ID；REPL 原历史和锁保持 |
+| E04 | 选择编号前后列表顺序变化、文件被占用/删除/损坏 | 编号仍映射原展示 ID，openWrite 必须重验；访问拒绝显示原因并保留原编号，只有 a/r 才刷新，不误恢复另一个 ID；REPL 原历史和锁保持 |
 | E05 | busy/其他 cwd/unknown/changing/当前会话 | 前两者不可选且说明原因；未知或变化需正式打开判断；当前会话仅退出 picker，不重复打开；全局不切 cwd |
 | E06 | current 无记录、global 无记录、只有空会话、取消 | 提示无会话，仍能 a/r/q，无虚构默认选项或偷偷新建；global 显式空会话仅同 cwd 可选 |
 | E07 | 非整数/越界/命令文字、空 Enter、q | 无效选择不进模型；空 Enter/q 取消；启动取消为 0，REPL 返回原提示且历史不变 |
@@ -1014,7 +1014,7 @@ T6 无部分项或阻塞。未实现 T7 的 runPersistentTurn/user/唯一 turn_e
 
 ### T7 协调与退出监督实际结果（2026-10-29）
 
-状态：`completed`（仅本轮 T7 范围，未提交待审查）。已完成：持久化 turn 协调、当前公开存储操作的 30 秒等待、可注入的 5 秒故障监督；部分完成：无；阻塞：无。阶段仍为 implementing，扩展契约仍为 draft；T8/T9 未实现、未勾选。
+状态：`completed`（以下为 T7 交付记录，未提交待审查）。已完成：持久化 turn 协调、当前公开存储操作的 30 秒等待、可注入的 5 秒故障监督；部分完成：无；阻塞：无。T7 交付时阶段仍为 implementing、扩展契约仍为 draft，T8/T9 当时未实现；当前 T8 结果见下节。
 
 #### 完成内容
 
@@ -1076,7 +1076,7 @@ D06 存储/监督子集使用可控时钟和真实临时文件/T2 锁：create/o
 
 #### 未完成事项与未验证边界
 
-T7 范围无部分项或阻塞。没有实现 T8 的完整 SessionStore/list、picker、--resume/--continue、/new、CLI/REPL 输入和信号接线或历史替换；没有修改 cli.ts/repl.ts/output.ts。当前 CLI 仍沿内存路径，生产 exit 能力和 stopInput/closeSettled 回调需要 T8 实际组装，ToolExecutionError/存储错误的输出映射仍待接线。
+T7 范围无部分项或阻塞。T7 交付时没有实现 T8 的完整 SessionStore/list、picker、--resume/--continue、/new、CLI/REPL 输入和信号接线或历史替换；没有修改 cli.ts/repl.ts/output.ts。当时 CLI 仍沿内存路径；下节 T8 已补生产 exit/输入/closeSettled 组装与错误映射，不改变本节 T7 的历史验证结论。
 
 T9 的完整阶段矩阵、真实 CLI 5 秒强制退出子进程、实际进程挂起/崩溃恢复均未验收；单元测试注入退出能力，不结束测试进程。只验证 macOS arm64/目标 Node/本地文件系统，未验证其他平台/Node、共享挂载或设备断电；JS 计时依赖事件循环可运行，不提供同步阻塞代码的抢占中断保证。既有 T3–T5 的无单行硬上限、advisory 锁和备份限制保持不变。
 
@@ -1085,3 +1085,62 @@ T9 的完整阶段矩阵、真实 CLI 5 秒强制退出子进程、实际进程�
 - 分支保持 phase/04-session-persistence，入口 HEAD 为 `c3cef76`（T5/T6 文档收口），本轮没有暂存、commit、push、merge 或创建标签；全部 T7 改动留工作区待审查。
 - 工作树共 22 项：15 个已修改、7 个未跟踪，其中 T7 为上述 21 文件；research 的原有未提交修改保留，README 的阶段 03 既有 hunk 保留。
 - research SHA-256 保持 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`；上级 plan.md SHA-256 保持 `f2960054989e3d2f6f28658eb8508d01e40bf8b2eca33de814d49a24bbab353b`，未编辑上级文件。T5/T6 提交不改写。
+
+
+### T8 CLI/REPL 实际结果与开发报告（2026-10-29）
+
+状态：`completed`（仅 T8，未提交待审查）。已完成：SessionStore/list、CLI 模式、共享行式 picker、持久化 REPL 和组合根监督接线；部分完成：无；阻塞：无。阶段保持 `implementing`，阶段 04 扩展契约保持 `draft`，T9/T10 不勾选。
+
+#### 完成内容与设计选择
+
+- `SessionFileAdapter.list` 复用 T3 `scanSessionHandle` 和 T2 `probe`；缺目录返回空，不创建目录、正文、索引或锁，不做写预检/acquire/修复。逐级检查私有容器与文件身份，先读合法 header 过滤 cwd；损坏/不支持独立诊断，不编造可排序时间。无 user 的空会话默认隐藏并计数（缺 LF 也不因此成为 continue 候选），all 保留真实日志状态。按活动、创建时间降序及 ID 字典序稳定排序，支持合法 ISO 小数精度。
+- list 纳入 T7 固定 30 秒公开等待，原任务和只读 fd 登记在 store。超时后先等实际 I/O settle 才关闭；扫描或 probe 清理失败保留 close_failed，不能当作 unknown 或成功列表；整体 closeSettled 不伪装安全关闭。list 只读观察和 changing=false 都不是正式写入许可。
+- `cliOptions` 在配置/会话读取之前处理互斥、all、完整安全 ID、多余参数；CLI 在读取/配置之前拒绝非双 TTY picker。`--prompt` 保留无持久化路径；`--sessions` 与 picker 浏览/取消不加载模型配置。直接 ID 先校验配置；continue 先选当前 cwd 最近非空有效 ID（不跳过 busy/unknown/changing），无候选为 not_found/5 且不加载配置。配置成功后才 openWrite；失败不回退其他会话或新建。
+- 共享 `sessionPicker` 只在 a/r 明确刷新后重建编号，current/all 空视图仍能 a/r/q。busy/其他 cwd/损坏/不支持不可选，unknown/changing 交正式 openWrite 重验；当前会话只退出选择。**按用户本轮确认**，启动/REPL picker 访问拒绝保留原编号快照，释放候选资源后可重选；锁服务/平台/PersistenceError 故障退出 5。直接 ID/continue 访问拒绝退出 5；REPL 直接 /resume 访问拒绝保留旧会话和历史。
+- `LineInput` 是唯一 readline 消费者，picker 和普通问题共用队列。人工选择没有存储期限；I/O 期 Ctrl+C/EOF 只记意图，等待操作与候选关闭，不消费下一问题。REPL 候选准备取消保持旧写者；旧 close 开始后切换固定，迟到取消不复活旧句柄。
+- REPL 首次普通问题才 create，走 `runPersistentTurn`，只有 CommittedTurnResult 才提交最多 20 个整组历史；恢复由 `projectSessionHistory` 投影成功组，不重放请求或工具。失败/取消/超时保存非成功终止后可继续；保存/修复/关闭/锁服务故障停止输入。/new 与 /clear 关闭旧 writer 并清空历史，下一题才创建新会话，旧文件保留。切换先准备候选，再关旧 writer，再替换历史。
+- 恢复 stderr 仅显示 ID、成功/中断计数及尾部动作；首次新请求前一次性提示 provider/model 差异或缺摘要。当前配置仍来自启动环境，不重新读配置、不把提示放入模型消息。
+- `renderTurn` 共用文本与换行收尾；安全错误映射补齐存储/访问 5、ToolExecutionError 4。`sessionApp` 组装 T7 supervisor：故障停输入/取消，等待真实 closeSettled；只有组合根注入 process.exit(5)，单元测试注入替身，不提前解锁。
+
+#### 实际修改文件与既有工作区区分
+
+| 范围 | 文件 |
+| --- | --- |
+| T8 新增生产模块 | `src/adapters/session/listSessions.ts`；`src/bootstrap/cliOptions.ts`、`lineInput.ts`、`sessionPicker.ts`、`sessionApp.ts` |
+| T8 修改生产模块 | `src/bootstrap/cli.ts`、`repl.ts`、`output.ts`；`src/contracts/session.ts`（列表/store 类型）；`src/adapters/session/SessionFileAdapter.ts`（list/读资源登记）；`sessionFileIO.ts`（仅 readdir 注释）；`src/bootstrap/persistenceSupervisor.ts`（仅模块接线注释） |
+| T8 新增测试 | `tests/sessionList.test.ts`、`sessionPicker.test.ts`、`sessionCli.test.ts`、`sessionRepl.test.ts`；共享 fixture `sessionUiHelpers.ts` 不作为测试文件计数 |
+| T8 扩展旧测试 | `tests/cli.test.ts`、`repl.test.ts`；子进程 HOME 固定临时目录，增加参数/只读/恢复/busy/D07 等源码和构建路径测试 |
+| T8 文档 | 本规格、`docs/contracts/session-store.md`、`cli.md`、`repl.md`、`docs/architecture.md`、`docs/decisions/ADR-006-session-persistence.md`、`README.md`、`docs/README.md` |
+| 入场前既有 T7 修改，保持实现 | `src/adapters/session/SessionWriterAdapter.ts`、`sessionOperation.ts`、`src/contracts/agent.ts`、`src/core/runTurnStream.ts`、`runPersistentTurn.ts`；`tests/persistenceDeadline.test.ts`、`persistenceHelpers.ts`、`persistenceSupervisor.test.ts`、`persistentTurn.test.ts`；`docs/contracts/tool-execution.md`。与 T8 共用的 session.ts、SessionFileAdapter、supervisor 和文档需按 hunk 拆分 |
+| 既有无关修改，保留 | research 原未提交内容、README 的阶段 03 已集成 main 状态行、上级 plan.md；本轮不修改 research 或 plan，不提交任何内容 |
+
+#### 验证命令与实际结果
+
+目标实测：**darwin arm64、Node v24.14.0、pnpm 10.33.2**。第一步 list 定向验证通过 typecheck/lint 和 list/deadline/recovery 共 145 项；第二步完成后执行：
+
+```bash
+npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
+  --call 'pnpm typecheck && pnpm lint && pnpm test'
+```
+
+最终 typecheck、lint、build（包含在 pnpm test）与 **24 个文件、1000 项测试全部通过**。T7 入场基线 20 文件/828 项，T8 新增 **4 个测试文件、172 项**。测试仅临时目录、可控 Promise/时钟和本地 mock SSE；新增子进程的 HOME 指向临时目录，不访问真实 ~/.yucli，不读取项目 .env、不发真实模型请求、不新增生产假模型客户端。
+
+覆盖 A02/A04/A08/A09 的 CLI/REPL 子集，A07/A10 的成功历史/恢复/切换子集，C06/C07 的终止确认/迟到取消/历史提交子集，D01/D05/D07/D08 及 E01–E12 的本轮产品边界。实际源码/产物子进程验证 0/2/3/4/5/130、非 TTY、真实 busy、首个 create/assistant 保存故障后不继续管道问题；模块测试验证列表/候选 I/O 期取消和 EOF、访问拒绝保留编号、准备期取消关闭候选、旧 close 开始后不撤销、旧 close 失败停止、5 秒监督注入退出与迟到拒绝。没有把这些子集称作 T9 全矩阵通过。
+
+开发中修正了测试类型/Lint 预检问题；新增候选取消测试曾误用旧提示符作完成信号，改为等下一次实际 read 后验证候选已释放。最终结果以本节完整命令为准，未将失败的开发中命令记为通过。
+
+#### 未完成事项、限制与 Git 状态
+
+- T8 无部分项或阻塞。**T9 完整矩阵、真实 CLI 5 秒强制退出、真实重启/崩溃恢复验收、T10 完成审查均未执行**；5 秒应急退出只用注入退出能力验证，未结束测试进程。不新增 SQLite/索引/压缩/清理/加密/跨 cwd 恢复。
+- 只验证 macOS arm64/目标 Node/本地文件系统；未验证其他平台/Node、共享挂载、实际断电或真实模型。人工 TTY 操作尚未独立验收；共享输入/选择器用模块级可控输入测试，源码/构建产物子进程覆盖非 TTY 与信号。沿用单行/当前 turn 无字节上限、advisory 锁、列表非原子快照和事件循环计时限制。
+- 分支 `phase/04-session-persistence`，HEAD `c3cef76` 未变，git status 为 21 个已跟踪修改、17 个未跟踪文件（共 38 个）；其中 27 个为本轮 T8 触及，另 11 个与入场字节相同。工作区保留 T7/T8 和既有 research 等修改，暂存区为空；未 commit/push/merge/tag。git diff --check 通过，diff/status 与入场快照比对，既有 T7 的取锁前 assertActive 审查修正保持。
+- research SHA-256：`987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`；上级 plan.md：`f2960054989e3d2f6f28658eb8508d01e40bf8b2eca33de814d49a24bbab353b`，与入场相同。
+
+
+#### T8 审查修正：profile 提示范围（2026-10-30）
+
+已完成；部分完成与阻塞均无。`profileNotice` 原先比较全部成功组，会在较早 profile 不同、最近成功 profile 与当前相同时产生多余提示。现按规格只取最近成功 turn 的 runtimeProfile；无成功 turn 才回退最近 user，最近成功 turn 缺摘要保持未知，不借用其他记录。提示仍只在首次新请求前出现，不进入模型消息。
+
+本次仅修改 `src/bootstrap/repl.ts`、`tests/sessionRepl.test.ts`、`docs/contracts/repl.md` 和本规格；接口、历史内容和存储格式不变。新增一条“较早配置不同、最近相同不提示”的回归测试，先在旧实现复现失败；同时在既有用例补断言，验证最近成功 turn 缺摘要时不回退 user。
+
+目标 Node 24.14.0 / pnpm 10.33.2 下实际执行 `npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 --call 'pnpm typecheck && pnpm lint && pnpm test'`：typecheck、lint、build 与 **24 文件/1001 项测试全部通过**（较 T8 首次交付新增 1 项，较 T7 基线累计新增 173 项）。`git diff --check` 通过；未进入 T9/T10，没有真实模型请求、真实 home 访问或新平台验收。保留既有工作区，未暂存/提交；research 和上级 plan.md 的 SHA-256 均与上节相同。

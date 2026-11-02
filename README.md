@@ -6,7 +6,7 @@
 
 阶段 03 已完成实现和验证，等待集成审查；设计、实际结果与真实服务限制见[阶段 03 规格](docs/specs/phase-03-repl-streaming.md)。
 
-阶段 04 当前完成 T2–T6，并实现 T7 持久化 turn 协调、30 秒操作期限和可注入的 5 秒故障收尾监督；T7 通过目标环境验证，未提交、待审查。T8 的持久化 CLI 接线尚未实现，运行入口仍使用阶段 03 的内存历史。进度与验证范围见[阶段 04 实际结果](docs/specs/phase-04-session-persistence.md#13-实际结果与下一步)。
+阶段 04 已实现 T2–T8：持久化 REPL、只读会话列表、共享选择器、直接恢复与继续最近会话。T7/T8 通过目标环境验证，未提交、待审查；阶段保持 implementing，T9 完整集成验收与 T10 完成审查尚未进行。进度与验证范围见[阶段 04 实际结果](docs/specs/phase-04-session-persistence.md#13-实际结果与下一步)。
 
 ## 运行
 
@@ -18,7 +18,10 @@
 pnpm install --frozen-lockfile
 # 首次配置时复制 .env.example 为 .env，填写 OPENCODE_GO_API_KEY
 pnpm dev --help
-pnpm dev # 无 --prompt 时进入 REPL
+pnpm dev # 持久化 REPL，首次普通问题才创建会话
+pnpm dev --sessions # 只读列表，不要求模型密钥
+pnpm dev --resume # TTY 中按编号选择
+pnpm dev --continue # 当前目录最近非空会话
 pnpm dev --prompt "你好"
 pnpm dev --prompt "请调用 read_file 读取 README.md，再用三句话总结"
 ```
@@ -30,7 +33,9 @@ pnpm build
 node dist/bootstrap/cli.js --prompt "你好"
 ```
 
-进程环境变量优先于当前工作目录 `.env`，不向父目录查找配置。端点、模型与请求超时的默认值见 [.env.example](.env.example)。成功回答写入 stdout；错误写入 stderr，退出码为参数错误 2、配置错误 3、模型错误 4、未预期错误 1。固定注册 `read_file`，只接受工作区相对路径的 UTF-8 普通文件，最大 64 KiB。最多 8 次模型调用、每批 4 个工具调用，按顺序执行；每个 turn 重新计算额度，不提供文件写入。REPL 只在成功后提交历史，保留最近 20 个完整 turn；`/clear` 清空历史，`/help` 显示命令，`/exit`、`/quit` 或 EOF 正常退出。请求中 Ctrl+C 取消当前 turn 并继续输入，等待输入时 Ctrl+C 退出 130；单次 `--prompt` 取消退出 4。
+进程环境变量优先于当前工作目录 `.env`，不向父目录查找配置。端点、模型与请求超时的默认值见 [.env.example](.env.example)。成功回答写入 stdout；错误写入 stderr，退出码为参数错误 2、配置错误 3、模型错误 4、会话访问/保存/关闭故障 5、未预期错误 1。固定注册 `read_file`，只接受工作区相对路径的 UTF-8 普通文件，最大 64 KiB。最多 8 次模型调用、每批 4 个工具调用，按顺序执行；每个 turn 重新计算额度，不提供文件写入。REPL 只在成功后提交历史，保留最近 20 个完整 turn；`/new`（`/clear` 同义）关闭旧会话并清空历史，下一次普通输入创建新会话；`/resume [sessionId|--all]` 切换会话，`/help` 显示命令，`/exit`、`/quit` 或 EOF 正常退出。请求中 Ctrl+C 取消当前 turn 并继续输入，等待输入时 Ctrl+C 退出 130；单次 `--prompt` 取消退出 4。
+
+持久化创建/恢复仅支持 macOS arm64、Node 24.14.0 和本地文件系统，使用 `~/.yucli` 保存私有 JSONL；`--prompt` 不保存。`--sessions [--all]` 显示完整 ID，`--resume <sessionId>` 可非 TTY 直达；无 ID 的 picker 需要 stdin/stdout 都是 TTY，支持 a/r/q。恢复只取最近 20 个完整成功组，不重跑旧工具；其他 cwd 仅预览，需切回原目录恢复。存储故障停止后续输入，30 秒操作等待和 5 秒故障收尾由组合根监督；真实故障退出子进程验收留 T9。
 
 本机全局 Node/pnpm 不符合版本时，可以临时使用项目工具链：
 

@@ -2,7 +2,7 @@
 
 状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
 
-阶段 04 扩展状态：`draft`（持久化 REPL 和恢复入口尚未实现）
+阶段 04 扩展状态：`draft`（T8 持久化入口子集已实现验证；T9/T10 尚未验收）
 
 适用阶段：阶段 03，同一进程中的持续对话；阶段 04，带会话保存与恢复的 REPL。
 
@@ -70,12 +70,25 @@ interface StreamTurnResult {
 
 持久化 turn 的历史提交屏障与阶段 03 的临时结果不同：core 交付的每条事实必须等待 `SessionWriter.appendDurable()` 确认；只有 `turn_end(success)` 确认后，REPL 才将完整消息组加入内存历史。失败、取消、超时和保存故障不提交半截历史；保存故障优先于普通取消和退出码。具体 writer、恢复投影、锁和 30 秒/5 秒关闭边界见[会话存储契约](session-store.md)。
 
-上述扩展在实现和验收前保持 `draft`，阶段 03 的 accepted 行为仍以本文件前文为准。
+上述扩展在完整阶段验收前保持 `draft`；运行入口已按 T8 使用持久化 REPL，前文为阶段 03 历史契约，阶段 04 的历史提交以 CommittedTurnResult 为准。
 
-T7 子集已验证：core/runPersistentTurn 交付保存确认后的 CommittedTurnResult；bootstrap/PersistenceSupervisor 提供可注入的停止输入、业务取消、真实关闭及 5 秒应急退出监督。当前 repl.ts 仍是阶段 03 的内存路径，尚未接入凭证、SessionCleanup 或监督回调；这些输入/信号/历史替换的产品接线归 T8，不把单元级监督验证视为 REPL 已持久化。
+T7 子集已验证：core/runPersistentTurn 交付保存确认后的 CommittedTurnResult；bootstrap/PersistenceSupervisor 提供可注入的停止输入、业务取消、真实关闭及 5 秒应急退出监督。T8 已接入凭证、SessionCleanup 和监督回调；真实 5 秒强制退出子进程及重启恢复仍归 T9，不把注入监督测试视为已验收真实故障退出。
 
 关联文档：[阶段 03 规格](../specs/phase-03-repl-streaming.md)、[CLI 契约](cli.md)。
 
 ## 实现与验证
 
 实现位于 [repl.ts](../../src/bootstrap/repl.ts)，按完整 StreamTurnResult.appendedMessages 分组保存历史，数组快照传给 core；超出 20 组时整体裁剪，不把工具消息单独留存。输入循环在 turn 完成后才处理下一行。[repl.test.ts](../../tests/repl.test.ts) 覆盖源码/构建产物，真实两轮文本、工具往返与 PTY Ctrl+C 结果见阶段 03 规格。
+
+
+## T8 实现与验证（2026-10-29）
+
+[repl.ts](../../src/bootstrap/repl.ts) 首次非空普通输入才 create；成功凭证确认后才整组追加历史，失败/取消/超时仅保存对应终止并回提示，存储故障停输入并交 [sessionApp](../../src/bootstrap/sessionApp.ts) 监督。/new 与 /clear 先确认旧 close，再清历史并回待创建；旧文件保留，关闭失败退出 5，不接受下一问题。
+
+恢复先准备候选、再关闭旧 writer、再替换为 core 投影的成功历史。REPL 直接 /resume <id> 访问拒绝保留旧会话并允许重试；共享 picker 的访问拒绝保留旧历史、锁和编号快照，仅 a/r 刷新。候选准备期间 Ctrl+C 等 open settle 后关闭候选并返回原提示；EOF 请求结束整个 REPL。旧 close 开始后不因迟到取消撤销切换。保存/修复/关闭/锁服务故障停止交互并退出 5。
+
+[LineInput](../../src/bootstrap/lineInput.ts) 是唯一 readline 消费者，普通输入和 [picker](../../src/bootstrap/sessionPicker.ts) 共用队列。非 TTY 的无 ID /resume 只报告用法，不读取下一行；picker 中 /new 等文字无效，不交给模型。活跃 Ctrl+C 取消本轮，普通提示 Ctrl+C 为 130，picker Ctrl+C 仅取消选择；EOF 正常收尾，关闭故障优先 5。
+
+显式恢复只显示 ID、成功/中断计数与尾部动作；provider/model 只比较最近成功 turn 的 runtimeProfile，无成功 turn 才回退最近 user。所选记录缺摘要保持未知，不借用其他记录；差异或缺摘要在首次新请求前 stderr 提示一次，不要求确认、不进模型、不重读 .env。历史只保留最近 20 个成功完整组，不重跑旧请求或工具。
+
+T8 目标环境 typecheck/lint/build 及 24 文件/1000 项通过，新增 4 文件/172 项；含真实临时 writer、T5 尾部修复、本地 SSE、源码/构建产物 D07 管道停止，以及可控候选准备/旧 close 屏障和取消测试。T9 完整矩阵、真实强制退出/重启故障子进程与人工 TTY 验收、T10 完成审查不在本轮结果内。

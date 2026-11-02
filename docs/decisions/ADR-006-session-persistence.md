@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-日期：2026-10-27（Asia/Shanghai）。调研已收口，本记录随阶段 04 规格提交评审；用户已完成评审并接受该设计，T2–T7 的局部实现状态见文末，整个阶段尚未验收。
+日期：2026-10-27（Asia/Shanghai）。调研已收口，本记录随阶段 04 规格提交评审；用户已完成评审并接受该设计，T2–T8 的局部实现状态见文末，整个阶段尚未验收。
 
 入口修订：2026-10-28（Asia/Shanghai）。按用户建议参考 Codex CLI/Pi，增加默认 picker、continue 最近会话和 /new 主命令；这些入口已纳入本次 accepted 决策。
 
@@ -43,8 +43,12 @@ mkdir 占位锁无需原生依赖，但崩溃后自动接管与清理竞态未�
 
 - [阶段 04 规格](../specs/phase-04-session-persistence.md)
 - [会话持久化调研报告](../research/session-persistence-research.md)
-- [现有 REPL 契约](../contracts/repl.md)、[工具执行契约](../contracts/tool-execution.md)、[CLI 契约](../contracts/cli.md)：阶段 04 扩展待实现同步。
+- [现有 REPL 契约](../contracts/repl.md)、[工具执行契约](../contracts/tool-execution.md)、[CLI 契约](../contracts/cli.md)：阶段 04 扩展已同步 T8 子集，完整阶段验收仍待 T9/T10。
 - [会话存储契约](../contracts/session-store.md)已固定阶段 04 的跨层边界，状态为 `draft`，待实现和运行时验证后接受。
 - T2–T5 已实现 contracts/session 业务数据/稳定错误/writer 能力，以及 adapters/session 的锁、扫描、新文件/writer 和存储恢复/修复；T5 通过目标测试，并获用户授权独立提交。T5 沿用本决策，修改后失败保留实际字节与备份，不增加回滚、自动重放或新锁算法。
-- T6 新增可等待事实 sink、逐项执行屏障、ToolExecutionError 和实时/恢复共用纯模型投影；合法工具输出先保留为 ToolResult，再检查取消。恢复仅消费 T5 的 success 业务组，返回最后 20 组消息，不重建执行、不让 adapter 依赖 core。新增 57 项测试，目标环境 17 文件/749 项及 typecheck/lint/build 全部通过，并获用户授权独立提交。T7 协调器/监督、完整 store/list 与 T8 CLI 接线仍待实现；T2–T6 子集验证不视为整个设计已验收。
-- T7 实现唯一 user/turn_end 协调和提交凭证，固定安全错误与 outcome 后等待终止保存；30 秒公开等待和真实资源 settle 分开，底层调用未结束不关闭/解锁，超时后不继续写入。bootstrap 的可注入监督保留首次故障、固定 5 秒总期限并提供应急退出调用；实际 CLI/REPL 接线和进程退出验证继续归 T8/T9。目标环境新增 79 项，20 文件/828 项及 typecheck/lint/build 通过，未提交待审查；沿用原决策，没有新增重试、工具期限或存储格式。
+- T6 新增可等待事实 sink、逐项执行屏障、ToolExecutionError 和实时/恢复共用纯模型投影；合法工具输出先保留为 ToolResult，再检查取消。恢复仅消费 T5 的 success 业务组，返回最后 20 组消息，不重建执行、不让 adapter 依赖 core。新增 57 项测试，目标环境 17 文件/749 项及 typecheck/lint/build 全部通过，并获用户授权独立提交。T6 交付时尚未接入协调与产品入口；T7/T8 现已补齐，T2–T8 子集验证仍不等于整个阶段验收。
+- T7 实现唯一 user/turn_end 协调和提交凭证，固定安全错误与 outcome 后等待终止保存；30 秒公开等待和真实资源 settle 分开，底层调用未结束不关闭/解锁，超时后不继续写入。bootstrap 的可注入监督保留首次故障、固定 5 秒总期限并提供应急退出调用；T8 已补实际 CLI/REPL 接线，真实故障退出进程验证继续归 T9。目标环境新增 79 项，20 文件/828 项及 typecheck/lint/build 通过，未提交待审查；沿用原决策，没有新增重试、工具期限或存储格式。
+
+- T8 已实现 SessionStore/list、CLI 互斥与配置顺序、共享行式 picker、持久化 REPL 和生产组合根监督接线。list 复用扫描/probe、只读无索引；人工选择无期限，底层 I/O 仍受 30 秒与真实收尾约束。只有成功凭证提交模型历史；恢复不重放工具/请求。
+- 本轮按用户确认收口 picker 访问拒绝：释放候选后保留原编号→ID 快照，**仅 a/r** 再 list/重建编号；启动/REPL picker 可重选，REPL 保留旧会话/历史。直接 ID/continue 失败为 5，不回退、不新建；PersistenceError、lock_unavailable、platform_unsupported 不留在 picker 重试。此为既有“编号快照”和拒绝策略的明确化，不改存储格式或锁算法。
+- T8 目标环境新增 4 测试文件/172 项，全套 24 文件/1000 项及 typecheck/lint/build 通过，T7/T8 未提交待审查。T9 完整阶段矩阵、真实强制退出/重启恢复及人工 TTY 验收、T10 完成审查均未完成；整体阶段保持 implementing，ADR 的 accepted 设计状态不等于运行时阶段已验收。

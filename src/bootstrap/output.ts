@@ -3,6 +3,8 @@ import { AbortError, AgentLoopError, ConfigError, RequestError, ResponseError } 
 import type { LlmClient } from "../contracts/llm-client.js";
 import type { Message } from "../contracts/message.js";
 import type { ToolRegistry } from "../contracts/tool.js";
+import { PersistenceError, SessionAccessError } from "../contracts/session.js";
+import { ToolExecutionError } from "../contracts/tool.js";
 import type { StreamTurnResult } from "../contracts/agent.js";
 import { runTurnStream } from "../core/runTurnStream.js";
 
@@ -20,30 +22,28 @@ export async function displayTurn(
   prompt: string,
   signal: AbortSignal,
 ): Promise<StreamTurnResult> {
-  // 只记录是否写过文字和最后一个片段是否以换行结束，不另存一份完整回答。
-  // wrote=false 时出错应只写 stderr，不能凭空往 stdout 添加空行。
+  return renderTurn((onText) => runTurnStream(client, registry, model, history, prompt, onText, {}, signal));
+}
+
+/**
+ * 共用流式文本/换行收尾；单次模式与持久化协调器都由 bootstrap 传入执行闭包。
+ * 只显示文字，不提交历史；泛型 T 保留持久化凭证或临时结果的区别，失败原样上抛。
+ */
+export async function renderTurn<T>(
+  execute: (onText: (text: string) => void) => Promise<T>,
+  write: (text: string) => void = (text) => { process.stdout.write(text); },
+): Promise<T> {
   let wrote = false;
   let newline = true;
-
-  /** 接收 core 的文字片段并原样写 stdout，记录是否需要收尾换行；空片段不改变状态。 */
+  /** 立即显示已取得文字；保存是否需要换行，不缓存协议或整份回答。 */
   const onText = (text: string) => {
     if (!text) return;
-    process.stdout.write(text);
+    write(text);
     wrote = true;
-
-    // 只看最后一片的结尾；前面的片段即使换过行，也不保证当前屏幕位置仍在新行。
     newline = text.endsWith("\n");
   };
-
-  try {
-    // return await 让本函数真正等到 turn 成功或失败后才执行 finally。
-    // 若直接 return Promise，finally 会提前运行，那时后续文字还没有写出来。
-    return await runTurnStream(client, registry, model, history, prompt, onText, {}, signal);
-  } finally {
-    // 已输出的片段保留；仅在需要时补一行，让下一条错误/REPL 提示从新行开始。
-    // 这里不 catch，原异常仍会交给 CLI/REPL；成功结果也原样返回，不再重复打印 finalText。
-    if (wrote && !newline) process.stdout.write("\n");
-  }
+  try { return await execute(onText); }
+  finally { if (wrote && !newline) write("\n"); }
 }
 
 /**
@@ -51,10 +51,19 @@ export async function displayTurn(
  * error 为 unknown，返回对应退出码供外层决定是否结束；本函数只写 stderr，不退出进程。
  * 未分类异常不回显原始 message/stack；已分类错误使用各层保证的安全摘要。
  */
-export function reportError(error: unknown): number {
+export function reportError(error: unknown, write: (text: string) => void = (text) => { process.stderr.write(text); }): number {
+  // 存储错误只显示稳定分类，不能把路径、原始 Error 或底层系统摘要写到终端。
+  if (error instanceof SessionAccessError || error instanceof PersistenceError) {
+    write(`会话${error instanceof PersistenceError ? "存储故障" : "访问失败"} [${error.code}]。\n`);
+    return 5;
+  }
+  if (error instanceof ToolExecutionError) {
+    write("工具执行发生内部错误。\n");
+    return 4;
+  }
   // 使用运行时存在的错误类区分来源；interface 编译后消失，不能用于 instanceof。
   if (error instanceof ConfigError) {
-    process.stderr.write(`配置错误：${error.message}\n`);
+    write(`配置错误：${error.message}\n`);
     return 3;
   }
 
@@ -64,11 +73,11 @@ export function reportError(error: unknown): number {
     error instanceof RequestError || error instanceof ResponseError ||
     error instanceof AbortError || error instanceof AgentLoopError
   ) {
-    process.stderr.write(`${error.message}\n`);
+    write(`${error.message}\n`);
     return 4;
   }
 
   // 未分类异常没有经过安全摘要处理，不直接输出 message/stack，避免泄露内部信息。
-  process.stderr.write("程序发生未预期错误。\n");
+  write("程序发生未预期错误。\n");
   return 1;
 }

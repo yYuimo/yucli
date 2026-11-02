@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -25,7 +25,11 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
       requests.push(body);
       const prompt = body.messages.findLast((m) => m.role === "user")?.content;
       res.writeHead(200, { "Content-Type": "text/event-stream" });
-      if (prompt === "hang") res.write(sseFrame(streamChunk({ content: "partial" })));
+      if (prompt === "save-fail") {
+        // 当前模型请求之前 user 已确认；破坏临时 sessions 权限让下一保存屏障拒绝。
+        await chmod(join(cwd, ".yucli", "sessions"), 0o755);
+        res.end(completionSse(completion("shown but not committed")));
+      } else if (prompt === "hang") res.write(sseFrame(streamChunk({ content: "partial" })));
       else if (prompt === "fail") res.end(sseFrame(streamChunk({ content: "partial" })));
       else if (prompt === "read" && body.messages.at(-1)?.role === "user") res.end(completionSse(toolCompletion(), { prompt_tokens: 2, completion_tokens: 3 }));
       else res.end(completionSse(completion("ok"), { prompt_tokens: 2, completion_tokens: 3 }));
@@ -40,7 +44,7 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
 
   function launch(args: string[] = [], timeoutMs = "2000") {
     const child = spawn(process.execPath, [...(mode === "source" ? ["--import", tsx, source] : [built]), ...args], {
-      cwd, env: { PATH: process.env.PATH, OPENCODE_GO_API_KEY: "fake-key", OPENCODE_GO_BASE_URL: server.baseUrl,
+      cwd, env: { PATH: process.env.PATH, HOME: cwd, OPENCODE_GO_API_KEY: "fake-key", OPENCODE_GO_BASE_URL: server.baseUrl,
         YUCLI_REQUEST_TIMEOUT_MS: timeoutMs }, stdio: ["pipe", "pipe", "pipe"],
     });
     children.push(child);
@@ -81,7 +85,7 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
     expect(requests[2]?.messages).toEqual([{ role: "user", content: "third" }]);
     ctx.child.stdin.write("/exit\n");
     expect(await ctx.done).toBe(0);
-    expect(ctx.err()).toBe("");
+    expect(ctx.err()).toContain("新会话：");
     expect(ctx.out()).not.toMatch(/fake-key|data:|tool_calls|reasoning/u);
   });
 
@@ -153,4 +157,25 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
     expect(ctx.out()).toBe("partial\n");
     expect(ctx.err()).toContain("取消");
   });
+  it("D07 管道预送多问题，首次 assistant 保存故障后不发后续请求，退出 5", async () => {
+    const ctx = launch(); await ctx.waitFor(() => ctx.prompts() === 1);
+    ctx.child.stdin.end("save-fail\nsecond\nthird\n");
+    expect(await ctx.done).toBe(5); expect(requests).toHaveLength(1); expect(ctx.err()).toContain("ownership_lost");
+    expect(ctx.err()).not.toContain(cwd); expect(ctx.err()).not.toContain("fake-key");
+  });
+
+  it("首次 create 失败停止消费预送行，退出 5 且无模型请求", async () => {
+    await mkdir(join(cwd, ".yucli"), { mode: 0o755 });
+    const ctx = launch(); await ctx.waitFor(() => ctx.prompts() === 1); ctx.child.stdin.end("first\nsecond\n");
+    expect(await ctx.done).toBe(5); expect(requests).toHaveLength(0);
+  });
+
+  it("A07/A10 非 TTY resume 命令不吃下一问题，new 保留旧文件", async () => {
+    const ctx = launch(); await ctx.waitFor(() => ctx.prompts() === 1);
+    await ctx.line("first"); await ctx.line("/resume"); await ctx.line("next"); await ctx.line("/new"); await ctx.line("fresh");
+    ctx.child.stdin.end("/quit\n"); expect(await ctx.done).toBe(0);
+    expect(requests).toHaveLength(3); expect(requests[1]?.messages).toHaveLength(3); expect(requests[2]?.messages).toHaveLength(1);
+    expect(await readdir(join(cwd, ".yucli", "sessions"))).toHaveLength(2);
+  });
+
 });
