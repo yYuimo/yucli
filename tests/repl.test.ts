@@ -1,10 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { completion, completionSse, readJson, sseFrame, startServer, streamChunk, toolCompletion } from "./helpers.js";
+import { SessionLockAdapter } from "../src/adapters/session/SessionLockAdapter.js";
 
 const source = fileURLToPath(new URL("../src/bootstrap/cli.ts", import.meta.url));
 const built = fileURLToPath(new URL("../dist/bootstrap/cli.js", import.meta.url));
@@ -49,33 +51,44 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
     const child = spawn(process.execPath, [...(mode === "source" ? ["--import", tsx] : []), "--import", observer, mode === "source" ? source : built, ...args], {
       cwd, env: { PATH: process.env.PATH, HOME: cwd, OPENCODE_GO_API_KEY: "fake-key", OPENCODE_GO_BASE_URL: server.baseUrl,
         YUCLI_REQUEST_TIMEOUT_MS: "2000", YUCLI_TEST_TARGET: mode,
-        ...(holdCancellation ? { YUCLI_TEST_HOLD_CANCEL: "1" } : {}) }, stdio: ["pipe", "pipe", "pipe", "ipc"],
+        ...(holdCancellation ? { YUCLI_TEST_HOLD_CANCEL: "1", YUCLI_TEST_HOLD_END_SYNC: "1" } : {}) }, stdio: ["pipe", "pipe", "pipe", "ipc"],
     }) as ChildProcessWithoutNullStreams; // 三条标准流显式为 pipe；IPC 不改变它们的非空保证。
     let stdout = "";
     let stderr = "";
+    const changes = new EventEmitter();
     const stages: { stage: string; id: number; ms: number }[] = [];
-    child.on("message", (stage: typeof stages[number]) => { stages.push(stage); });
-    child.stdout.setEncoding("utf8").on("data", (data: string) => { stdout += data; });
-    child.stderr.setEncoding("utf8").on("data", (data: string) => { stderr += data; });
-    const done = new Promise<number | null>((resolve, reject) => { child.on("close", resolve); child.on("error", reject); });
+    child.on("message", (stage: typeof stages[number]) => { stages.push(stage); changes.emit("change"); });
+    child.stdout.setEncoding("utf8").on("data", (data: string) => { stdout += data; changes.emit("change"); });
+    child.stderr.setEncoding("utf8").on("data", (data: string) => { stderr += data; changes.emit("change"); });
+    const done = new Promise<number | null>((resolve, reject) => {
+      child.on("close", (code) => { changes.emit("change"); resolve(code); });
+      child.on("error", reject);
+    });
     void done.catch(() => {});
     children.push({ child, done });
-    async function waitFor(predicate: () => boolean) {
-      const until = Date.now() + 4000;
-      while (!predicate()) {
-        if (Date.now() > until) {
-          const names = await readdir(join(cwd, ".yucli", "sessions")).catch(() => []);
-          const records = await Promise.all(names.map(async (name) => {
-            const bytes = await readFile(join(cwd, ".yucli", "sessions", name), "utf8");
-            return bytes.trimEnd().split("\n").map((line) => {
-              try { const row = JSON.parse(line); return { seq: row.seq, type: row.type, role: row.payload?.role, outcome: row.payload?.outcome }; }
-              catch { return { type: "incomplete_record" }; }
-            });
-          }));
-          throw new Error(`child observation timed out: ${stdout} / ${stderr} / exit ${child.exitCode}/${child.signalCode} / observed-prefix ${JSON.stringify(records)} / stages ${JSON.stringify(stages)}`);
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
+    function waitFor(predicate: () => boolean, until = performance.now() + 4000): Promise<void> {
+      if (predicate()) return Promise.resolve();
+      // 输出、IPC 和实际退出都用事件唤醒；同一取消流程可复用一个4秒绝对截止点，不轮询或重置期限。
+      return new Promise((resolve, reject) => {
+        const check = () => { if (predicate()) { clearTimeout(timer); changes.removeListener("change", check); resolve(); } };
+        const timer = setTimeout(() => {
+          changes.removeListener("change", check);
+          // 附诊断只在截止后运行，不把额外的磁盘读取算成“继续等待下一提示”。
+          void (async () => {
+            const names = await readdir(join(cwd, ".yucli", "sessions")).catch(() => []);
+            const records = await Promise.all(names.map(async (name) => {
+              const bytes = await readFile(join(cwd, ".yucli", "sessions", name), "utf8");
+              return bytes.trimEnd().split("\n").map((line) => {
+                try { const row = JSON.parse(line); return { seq: row.seq, type: row.type, role: row.payload?.role, outcome: row.payload?.outcome }; }
+                catch { return { type: "incomplete_record" }; }
+              });
+            }));
+            reject(new Error(`child observation timed out: prompts ${prompts()} / cancellation ${stderr.includes("取消")} / exit ${child.exitCode}/${child.signalCode} / observed-prefix ${JSON.stringify(records)} / stages ${JSON.stringify(stages)}`));
+          })().catch(reject);
+        }, Math.max(0, until - performance.now()));
+        changes.on("change", check);
+        check();
+      });
     }
     const prompts = () => stdout.split("yucli> ").length - 1;
     async function line(text: string) {
@@ -175,17 +188,39 @@ describe.each(["source", "built"])("REPL/流式信号 %s 子进程", (mode) => {
     await ctx.waitFor(() => ctx.prompts() === 1);
     ctx.child.stdin.write("hang\n");
     await ctx.waitFor(() => ctx.out().includes("partial"));
+    const until = performance.now() + 4000;
     ctx.child.kill("SIGINT");
+    await ctx.waitFor(() => ctx.stages.some((item) => item.stage === "turn_end_sync:held"), until);
+    // 真实取消已传到网络，原 fsync 也完成，但尚未交付保存确认；这时不得出现下一提示或提前关锁。
+    expect(ctx.stages.map((item) => item.stage)).toEqual(expect.arrayContaining(["signal:received", "fetch:abort", "stream:settled"]));
+    expect(ctx.prompts()).toBe(1);
+    expect(ctx.err()).not.toContain("取消");
+    const names = await readdir(join(cwd, ".yucli", "sessions"));
+    const rows = (await readFile(join(cwd, ".yucli", "sessions", names[0]!), "utf8")).trimEnd().split("\n").map((line) => JSON.parse(line));
+    expect(rows.at(-1)).toMatchObject({ seq: 2, type: "turn_end", payload: { outcome: "cancelled" } });
+    const locks = new SessionLockAdapter({ storageRoot: join(cwd, ".yucli") });
+    expect(await locks.probe(rows[0].sessionId)).toBe("busy");
+    expect(ctx.stages.some((item) => item.stage === "writer_close:start")).toBe(false);
+    ctx.child.send({ release: "end_sync" });
     // 明确构造 stdout 先到、stderr 后到；不靠负载或固定 sleep 碰运气复现管道乱序。
-    await ctx.waitFor(() => ctx.prompts() === 2 && ctx.stages.some((item) => item.stage === "stderr:held"));
+    await ctx.waitFor(() => ctx.prompts() === 2 && ctx.stages.some((item) => item.stage === "stderr:held"), until);
     expect(ctx.err()).not.toContain("取消");
     ctx.child.send({ release: "cancel_notice" });
-    await ctx.waitFor(() => ctx.prompts() === 2 && ctx.err().includes("取消"));
+    await ctx.waitFor(() => ctx.prompts() === 2 && ctx.err().includes("取消"), until);
     expect(ctx.err()).toContain("取消");
+    const cancelledTimeline = ctx.stages.map((item) => item.stage);
+    const endConfirmed = cancelledTimeline.indexOf("fact:turn_end:cancelled:fulfilled");
+    expect(endConfirmed).toBeGreaterThan(cancelledTimeline.indexOf("stream:settled"));
+    expect(endConfirmed).toBeLessThan(cancelledTimeline.lastIndexOf("prompt:issued"));
+    expect(cancelledTimeline.indexOf("stderr:cancel_notice")).toBeGreaterThan(endConfirmed);
     await ctx.line("next");
     expect(requests.at(-1)?.messages).toEqual([{ role: "user", content: "next" }]);
     ctx.child.kill("SIGINT");
     expect(await ctx.done).toBe(130);
+    expect(await locks.probe(rows[0].sessionId)).toBe("available");
+    const timeline = ctx.stages.map((item) => item.stage);
+    expect(timeline.lastIndexOf("close:fulfilled")).toBeLessThan(timeline.indexOf("lock_release:start"));
+    expect(timeline).toContain("lock_release:fulfilled");
   });
 
   it("单次模式 SIGINT 返回 4，部分文本换行且仅在 stderr 输出取消", async () => {
