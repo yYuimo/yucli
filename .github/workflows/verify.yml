@@ -19,7 +19,6 @@ jobs:
     env:
       OPENCODE_GO_API_KEY: ""
       OPENCODE_GO_BASE_URL: http://127.0.0.1:1/v1
-      YUCLI_VERIFY_OUTPUT: ${{ runner.temp }}/yucli-verification
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -42,6 +41,9 @@ jobs:
           pnpm install --frozen-lockfile
           node -e 'const assert = require("node:assert/strict"); assert.equal(typeof require("fs-ext").flock, "function");'
       - name: Typecheck, lint, build and run all tests
+        # runner 上下文在步骤级 env 可用；日志和下方 artifact 使用同一临时目录。
+        env:
+          YUCLI_VERIFY_OUTPUT: ${{ runner.temp }}/yucli-verification
         shell: bash
         run: |
           mkdir -p "$YUCLI_VERIFY_OUTPUT"
@@ -53,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: yucli-macos-arm64-verification
-          path: ${{ env.YUCLI_VERIFY_OUTPUT }}
+          path: ${{ runner.temp }}/yucli-verification
           if-no-files-found: warn
 
   unsupported-environment:
