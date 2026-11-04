@@ -1,6 +1,6 @@
 # yucli 初始架构与开发路线
 
-状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调/期限/监督与 T8 SessionStore/list、CLI/picker/持久化 REPL 已实现并通过目标环境验证；T7/T8/T9 已于2026-11-02按用户授权分批提交到阶段分支，阶段分支可按授权推送用于 CI。T9 当前为 `partial`：本机矩阵、真实故障退出/重启恢复及终端证据已补，但原 SIGINT 超限未定位、托管 CI 尚未运行；T10 本地预收口完成，最终签收待 CI。
+状态：阶段 01 和阶段 02 已按四层依赖结构实现、验证并完成项目规划审查（`done`）；阶段 03 已验证；阶段 04 保持 `implementing`，T2–T6 已提交，T7 协调/期限/监督与 T8 SessionStore/list、CLI/picker/持久化 REPL 已实现并通过目标环境验证；T7/T8/T9 已于 2026-11-02 按用户授权分批提交到阶段分支。T9 当前为 `partial`/未勾选：本机矩阵、真实故障退出/重启恢复及终端证据已补，用户已接受已知低频 SIGINT test-harness 观察风险；原 4 秒超限仍未定位，窗口不变、无自动重试，不声称根因已修复。唯一剩余签收条件是托管 CI，尚待运行；T10 本地预收口完成、最终签收待 CI，仍未勾选，四份扩展契约保持 `draft`。下一步为 push/CI。
 
 ## 目标场景
 
@@ -159,7 +159,7 @@ T8 的生产调用链现在为：`cliOptions → cli → sessionApp → SessionS
 
 `runRepl → runPersistentTurn → CommittedTurnResult → 历史整组提交` 已连通。新会话惰性创建；恢复用 core 的 projectSessionHistory，配置提示只在 stderr 首次新请求前出现。/new 与 /clear 关闭旧 writer、清历史，下题才 create；/resume 按准备/关闭/替换顺序，访问拒绝保留旧健康状态。PersistenceError 停输入/取消，由 sessionApp 调用 supervisor 与真实 closeSettled，组合根 cli 注入 process.exit(5)，core/adapter 不直接退出。
 
-T8 新增 4 个测试文件、172 项，目标 macOS arm64/Node 24.14.0/pnpm 10.33.2 全部 24 文件/1000 项及 typecheck/lint/build 通过。源码/构建路径验证只读列表、参数/配置顺序、非 TTY 恢复、真实 busy、D07 故障后停止管道；可控模块测试覆盖共享 picker、候选 I/O/取消、旧 close 屏障和注入退出。真实 5 秒强制退出、重启/崩溃恢复、完整阶段矩阵与人工 TTY 验收仍留 T9，T10 审查未开始。
+T8 新增 4 个测试文件、172 项，目标 macOS arm64/Node 24.14.0/pnpm 10.33.2 全部 24 文件/1000 项及 typecheck/lint/build 通过。源码/构建路径验证只读列表、参数/配置顺序、非 TTY 恢复、真实 busy、D07 故障后停止管道；可控模块测试覆盖共享 picker、候选 I/O/取消、旧 close 屏障和注入退出。T8 交付时，真实 5 秒强制退出、重启/崩溃恢复、完整阶段矩阵与人工 TTY 验收仍留 T9，T10 审查未开始；后续结果见下文。
 
 
 
@@ -167,7 +167,7 @@ T9 只增加测试与 CI 定义，生产模块、存储格式和四层依赖不�
 
 `sessionTerminal` 通过 Python 标准库 PTY 驱动真实 stdin/stdout，验证 picker 编号/刷新、访问竞争、current/all、Ctrl+C/EOF 及只有单边 TTY 时的拒绝。Agent 另用真实终端逐步执行源码建会话→退出→构建产物 picker 恢复和取消，原工具结果未重读、两正文扫描合法且锁已释放；不把它描述为用户本人已操作。
 
-T9 新增 3 个测试文件、56 项，本机全套 27 文件/1057 项及 typecheck/lint/build 通过。新增 `.github/workflows/verify.yml` 固定 macos-15 arm64、Node 24.14.0/pnpm 10.33.2，显式检查 Python/Xcode/native，平台不符直接失败而非 skip；配置通过本地 YAML 解析，托管 job 尚未执行；非目标兼容矩阵覆盖Linux/Windows/macOS Intel/Node22，Node22.22.0反例已在本机单独实跑。用户首轮复核1056/1057，已修正共享60 ms请求期限和跨stdout/stderr管道的测试等待，并增加真实I/O settle阶段诊断与受控管道乱序回归；没有改生产算法或4秒观察窗口。原并行SIGINT超限仍未定位、CI待验，T9保持partial/不能签收，T10 未进入，阶段保持 implementing。
+T9 新增 3 个测试文件、56 项，本机全套 27 文件/1057 项及 typecheck/lint/build 通过。新增 `.github/workflows/verify.yml` 固定 macos-15 arm64、Node 24.14.0/pnpm 10.33.2，显式检查 Python/Xcode/native，平台不符直接失败而非 skip；配置通过本地 YAML 解析，托管 job 尚未执行；非目标兼容矩阵覆盖Linux/Windows/macOS Intel/Node22，Node22.22.0反例已在本机单独实跑。用户首轮复核 1056/1057，已修正共享 60 ms 请求期限和跨 stdout/stderr 管道的测试等待，并增加真实 I/O settle 阶段诊断与受控管道乱序回归；后续 `92484fe` 补充取消保存确认时间线与 IPC 屏障断言。最新三次全套均为 27 文件/1057 项通过，400 次并发 SIGINT 无非预期失败；主动暂扣同步确认造成的两次预期超限单列，不作为原始超限根因证据。用户已接受已知低频 SIGINT test-harness 观察风险，原 4 秒超限仍未定位，窗口不变、无自动重试，不声称根因已修复。T9 保持 `partial`/未勾选，唯一剩余签收条件为托管 CI；T10 本地预收口完成、最终签收待 CI且未勾选，阶段保持 `implementing`，扩展契约仍为 `draft`。
 
 ### 依赖检查
 

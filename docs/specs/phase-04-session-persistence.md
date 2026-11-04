@@ -4,7 +4,7 @@
 
 规格日期：2026-10-27（Asia/Shanghai）。工作分支：`phase/04-session-persistence`。
 
-交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调/期限/监督与 T8 list/picker/持久化 CLI/REPL。T5/T6 已提交；T7/T8 通过目标验证，2026-11-02按用户授权将T7/T8/T9分批提交到阶段分支，阶段分支可按授权推送用于 CI，阶段保持 `implementing`。T8 已通过用户验收；T9 当前为 `partial`，本机矩阵/真实进程与终端证据已补但尚不能签收；测试修订后原 SIGINT 超限仍未定位，托管 CI 未运行；T10 本地预收口完成，最终签收待 CI。
+交互修订：2026-10-28（Asia/Shanghai）。参考 Codex CLI/Pi 的恢复入口，改为默认选择器、继续最近会话与已知 ID 直达；新增 `/new`，保留 `/clear` 别名。规格已完成评审；2026-10-29 按独立授权完成 T2–T6，并完成 T7 协调/期限/监督与 T8 list/picker/持久化 CLI/REPL。T5/T6 已提交；T7/T8 通过目标验证，2026-11-02 按用户授权将 T7/T8/T9 分批提交到阶段分支，阶段保持 `implementing`。T8 已通过用户验收；T9 当前为 `partial`/未勾选，本机矩阵/真实进程与终端证据已补，最新三次全套均为 27 文件/1057 项通过，400 次并发 SIGINT 无非预期失败。2026-11-04 用户已接受已知低频 SIGINT test-harness 观察风险；原 4 秒超限仍未定位，4 秒窗口不变、无自动重试，不声称根因已修复。T9 唯一剩余签收条件是托管 CI，尚待运行；T10 本地预收口完成、最终签收待 CI，仍未勾选，四份扩展契约保持 `draft`。下一步为 push/CI，本次仅提交文档，不 push/merge/tag。
 
 用户已确认调研可以收口并完成本规格评审；本文件把[会话持久化调研报告](../research/session-persistence-research.md)第 9 章整理成可实施、可验收的规格。当前已获 T1–T9 授权，T10 已完成本地预收口但最终签收待 CI，不将调研探针、存储、core、监督和 T8 产品子集验证视为 T9 完整阶段验收；T5 交付成功 turn 业务快照，T6 交付纯模型投影，T7 交付唯一终止协调和期限监督能力，T8 接入 CLI/REPL；T9 已补真实故障退出子进程与本机完整矩阵，托管 CI 保持未执行。
 
@@ -577,8 +577,8 @@ header-only、创建失败产物、稳定锁文件及备份会累积。手动删
 - [x] **T6 core 交付与纯模型投影**：调整 runTurnStream、executeToolBatch、RegisteredTools 的逐项事实与结果取消边界；新增纯 ToolResult→ToolMessage 转换与 ToolExecutionError；新增 sessionHistory/恢复历史投影，把 T5 的 RecoveredItem/RecoveredTurn 业务快照转换为模型消息，保持整批预检、顺序、额度和兼容路径。新增 57 项、2 个测试文件，目标环境全部 17 文件/749 项及 typecheck/lint/build 通过；已获用户授权独立提交，不含 T7/T8。
 - [x] **T7 协调与退出监督**：新增 runPersistentTurn，唯一 user/turn_end、保存确认提交凭证、PersistenceError 穿透；实现 30 秒操作等待、5 秒故障收尾和组合根应急退出能力。新增 79 项、3 个测试文件，目标环境 20 文件/828 项及 typecheck/lint/build 通过；2026-11-02按用户授权提交。监督通过注入回调/退出能力验证，实际 CLI/REPL 接线和真实退出子进程仍归 T8/T9。
 - [x] **T8 CLI/REPL**：分开新建/单次/列表/选择恢复/直接恢复/continue；实现共用行式 picker、TTY 检查、编号快照和 current/all/刷新/取消、new/clear 别名、最近候选选择及无会话行为；接入列表状态、配置提示和安全退出；故障后停止消费管道中的后续问题。目标环境新增 172 项、4 个测试文件，全部 24 文件/1000 项及 typecheck/lint/build 通过；2026-11-02按用户授权提交，完整矩阵/真实强制退出与重启恢复留 T9。
-- [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。已完成本机 46 行矩阵映射、真实进程/PTY 与 Agent 逐步终端冒烟，新增 56 项；有 27 文件/1057 项全绿记录，但用户首轮复核为 1056/1057，不能用重跑覆盖。已修正共享 60 ms 请求期限和跨输出管道观察条件，详见下文复核记录；原并行 SIGINT 的 4 秒超限仍未定位，托管 CI 未运行，故保持 partial/未勾选，尚不能签收。
-- [ ] **T10 文档与完成审查**：按实测结果更新本文件、README、architecture、契约与依赖说明；报告保留限制和未验证环境，审核中文注释、Git diff 和阶段分支。只有验证完成才转 verified，用户审查后再转 done/申请集成。
+- [ ] **T9 集成验收**：运行第 12 节矩阵及项目类型、Lint、构建和全套测试；源码/构建产物 CLI、锁与故障子进程均覆盖；完成目标环境的人工重启/恢复检查。已完成本机 46 行矩阵映射、真实进程/PTY 与 Agent 逐步终端冒烟，新增 56 项；最新三次全套均为 27 文件/1057 项通过，400 次并发 SIGINT 无非预期失败，用户首轮 1056/1057 的失败记录仍保留。已修正共享 60 ms 请求期限和跨输出管道观察条件，并补充取消时间线/保存确认屏障断言；原并行 SIGINT 4 秒超限仍未定位，4 秒窗口不变、无自动重试，不声称根因已修复。用户已接受已知低频 test-harness 观察风险；唯一剩余签收条件为托管 CI，尚待运行，保持 `partial`/未勾选。
+- [ ] **T10 文档与完成审查**：按实测结果更新本文件、README、architecture、契约与依赖说明；报告保留限制和未验证环境，审核中文注释、Git diff 和阶段分支。本地预收口已完成，最终签收待 CI，仍未完成/未勾选；阶段保持 `implementing`，四份扩展契约保持 `draft`。只有验证完成才转 verified，用户审查后再转 done/申请集成。
 
 规划新增模块为 contracts/session.ts、core/runPersistentTurn.ts、core/sessionHistory.ts、core/toolMessage.ts，以及 adapters/session 下的 store/writer/scanner/repair/lock/prefix 组件；具体文件拆分可随实现规模合并，但职责、依赖方向和验收不能省略。bootstrap 可新增共享 sessionPicker 与小型会话生命周期/退出监督模块，不把交互放入存储 adapter 或业务过程堆入参数解析器，不新建事件总线、插件平台或未使用抽象。
 
@@ -1147,7 +1147,7 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
 
 ### T9 集成验收实际结果与开发报告（2026-10-30）
 
-状态：`partial`，**尚不能签收**。**已完成**：本机 46 行验收矩阵证据归档、源码/构建产物真实重启/取消/锁/故障退出/修复中断、真实 PTY 及 Agent 逐步终端冒烟；复核后修正测试的请求期限与跨管道观察条件。**部分完成**：托管 CI workflow 已准备并通过本地 YAML 解析，尚无托管运行结果。**验收阻塞**：用户首跑 1056/1057 的失败保留记录；原并行 SIGINT 超过4秒观察窗仍未定位，修订测试后的绿色结果不能证明它已修复。开发时未获提交/推送授权；2026-11-02用户已授权提交T7/T8/T9到阶段分支，尚未授权推送或明确接受CI延后。提交不代表签收，T9不勾选、不将阶段转为verified。T10 完成审查未进入。
+状态（2026-11-04 更新）：`partial`，**未勾选，唯一剩余签收条件为托管 CI**。**已完成**：本机 46 行验收矩阵证据归档、源码/构建产物真实重启/取消/锁/故障退出/修复中断、真实 PTY 及 Agent 逐步终端冒烟；修正测试的请求期限与跨管道观察条件，后续补充取消时间线和保存确认屏障断言，最新三次全套均为 27 文件/1057 项通过，400 次并发 SIGINT 无非预期失败。**已接受风险**：用户明确接受已知低频 SIGINT test-harness 观察风险；原 4 秒超限仍未定位，4 秒窗口不变、无自动重试，不声称根因已修复，保留用户首轮 1056/1057 和原始超限记录。**部分完成**：托管 CI workflow 已准备并通过本地 YAML 解析，尚无托管运行结果；风险接受不等于接受 CI 延后或免除 CI。T7/T8/T9 已分批提交，诊断增强已提交为 `92484fe`；T10 本地预收口完成、最终签收待 CI，仍未勾选，阶段保持 `implementing`，四份扩展契约保持 `draft`。以下保留历史验证记录，当前风险与签收口径以本次补记为准。
 
 #### 完成内容与关键设计选择
 
@@ -1190,7 +1190,7 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
 | C04 | 通过 | `coreFacts` 注册表进入后取消/完整结果交付/结果保存期间取消；`toolRegistry` 结果优先语义回归 |
 | C05 | 通过 | `coreFacts` 第一项结果后第二取消/工具后 HTTP 失败/末轮不执行/内部异常分类，`persistentTurn` 第8次模型上限 |
 | C06 | 通过 | `persistentTurn` 固定各 outcome 后迟到取消/终止失败，`sessionRepl` success end 延迟时 Ctrl+C 仍提交已固定成功 |
-| C07 | 部分，待收口 | `persistentTurn` cancelled/timeout 终止保存与失败屏障，`repl` 模型 timeout 后继续，T9 真实 PTY 活跃 Ctrl+C；另有未定位的源码 SIGINT 4秒观察超限，不以重复通过替代定位 |
+| C07 | 已验证，观察风险已接受 | `persistentTurn` cancelled/timeout 终止保存与失败屏障，`repl` 模型 timeout 后继续，T9 真实 PTY 活跃 Ctrl+C；原源码 SIGINT 4 秒超限未定位，用户已接受已知低频 test-harness 观察风险；最新三次全套和 400 次并发 SIGINT 无非预期失败不等于根因已修复，4 秒窗口不变、无自动重试 |
 | D01 | 通过 | `sessionLock` IPC 同/不同会话和重复句柄；`sessionProcess` 闲置/暂停 CLI busy/5、`sessionTerminal` 列举后取锁竞争 |
 | D02 | 通过 | `sessionLock` mtime 不抢占/停止态，`sessionProcess` SIGSTOP/CONT/close/KILL 后接管、inode 保留 |
 | D03 | 通过 | `sessionLock` 注入不支持平台/native 错误、inode 替换；既有真实子进程 help/prompt 不加载 native；不推断真实其他平台已支持 |
@@ -1258,14 +1258,27 @@ npm exec --yes --package=node@24.14.0 --package=pnpm@10.33.2 \
 
 两次均 typecheck/lint/build 通过，**27文件/1057项通过，失败/跳过/pending/todo均为0**，Vitest耗时分别36.68秒、36.65秒；各有独立JSON及同名.log，没有重试/skip。定向 `pnpm exec vitest run tests/repl.test.ts` 为1文件/24项通过。此次只加强既有用例，正式测试数不增加；T9累计新增仍为3文件/56项。入场原代码的本轮完整复核、增加诊断后的完整复核也各为1057通过，保留在 `review-before-1.*`、`review-observed-full-1.*`，不能据此否认用户首跑1056/1057或原SIGINT超限。这些结果不代表上述未定位项已修复，不改变partial结论。
 
+#### SIGINT 后续复核与风险接受（2026-11-04）
+
+已核对开发复核报告及其原始 JSON/日志，诊断增强现已提交为 `92484fe`（`test(session): instrument SIGINT cancellation timeline`）。本轮仅同步文档，以下是已有验证结果，不是本轮重新执行的测试。
+
+- 目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 下，最终测试逻辑连续三次 typecheck/lint/build 通过，全套均为 **27 文件/1057 项通过**，失败/skip/pending/todo 均为 0；Vitest 耗时分别为 36.55、36.74、36.72 秒。没有自动重试、skip 或串行化设置；三轮后仅澄清一行测试注释，并再次通过 typecheck/lint。
+- 两组真实 SIGINT 压力验证均按 8 并发、25 批次执行，每组源码/构建各 100 次，合计 **400 次、非预期失败 0 次**，最大取消观察耗时 98 ms。诊断实验不计入正式 1057 项测试。
+- 受控实验主动暂扣取消 `turn_end` 的同步确认，在源码/构建入口各制造一次 4 秒预期超限；放行后正常返回提示并关闭/释放锁。这两次预期失败单列，不混入压力验证的“非预期失败 0 次”。它只证明保存确认等待可以产生相同表象，不能证明原始自然超限发生于同一路径。
+- 诊断与屏障断言仅在 tests 中，生产取消、JSONL、锁、30 秒操作期限和 5 秒故障收尾均未改变。SIGINT 各观察步骤仍共用同一个 **4000 ms** 截止点，无自动重试；原始自然超限未复现定位，不存在可申报完成的根因修复。
+
+证据目录为 `/var/folders/fx/88817gmd5vz2tz4q5s_kzn_w0000gn/T/yucli-sigint-audit-fvd76pkp`：`development-report.md`、`full-1/2/3.json` 及同名日志、`full-summary.json`、`natural-stress.json`、`post-stress.json`、`stress-summary.json`、`controlled-end-sync.json` 及脚本/日志。该目录是本机临时证据，不作为托管 CI 结果。
+
+**用户决定**：接受原 SIGINT 4 秒超限作为已知低频 test-harness 观察风险。这是风险接受口径，不是对根因的归类或修复结论；保留历史失败，4 秒窗口不变、无自动重试。SIGINT 定位不再作为 T9 的签收前置条件；T9 仍为 `partial`/未勾选，**唯一剩余签收条件是托管 CI**。T10 保持未完成，阶段保持 `implementing`，session-store、CLI、REPL、tool-execution 四份扩展契约仍为 `draft`。
+
 #### 目标机逐步终端冒烟（Agent 操作）
 
 在独立临时 HOME/realpath cwd 启动本地 SSE，逐步操作真实终端：源码 REPL 输入 `read`，确认只读文件工具返回中文/emoji后回答；`/new` 后输入新问题、`/exit`，再用构建产物 `--resume` 选择旧会话编号2，输入 `after restart`；在 REPL `/resume` 中 Ctrl+C 返回原提示，最终 `/exit` 为0。整个过程仅4次本地模型请求（原工具往返2、新会话1、恢复后1），恢复请求保留原 tool 内容，未重放旧请求。实际扫描两文件合法、seq分别9/3、成功组2/1，两个锁均available。会话临时目录已在检查后清理，过程摘要与请求断言证据留本轮临时验证目录；不是用户本人独立操作或真实服务联调。
 
 #### 未完成事项、限制与 Git
 
-- **并行 SIGINT 验收阻塞**：一轮全量中，既有 `repl.test.ts` 源码 SIGINT 用例等待提示超过4秒；之后重复和全套通过，未再次拿到该次超限的根因证据。本轮已受控回归独立输出管道竞态、增加真实 I/O settle 诊断，但它们不能解释原始无下一提示的现象。未延长4秒窗口、未设置自动重试、未声称原超限已修复；在完成定位前T9不能签收。
-- **托管 CI 待执行**：已有可审查workflow，T7/T8/T9现按用户授权提交到阶段分支，尚未推送或运行托管CI，也未明确接受CI延后。T9保持partial/未勾选。T10、阶段状态收口、合并main、标签与发布都未进行。
+- **并行 SIGINT 已接受风险**：一轮全量中，既有 `repl.test.ts` 源码 SIGINT 用例等待提示超过 4 秒；原始自然超限仍无根因证据。受控跨管道回归、真实 I/O 时间线、保存确认屏障实验和后续绿色结果均不能证明原超限已修复。用户于 2026-11-04 接受其为已知低频 test-harness 观察风险；4 秒窗口不变、无自动重试，定位不再阻塞 T9 签收。
+- **托管 CI 待执行（唯一剩余 T9 签收条件）**：已有可审查 workflow，T7/T8/T9 已提交到阶段分支，尚无托管 CI 运行结果，未接受 CI 延后。T9 保持 `partial`/未勾选；T10 本地预收口完成、最终签收待 CI，仍未勾选。阶段保持 `implementing`，四份扩展契约保持 `draft`；本次仅提交文档，不 push/merge/tag。
 - 持久化正例只验证macOS arm64/Node24.14.0/本地文件系统；另验证真实Node22.22.0的非持久化兼容与持久化拒绝，未验证其他真实OS、共享挂载、硬件断电或真实模型；注入I/O不表示真实磁盘设备挂死，SIGKILL不证明断电耐久。advisory锁、非原子列表、无单行字节硬上限、事件循环须可运行等限制保持。
 - 提交前的开发交付快照：分支 `phase/04-session-persistence`、HEAD `c3cef76`；git status 为21个已跟踪修改、26个未跟踪文件（合计47），包括继承的T7/T8及research内容；T9新增9文件，改动8份结果文档及1份既有测试。暂存区为空，git diff --check通过；未提交/推送/合并/tag。research SHA-256仍为 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`，上级plan.md仍为 `f2960054989e3d2f6f28658eb8508d01e40bf8b2eca33de814d49a24bbab353b`；不访问真实~/.yucli，不读取项目.env，不产生付费请求。
 
@@ -1295,28 +1308,29 @@ README的既有阶段03状态hunk只保留在工作区，不纳入T7/T8/T9；res
 
 #### 已完成
 
-- 已核对提交边界：`57b7a27` 为 T7 协调器、公开期限和监督；`7879725` 为 T8 SessionStore/list、CLI/picker 和持久化 REPL；`308849d` 为 T9 真实进程/PTY 验收、测试观察修订和 CI workflow。三个提交均未包含 `docs/research/session-persistence-research.md`；T9 提交中的 `README.md` 只保留了入场时已有的阶段 03 hunk。
+- 已核对提交边界：`57b7a27` 为 T7 协调器、公开期限和监督；`7879725` 为 T8 SessionStore/list、CLI/picker 和持久化 REPL；`308849d` 为 T9 真实进程/PTY 验收、测试观察修订和 CI workflow。三个提交均未包含 `docs/research/session-persistence-research.md`；T9 提交中的 `README.md` 未包含入场时已有的阶段 03 hunk。
 - 当前工作区剩余修改核对为 `README.md` 的阶段 03 既有 hunk 与 research 未提交修改；research SHA-256 为 `987ce1368dd6e660a0b6fc3386ad6b19b1d4284cbda2ecc83157214b7a5a794b`。README 的阶段 04 行已同步 T10 本地预收口和 CI 待签收状态；阶段 03 既有 hunk 未改、未计入 T10；research 未修改。
 - 已统一阶段入口与契约摘要：阶段为 `implementing`；T9 明确为 `partial`、未签收；T10 本地预收口完成、最终签收待 CI；session-store、CLI、REPL、tool-execution 扩展继续为 `draft`。ADR-006 的 `accepted` 仍表示设计决策已接受，不表示运行时阶段已验收。
 - 当前目标工具链本地检查已运行：Node `24.14.0`、pnpm `10.33.2`；typecheck、lint、build 和 test 均通过，精确结果为 **27 个测试文件、1057 项测试通过**。本次未运行托管 CI、真实模型联调、其他平台/Node/共享挂载或设备断电测试。
-- 已复核第 12 节 46 行矩阵：C07 保持“部分，待收口”；注入/模块、临时真实文件、CLI/PTY 和故障子进程的证据层次分开记录，没有把模块注入或 preload 测试表述成完整 CLI/平台验收。
-- T10 入口已逐项核对：README（保留既有 hunk）、docs/README、architecture、四份契约、ADR-006、阶段规格、依赖/CI 说明、中文注释、Git diff 和阶段分支。没有发现新的代码或测试缺陷；已知 SIGINT 超限风险仍需开发 Agent 定位。
+- 已复核第 12 节 46 行矩阵：C07 当时为“部分，待收口”，2026-11-04 按用户决定更新为“已验证，观察风险已接受”；原超限未定位，不声称根因已修复。注入/模块、临时真实文件、CLI/PTY 和故障子进程的证据层次分开记录，没有把模块注入或 preload 测试表述成完整 CLI/平台验收。
+- T10 入口已逐项核对：README（保留既有 hunk）、docs/README、architecture、四份契约、ADR-006、阶段规格、依赖/CI 说明、中文注释、Git diff 和阶段分支。没有发现新的代码或测试缺陷；已知低频 SIGINT 观察风险现已由用户接受，后续定位不再作为 T9 的签收前置条件。
 
 #### 部分完成与阻塞
 
 - T9 本机矩阵、真实重启/恢复、锁冲突、故障退出、修复中断和 PTY 证据已归档；本地最终重跑通过不能覆盖用户首轮 `1056/1057` 失败记录。
-- 原并行 SIGINT 4 秒观察超限仍无根因证据。后续受控管道诊断最大约 60 ms，只能解释一类 stdout/stderr 观察竞态，不能解释原始超限；不能把重跑绿色写成根因已修复。
+- 原并行 SIGINT 4 秒观察超限仍无根因证据。后续受控管道诊断、保存确认屏障实验、三次 27 文件/1057 项全套通过和 400 次并发 SIGINT 无非预期失败，均不能证明原超限已修复。2026-11-04 用户已接受该已知低频 test-harness 观察风险，4 秒窗口不变、无自动重试；该风险不再阻塞 T9 签收。
 - `.github/workflows/verify.yml` 已定义并通过本地 YAML 解析，但托管 CI job 尚未运行。T9 因此保持 `partial`，T10 不能据此签收。
 
-#### T9/T10 签收前必须完成
+#### T9/T10 签收条件（2026-11-04 更新）
 
-1. 定位并复现原 SIGINT 4 秒超限，或由开发 Agent 提供足以解释原始失败的证据和修复；修复后重新运行相关源码/构建产物和全套矩阵，不延长观察窗、不用自动重试掩盖问题。
-2. 运行托管 CI workflow，确认目标 macOS arm64/Node 24.14.0 正例、依赖/native 构建门禁和非目标平台/Node 反例；保存 job URL、日志和 artifact 结果。
-3. 由用户审查 T9 partial 的失败记录、修订测试和 CI 结果；在此之前不勾 T9、不转 `verified`。
-4. 完成 T10 的最终文档/注释/Git diff 审查，确认 README 既有 hunk 与 research 未提交修改没有混入阶段收口；用户明确接受后，才决定是否把契约从 `draft` 改为 `accepted`、阶段转 `verified`/`done` 或申请集成。
+SIGINT 风险接受条件已满足：用户接受已知低频 test-harness 观察风险，原 4 秒超限仍未定位；4 秒窗口不变、无自动重试，不声称根因已修复。原“必须先定位或修复 SIGINT 才能签收”的条件由本决定替代。
+
+T9 **唯一剩余签收条件**：运行托管 CI workflow，确认目标 macOS arm64/Node 24.14.0 正例、依赖/native 构建门禁和非目标平台/Node 反例；保存并审查 job URL、日志和 artifact 结果。托管 CI 结果补齐前，T9 保持 `partial`/未勾选；风险接受不免除 CI，也不把本地全绿等同于托管通过。
+
+T10 保持未完成：本地预收口已完成，待 CI 后完成最终文档/注释/Git diff 审查，确认 README 既有阶段 03 hunk 与 research 未提交修改没有混入阶段收口；用户明确接受后，才决定是否把契约从 `draft` 改为 `accepted`、阶段转 `verified`/`done` 或申请集成。本次不勾 T9/T10，不转 `verified`，不 push/merge/tag。
 
 #### CI 变绿后的预定文档动作
 
-CI 绿且 SIGINT 风险收口、用户审查通过后，才将 T9 任务勾选并把 T9 状态从 `partial` 改为已完成；随后更新 README、docs/README、architecture、ADR-006、session-store/CLI/REPL/tool-execution 契约和上级 `agent-lab/plan.md` 的验证结果。契约只有在运行时验收和用户审查均完成后才考虑由 `draft` 转为 `accepted`；阶段再按 T10 审查结果决定是否转 `verified`，不由本地 1057 项全绿自动触发。
+SIGINT 观察风险已由用户接受；后续 CI 变绿并完成结果审查后，才将 T9 任务勾选并把 T9 状态从 `partial` 改为已完成，仍保留原超限未定位的风险记录；随后更新 README、docs/README、architecture、ADR-006、session-store/CLI/REPL/tool-execution 契约和上级 `agent-lab/plan.md` 的验证结果。契约只有在运行时验收和用户审查均完成后才考虑由 `draft` 转为 `accepted`；阶段再按 T10 审查结果决定是否转 `verified`，不由本地 1057 项全绿自动触发。
 
-当前结论：**不能勾选 T9，不能勾选 T10，不能把阶段转为 `verified`，不能合并 `main`；阶段分支可按授权推送用于 CI。**
+当前结论：**T9 保持 `partial`/未勾选，SIGINT 观察风险已接受，唯一剩余签收条件为托管 CI；T10 未勾选，阶段保持 `implementing`，不是 `verified`，四份扩展契约仍为 `draft`。下一步为 push/CI，本次不 push/merge/tag。**

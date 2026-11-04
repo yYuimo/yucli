@@ -233,7 +233,7 @@ type SessionList = {
 
 ## T2 锁能力实现状态（2026-10-29）
 
-T2–T8 已实现锁、扫描、writer、恢复修复、core 交付/投影/协调、操作期限/监督，以及 SessionStore/list 与 CLI/REPL 接线。本文整体仍为 `draft`；T9 当前为 `partial`，本机矩阵和真实进程证据已补，但原 SIGINT 超限未定位、托管 CI 未运行；T10 本地预收口完成，最终签收待 CI。各任务交付时的范围与历史验证见下文。
+T2–T8 已实现锁、扫描、writer、恢复修复、core 交付/投影/协调、操作期限/监督，以及 SessionStore/list 与 CLI/REPL 接线。本文整体仍为 `draft`；T9 当前为 `partial`/未勾选，本机矩阵和真实进程证据已补，用户已接受已知低频 SIGINT test-harness 观察风险；原 4 秒超限未定位，不声称根因已修复，唯一剩余签收条件为托管 CI，尚待运行；T10 本地预收口完成/未勾选，最终签收待 CI。各任务交付时的范围与历史验证见下文。
 
 - [SessionLockAdapter](../../src/adapters/session/SessionLockAdapter.ts) 的 preflight 不创建目录/锁；acquire(sessionId) 以 exnb 返回 SessionLock，assertOwnership 检查路径/描述符 dev/ino 和目录身份，release 等检查完成后关闭描述符，保留稳定锁文件。调用方必须先关闭正文再释放。
 - probe(sessionId) 对已有文件以只读 fd + shnb 返回 busy/available/unknown；本进程登记直接 busy，不为自己的锁增加 fd。缺路径/能力不明为 unknown，探测结果不授权写入。根默认 ~/.yucli，可注入隔离根；根的父目录需存在，T2 不代建 home。
@@ -318,7 +318,7 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 - [CLI 行为契约](cli.md)的阶段 04 `draft` 扩展
 - [REPL 与内存会话契约](repl.md)的阶段 04 `draft` 扩展
 - [工具执行契约](tool-execution.md)的阶段 04 `draft` 扩展
-- 已实现 T2–T8：会话 contracts、锁/扫描/writer/修复/操作期限、core 事实/投影/协调，以及 bootstrap 监督、完整 store/list 和 CLI/REPL 接线；T9 为 `partial`，本机矩阵/真实退出及重启恢复证据已补，原 SIGINT 超限和托管 CI 仍待收口；T10 本地预收口完成，最终签收待 CI
+- 已实现 T2–T8：会话 contracts、锁/扫描/writer/修复/操作期限、core 事实/投影/协调，以及 bootstrap 监督、完整 store/list 和 CLI/REPL 接线；T9 为 `partial`/未勾选，本机矩阵/真实退出及重启恢复证据已补，SIGINT 观察风险已接受，唯一剩余签收条件为托管 CI，尚待运行；T10 本地预收口完成/未勾选，最终签收待 CI
 - 运行时验收：阶段 04 规格第 12 节 C/E 矩阵；实现前不宣称类型声明或锁探针通过即为应用验收
 
 
@@ -326,4 +326,4 @@ v1 只接受 `formatVersion: 1`。未知事件、额外字段、非法顺序、�
 
 本机新增 `sessionProcess`、`sessionProcessFault`、`sessionTerminal` 三个测试文件、56 项；目标 macOS arm64 / Node 24.14.0 / pnpm 10.33.2 全套 **27 文件/1057 项**及 typecheck/lint/build 通过。源码与构建产物均覆盖真实重启/恢复、SIGSTOP/SIGKILL 锁、30 秒超时后保持锁、迟到 I/O 的完成/拒绝、5 秒关闭失败的应急退出、备份/truncate/补 LF 中断后二次打开，以及真实 PTY picker/Ctrl+C/EOF/单边 TTY。模型仅使用本地 mock SSE，存储只使用临时 HOME；故障注入仅存在于 tests preload，没有生产故障开关。
 
-目标机还由 Agent 逐步操作真实终端完成源码创建与构建产物恢复冒烟，验证历史、seq 和释放锁。详细 46 行矩阵、命令、实际文件和限制见[阶段规格 T9 报告](../specs/phase-04-session-persistence.md#t9-集成验收实际结果与开发报告2026-10-30)。用户首轮复核1056/1057，已修正测试共享60 ms请求期限和跨输出管道等待，新增受控管道乱序回归与真实I/O settle诊断；原源码SIGINT 4秒超限仍未定位，托管CI workflow未运行，T9保持partial/尚不能签收；T10/整个阶段完成审查尚未执行，扩展契约仍为 draft。本记录不改变上文接口、存储格式或历史交付语义。
+目标机还由 Agent 逐步操作真实终端完成源码创建与构建产物恢复冒烟，验证历史、seq 和释放锁。详细 46 行矩阵、命令、实际文件和限制见[阶段规格 T9 报告](../specs/phase-04-session-persistence.md#t9-集成验收实际结果与开发报告2026-10-30)。用户首轮复核 1056/1057 的失败记录保留；已修正共享 60 ms 请求期限和跨输出管道等待，新增受控管道乱序回归、真实 I/O settle 诊断及取消保存确认屏障断言。最新三次全套均为 27 文件/1057 项通过，400 次并发 SIGINT 无非预期失败。2026-11-04 用户已接受已知低频 SIGINT test-harness 观察风险；原源码 SIGINT 4 秒超限仍未定位，4 秒窗口不变、无自动重试，不声称根因已修复。T9 保持 `partial`/未勾选，唯一剩余签收条件为托管 CI，尚待运行；T10 本地预收口完成/未勾选，最终签收待 CI，阶段保持 `implementing`，扩展契约仍为 `draft`。本记录不改变上文接口、存储格式或历史交付语义。

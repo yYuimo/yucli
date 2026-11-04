@@ -2,7 +2,7 @@
 
 状态：`accepted`
 
-日期：2026-10-27（Asia/Shanghai）。调研已收口，本记录随阶段 04 规格提交评审；用户已完成评审并接受该设计，T2–T9 的局部实现状态见文末，T9 当前为 `partial`，整个阶段尚未验收。
+日期：2026-10-27（Asia/Shanghai）。调研已收口，本记录随阶段 04 规格提交评审；用户已完成评审并接受该设计，T2–T9 的局部实现状态见文末。2026-11-04 用户已接受已知低频 SIGINT test-harness 观察风险；T9 当前为 `partial`/未勾选，唯一剩余签收条件为托管 CI，尚待运行。T10 本地预收口完成/未勾选，阶段保持 `implementing`，四份扩展契约仍为 `draft`。
 
 入口修订：2026-10-28（Asia/Shanghai）。按用户建议参考 Codex CLI/Pi，增加默认 picker、continue 最近会话和 /new 主命令；这些入口已纳入本次 accepted 决策。
 
@@ -43,7 +43,7 @@ mkdir 占位锁无需原生依赖，但崩溃后自动接管与清理竞态未�
 
 - [阶段 04 规格](../specs/phase-04-session-persistence.md)
 - [会话持久化调研报告](../research/session-persistence-research.md)
-- [现有 REPL 契约](../contracts/repl.md)、[工具执行契约](../contracts/tool-execution.md)、[CLI 契约](../contracts/cli.md)：阶段 04 扩展已同步 T8 子集与 T9 `partial` 状态，T10 本地预收口完成，最终签收仍待 CI。
+- [现有 REPL 契约](../contracts/repl.md)、[工具执行契约](../contracts/tool-execution.md)、[CLI 契约](../contracts/cli.md)：阶段 04 扩展已同步 T8 子集与 T9 `partial`/未勾选、SIGINT 观察风险已接受、CI 待运行的状态；T10 本地预收口完成/未勾选，最终签收仍待 CI。
 - [会话存储契约](../contracts/session-store.md)已固定阶段 04 的跨层边界，状态为 `draft`，待实现和运行时验证后接受。
 - T2–T5 已实现 contracts/session 业务数据/稳定错误/writer 能力，以及 adapters/session 的锁、扫描、新文件/writer 和存储恢复/修复；T5 通过目标测试，并获用户授权独立提交。T5 沿用本决策，修改后失败保留实际字节与备份，不增加回滚、自动重放或新锁算法。
 - T6 新增可等待事实 sink、逐项执行屏障、ToolExecutionError 和实时/恢复共用纯模型投影；合法工具输出先保留为 ToolResult，再检查取消。恢复仅消费 T5 的 success 业务组，返回最后 20 组消息，不重建执行、不让 adapter 依赖 core。新增 57 项测试，目标环境 17 文件/749 项及 typecheck/lint/build 全部通过，并获用户授权独立提交。T6 交付时尚未接入协调与产品入口；T7/T8 现已补齐，T2–T8 子集验证仍不等于整个阶段验收。
@@ -51,6 +51,6 @@ mkdir 占位锁无需原生依赖，但崩溃后自动接管与清理竞态未�
 
 - T8 已实现 SessionStore/list、CLI 互斥与配置顺序、共享行式 picker、持久化 REPL 和生产组合根监督接线。list 复用扫描/probe、只读无索引；人工选择无期限，底层 I/O 仍受 30 秒与真实收尾约束。只有成功凭证提交模型历史；恢复不重放工具/请求。
 - 本轮按用户确认收口 picker 访问拒绝：释放候选后保留原编号→ID 快照，**仅 a/r** 再 list/重建编号；启动/REPL picker 可重选，REPL 保留旧会话/历史。直接 ID/continue 失败为 5，不回退、不新建；PersistenceError、lock_unavailable、platform_unsupported 不留在 picker 重试。此为既有“编号快照”和拒绝策略的明确化，不改存储格式或锁算法。
-- T8 目标环境新增 4 测试文件/172 项，全套 24 文件/1000 项及 typecheck/lint/build 通过，T7/T8交付时未提交，现已按2026-11-02授权分批提交到阶段分支。T9 完整阶段矩阵、真实强制退出/重启恢复及人工 TTY 验收、T10 完成审查均未完成；整体阶段保持 implementing，ADR 的 accepted 设计状态不等于运行时阶段已验收。
+- T8 目标环境新增 4 测试文件/172 项，全套 24 文件/1000 项及 typecheck/lint/build 通过，T7/T8交付时未提交，现已按2026-11-02授权分批提交到阶段分支。T8 交付时尚未完成 T9 完整阶段矩阵、真实强制退出/重启恢复及人工 TTY 验收和 T10 完成审查；后续结果见下条，整体阶段保持 implementing，ADR 的 accepted 设计状态不等于运行时阶段已验收。
 
-- 2026-10-30 T9 沿用既有决策，只新增测试/CI：本机 A–E 矩阵关联证据、源码/产物的真实重启/锁/故障退出、修复前后 SIGKILL 和 PTY 交互均已验证，新增 3 文件/56 项，全套 27 文件/1057 项及 typecheck/lint/build 通过。测试专用 preload 不进入生产 CLI，不改格式、锁或超时策略。用户首轮复核1056/1057，已修正测试共享60 ms请求期限和跨管道观察竞态，保留全部失败记录；原并行SIGINT 4秒超限仍未定位，托管CI定义未运行，T9为partial/不能签收；T10 审查和阶段 verified/done 不在本轮。
+- 2026-10-30 T9 沿用既有决策，只新增测试/CI：本机 A–E 矩阵关联证据、源码/产物的真实重启/锁/故障退出、修复前后 SIGKILL 和 PTY 交互均已验证，新增 3 文件/56 项，全套 27 文件/1057 项及 typecheck/lint/build 通过。测试专用 preload 不进入生产 CLI，不改格式、锁或超时策略。用户首轮复核 1056/1057，已修正测试共享 60 ms 请求期限和跨管道观察竞态，保留全部失败记录；后续 `92484fe` 补充取消时间线和保存确认屏障断言，最新三次全套均为 27 文件/1057 项通过，400 次并发 SIGINT 无非预期失败。2026-11-04 用户已接受已知低频 SIGINT test-harness 观察风险；原 4 秒超限仍未定位，4 秒窗口不变、无自动重试，不声称根因已修复。T9 为 `partial`/未勾选，唯一剩余签收条件为托管 CI，尚待运行；T10 本地预收口完成/未勾选，阶段仍为 `implementing`，四份扩展契约保持 `draft`。
