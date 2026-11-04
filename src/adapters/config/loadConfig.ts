@@ -4,17 +4,39 @@ import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
 import { ConfigError } from "../../contracts/llm-client.js";
 
-/** adapters 层读取并校验后的配置，由 bootstrap 传给模型客户端。 */
+/**
+ * loadConfig 读取环境变量/.env 并校验之后生成的运行配置，供 CLI 组装模型调用。
+ * 与 ConfigOptions 不同：这是加载结果，所有字段必需，缺省值已经补齐，超时已转为数字。
+ * CLI 把 model 交给循环，把连接参数交给 OpenCodeGoClient；不将整个对象发给模型。
+ * 接口本身不提供校验，只有经过 loadConfig 的运行时检查才能保证这里的约束。
+ */
 export interface RuntimeConfig {
+  /** 非空且可用于 HTTP 头的密钥，只放入 Authorization；禁止打印或放进消息。 */
   apiKey: string;
+
+  /** API 根地址，末尾斜线已去除；客户端再追加 /chat/completions。 */
   baseUrl: string;
+
+  /** 提供方模型标识，缺省为 deepseek-v4-flash，不是 API 根地址的一部分。 */
   model: string;
+
+  /** 单次 HTTP 请求的超时毫秒数，含响应体读取；允许 1—2147483647。 */
   timeoutMs: number;
 }
 
+/**
+ * 控制 loadConfig 从哪里读取配置的可选输入，主要用于测试隔离目录和环境变量。
+ * 调用方传入，loadConfig 读取；不属于运行结果，也不进入模型请求。
+ * 字段后的 ? 表示可以省略；整个参数默认 {}，因此 CLI 可以直接调用 loadConfig()。
+ */
 interface ConfigOptions {
-  // 测试可传临时目录和独立环境变量；CLI 不传时使用当前进程的值。
+  /** 查找 .env 的目录；省略时使用 process.cwd()，不向父目录搜索。 */
   cwd?: string;
+
+  /**
+   * 用于加载的环境变量集合；省略时采用 process.env，loadConfig 会复制后再合并 .env。
+   * NodeJS.ProcessEnv 的字段值可能是 string 或 undefined，加载后还必须补默认值并校验。
+   */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -26,7 +48,8 @@ interface ConfigOptions {
  *
  * @param options 可覆盖读取目录 cwd 和环境变量 env，供测试隔离配置来源；
  * 不传时使用当前工作目录和 process.env。
- * @returns 可直接供 CLI 使用的 apiKey、baseUrl、model、timeoutMs。
+ * @returns 可直接供 CLI 使用的 apiKey、baseUrl、model、timeoutMs；端点末尾斜线已去除，
+ * 超时已从字符串转成整数，其余可选项已补默认值，密钥仅交给 adapter 构造请求头。
  * @throws ConfigError 文件读取失败（除文件不存在外），或配置值不合法时抛出。
  * 只读取文件和环境变量，不修改全局 process.env，不发网络请求。
  */

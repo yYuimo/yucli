@@ -100,6 +100,7 @@ describe("OpenCodeGoClient 真实 HTTP 传输", () => {
     {}, { choices: [] }, { choices: [{ message: { role: "user", content: "text" } }] },
     { choices: [{ message: { role: "assistant", content: null } }] },
     { choices: [{ message: { role: "assistant", content: "   " } }] },
+    { ...completion(), usage: null },
     { ...completion(), usage: { prompt_tokens: -1 } },
     { ...completion(), usage: { completion_tokens: "4" } },
   ])("拒绝非法成功响应 %#", async (body) => {

@@ -2,7 +2,11 @@
 
 状态：`accepted`
 
-适用阶段：阶段 01 单次模型问答。
+阶段 02 扩展状态：`accepted`
+
+阶段 03 流式扩展状态：`accepted`（阶段 03 已实现并通过本地及真实验证）
+
+适用阶段：阶段 01 单次模型问答；阶段 02 工具调用和 AgentLoop；阶段 03 REPL 与流式输出。
 
 ## 目的
 
@@ -11,16 +15,54 @@
 ## TypeScript 接口
 
 ```ts
-export type MessageRole = "system" | "user" | "assistant";
+export type MessageRole = "system" | "user" | "assistant" | "tool";
 
-export interface Message {
-  role: MessageRole;
+export interface TextMessage {
+  role: "system" | "user";
   content: string;
+}
+
+export interface AssistantMessage {
+  role: "assistant";
+  // 工具调用响应可以没有 content，或由 adapter 将 null 规范化为空字符串。
+  content?: string;
+  toolCalls?: readonly ToolCall[];
+}
+
+export interface ToolMessage {
+  role: "tool";
+  toolCallId: string;
+  name?: string;
+  content: string;
+}
+
+export type Message = TextMessage | AssistantMessage | ToolMessage;
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  argumentsJson: string;
+}
+
+export interface ToolDefinition {
+  // 阶段 02 只有 read_file；多工具阶段再放宽名称类型。
+  name: "read_file";
+  description: string;
+  parameters: JsonSchema;
+}
+
+export interface JsonSchema {
+  type: "object";
+  properties: Record<string, { type: "string"; description?: string }>;
+  required: readonly string[];
+  additionalProperties: false;
 }
 
 export interface LlmRequest {
   model: string;
   messages: Message[];
+  // 阶段 01 不提供此字段；阶段 02 只有注册工具时才发送非空数组。
+  tools?: readonly ToolDefinition[];
 }
 
 export interface LlmUsage {
@@ -31,28 +73,53 @@ export interface LlmUsage {
 export interface LlmResponse {
   message: {
     role: "assistant";
-    content: string;
+    content?: string;
+    toolCalls?: readonly ToolCall[];
   };
+  // 保留 OpenAI 兼容响应的 finish_reason，供 AgentLoop 判断截断。
+  finishReason?: string;
   usage?: LlmUsage;
 }
 
 export interface LlmClient {
   complete(request: LlmRequest, signal?: AbortSignal): Promise<LlmResponse>;
+
+  /**
+   * 以 provider-neutral 事件流返回一次模型响应；阶段 03 新增，保留 complete 的既有语义。
+   * OpenCodeGoClient 负责 SSE 和外部字段转换，core 负责消费 delta、拼装工具并决定下一轮。
+   * 网络、协议、超时和取消通过 async generator 抛出，不伪装成正常事件。
+   */
+  stream(request: LlmRequest, signal?: AbortSignal): AsyncGenerator<LlmStreamEvent>;
 }
+
+export type LlmStreamEvent =
+  | { type: "text_delta"; text: string }
+  | {
+      type: "tool_call_delta";
+      index: number;
+      id?: string;
+      name?: string;
+      argumentsDelta?: string;
+    }
+  | { type: "message_end"; finishReason?: string }
+  | { type: "usage"; usage: LlmUsage };
 ```
 
-阶段 01 不在公共接口中暴露工具调用、流式 chunk、提供方专属字段或原始 HTTP 响应。
+阶段 01 的无工具调用方式保持兼容；阶段 02 已增加工具定义、工具消息、工具调用和 `finishReason`；阶段 03 的 `stream()` 只暴露 provider-neutral 事件，不暴露原始 SSE chunk。
 
-代码位置：数据结构在 `src/contracts/message.ts`，`LlmClient` 与稳定错误在 `src/contracts/llm-client.ts`。`core/runPrompt.ts` 只依赖这两个契约模块；`adapters/opencode-go/OpenCodeGoClient.ts` 实现接口，并自行声明构造参数类型，不依赖配置加载器。
+代码位置：数据结构在 `src/contracts/message.ts`，`LlmClient` 与稳定错误在 `src/contracts/llm-client.ts`。`core/runPrompt.ts` 保留直接调用方式；阶段 02 的 `core/agentLoop.ts` 另依赖工具/循环契约；`adapters/opencode-go/OpenCodeGoClient.ts` 实现接口，并自行声明构造参数类型，不依赖配置加载器。
 
 ## 调用约定
 
 - `messages` 保持调用方给出的顺序。
-- 阶段 01 只传入 `system`、`user` 和 `assistant` 消息；默认应用不主动添加 system message。
+- 阶段 01 只传入 `system`、`user` 和 `assistant` 文本消息；阶段 02 允许 `assistant` 工具调用和 `tool` 结果消息；默认应用不主动添加 system message。
 - 客户端不得修改调用方传入的请求对象或消息数组。
-- `complete()` 成功时必须返回一个 role 为 `assistant`、content 非空白的文本，保留原始空格和换行。可选 token 用量存在时必须为非负整数。
+- `complete()` 成功时必须返回 role 为 `assistant` 的响应；阶段 01 要求 content 非空白，阶段 02 要求非空白文本或至少一个合法工具调用，满足其一即可。两者都没有时是 `ResponseError`。
+- 阶段 02 的 `finishReason` 必须保留；值为 `length` 时是 `ResponseError`，不能执行其中的工具调用。
+- `tools` 为空或未提供时，adapter 不得在 JSON 请求体中输出 `tools` 字段。
 - `complete()` 失败时抛出 yucli 定义的稳定错误类型，不把 HTTP 库原始异常直接暴露给应用层。
 - `signal` 存在时，客户端将其取消事件转发给内部控制器，与超时合并后把内部 signal 传给 `fetch`；取消后不得继续把结果当作成功响应返回。
+- `stream()` 的每个调用使用独立请求和资源；generator 成功结束、异常、取消或被提前关闭时都必须清理 reader、定时器和监听器。
 
 ## OpenCode Go 适配
 
@@ -91,11 +158,13 @@ x-opencode-session: <每次请求独立的 UUID>
 ```text
 choices[0].message.role
 choices[0].message.content
+choices[0].message.tool_calls
+choices[0].finish_reason
 usage.prompt_tokens
 usage.completion_tokens
 ```
 
-`x-opencode-session` 是 OpenCode Go 的必需路由扩展，由适配器使用 `randomUUID()` 逐次生成，不放入公共请求对象或模型消息。阶段 01 每次请求即一次独立问答；未来多轮会话需要重新设计其生命周期，见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。
+`x-opencode-session` 是 OpenCode Go 的必需路由扩展，由适配器使用 `randomUUID()` 逐次生成，不放入公共请求对象或模型消息。阶段 01 每次请求即一次独立问答；阶段 02/03 多轮仍逐请求生成独立 UUID，真实结果支持当前策略，见 [ADR-002](../decisions/ADR-002-opencode-session-routing.md)。
 
 `reasoning_content` 不作为阶段 01 的最终输出。未知字段允许存在；必需字段缺失或类型不正确时拒绝响应。
 
@@ -109,10 +178,37 @@ usage.completion_tokens
 | `RequestError` | 网络、超时或 HTTP 非 2xx | 显示安全的请求错误，返回模型错误退出码 |
 | `ResponseError` | 2xx 响应不符合协议 | 显示响应解析错误，返回模型错误退出码 |
 | `AbortError` | 调用方取消请求 | 阶段 01 显示取消信息并返回非零退出码 |
+| `AgentLoopError` | 阶段 02 的循环上限或工具协议错误 | CLI 显示安全错误，返回模型错误退出码 4 |
+
+阶段 02 的 `AgentLoopError.code` 为：
+
+```text
+loop_limit      # 第 8 次模型响应仍请求工具，或达到配置的模型调用上限
+protocol_error  # 工具批次结构非法、工具批次超过 4 个或循环协议不合法
+```
 
 非 2xx 响应体最多读取 512 字节作为诊断摘要；脱敏已知 API key（包括截断处的前缀）和 Authorization/Bearer 内容，去除控制字符，再将摘要限制到 512 字节。错误消息不暴露底层异常或原始响应。客户端不跟随 HTTP 重定向。
 
 `RequestError.code` 为 `network`、`timeout` 或 `http`；可用时附带 `status`，HTTP 错误附带已脱敏的 `responseSummary`。调用方取消使用 `AbortError`，CLI 将其映射为退出码 4。
+
+阶段 02 增加稳定的循环错误：
+
+```ts
+export type AgentLoopErrorCode = "loop_limit" | "protocol_error";
+
+export class AgentLoopError extends Error {
+  override name = "AgentLoopError";
+
+  constructor(
+    public readonly code: AgentLoopErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+```
+
+`AgentLoopError` 由 core 创建，bootstrap 只负责把它映射到退出码 4；它不应携带原始响应、绝对路径或密钥。
 
 ## 生命周期与资源
 
@@ -123,6 +219,14 @@ usage.completion_tokens
 
 ## 兼容性边界
 
-这个契约只依赖 OpenAI Chat Completions 的最小公共字段。若后续加入流式、工具调用或提供方扩展，应新增字段和测试，并在阶段文档或 ADR 中记录兼容性影响，不能静默改变 `complete()` 的语义。
+这个契约只依赖 OpenAI Chat Completions 的最小公共字段。阶段 02 的工具调用扩展和阶段 03 的流式事件必须分别与 [工具执行契约](tool-execution.md)、[流式契约](streaming.md) 和 [OpenCode Go HTTP 契约](opencode-go-http.md) 同步；若后续加入 reasoning、重连、提供方扩展或更多工具，应新增事件和测试，并在阶段文档或 ADR 中记录兼容性影响，不能静默改变 `complete()` 的语义。
 
-关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)。
+关联文档：[阶段 01 规格](../specs/phase-01-single-model.md)、[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)、[阶段 03 规格](../specs/phase-03-repl-streaming.md)。
+
+实现分工：adapter 校验 HTTP 外层、tool_calls 的字段与 ID、finish_reason 类型及截断；core 在执行任何工具前检查整批数量、ID 和参数结构。参数 JSON 或 `{path:string}` 不合法抛 AgentLoopError(protocol_error)，不会先执行同批的合法调用。契约验证记录见[阶段 02 规格](../specs/phase-02-read-file-agent-loop.md)。
+
+## 阶段 03 实现与验证
+
+`LlmStreamEvent` 位于 [message.ts](../../src/contracts/message.ts)，[runTurnStream](../../src/core/runTurnStream.ts) 消费 stream 并在成功后返回新增消息。非流式 runPrompt/agentLoop 用 `Pick<LlmClient, "complete">` 表达最小能力要求，旧调用方不必实现无关 stream。
+
+SSE 中间帧的 `usage:null` 不构成用量对象，忽略而不发事件；完整对象用量独立发出且等值去重。complete 仍沿用原有严格对象校验。协议和真实验证结果见阶段 03 规格。
